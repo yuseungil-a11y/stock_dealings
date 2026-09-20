@@ -6,9 +6,16 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 from ..algo import registry
-from ..algo.params import ParamError, enum_choices, validate
+from ..algo.params import ParamError, ParamSet, enum_choices, validate
+from ..algo.risk_guard import limit_preview
+from ..algo.universe_filter import CODE as UNIVERSE_CODE
+from ..algo.universe_filter import UniverseOptions
 
 log = logging.getLogger(__name__)
+
+RISK_CODE = "risk_guard"
+# [유효 한도 미리보기] 패널을 붙이는 알고리즘
+LIMIT_PANEL_CODES = (RISK_CODE, UNIVERSE_CODE)
 
 
 class AlgoTab(ttk.Frame):
@@ -58,6 +65,13 @@ class AlgoTab(ttk.Frame):
         self.canvas.pack(side="left", fill="both", expand=True)
         ybar.pack(side="right", fill="y")
         self._desc_labels: list[ttk.Label] = []
+        self.bind_all("<MouseWheel>", self._on_wheel, add="+")
+
+        # 알고리즘별 부가 패널(대상 종목 미리보기 / 유효 한도 미리보기)
+        self.extra = ttk.Frame(right)
+        self.extra.pack(fill="x", pady=(6, 0))
+        self._limit_var = tk.StringVar(value="")
+        self._limit_warn_var = tk.StringVar(value="")
 
         btns = ttk.Frame(right)
         btns.pack(fill="x", pady=(6, 0))
@@ -131,6 +145,7 @@ class AlgoTab(ttk.Frame):
         defs = a.get("param_defs") or []
         if not defs:
             ttk.Label(self.form, text="(편집할 파라미터가 없습니다)").grid(row=0, column=0, sticky="w")
+            self._build_extra(a)
             return
         # 파라미터 1개 = 2줄: [라벨 | 입력칸] 아래에 [단위·범위·기본값 — 설명] 을 폭에 맞춰 줄바꿈
         # (창을 좁혀도 오른쪽이 잘리지 않도록 한 줄에 여러 열을 두지 않는다)
@@ -153,9 +168,135 @@ class AlgoTab(ttk.Frame):
             lbl = ttk.Label(self.form, text=text, foreground="#777777", wraplength=360, justify="left")
             lbl.grid(row=r + 1, column=1, columnspan=2, sticky="w", padx=(0, 6), pady=(0, 2))
             self._desc_labels.append(lbl)
+        self._build_extra(a)
         self.after_idle(self._fit_desc_width)
 
+    # ================================================================== #
+    # 부가 패널 — 대상 종목 미리보기 / 유효 한도 미리보기
+    # ================================================================== #
+    def _build_extra(self, a: dict) -> None:
+        for w in self.extra.winfo_children():
+            w.destroy()
+        code = a.get("code")
+        if code == UNIVERSE_CODE:
+            row = ttk.Frame(self.extra)
+            row.pack(fill="x")
+            ttk.Button(row, text="대상 종목 미리보기",
+                       command=self.open_universe_preview).pack(side="left")
+            ttk.Label(row, text="지금 폼에 입력된 값(저장 전) 기준 · 종목마스터만 조회",
+                      foreground="#777777").pack(side="left", padx=8)
+        if code in LIMIT_PANEL_CODES:
+            box = ttk.LabelFrame(self.extra, text="유효 한도 미리보기", padding=6)
+            box.pack(fill="x", pady=(6, 0))
+            ttk.Label(box, textvariable=self._limit_var, justify="left",
+                      foreground="#333333").pack(anchor="w")
+            ttk.Label(box, textvariable=self._limit_warn_var, justify="left",
+                      foreground="#c62828", wraplength=520).pack(anchor="w", pady=(2, 0))
+            ttk.Button(box, text="다시 계산", command=self.refresh_limit_preview).pack(
+                anchor="e", pady=(4, 0))
+            self.refresh_limit_preview()
+
+    # -- 폼/저장값 읽기 -------------------------------------------------- #
+    def _form_values(self) -> dict[str, str]:
+        """지금 폼에 입력돼 있는 값(저장 전, 검증 전)."""
+        out: dict[str, str] = {}
+        for key, (_d, var) in self._param_widgets.items():
+            try:
+                raw = var.get()
+            except tk.TclError:
+                continue
+            out[key] = "1" if raw is True else ("0" if raw is False else str(raw))
+        return out
+
+    def _algo_by_code(self, code: str) -> dict | None:
+        return next((a for a in self.algos if a.get("code") == code), None)
+
+    def _params_for(self, code: str) -> ParamSet | None:
+        """그 알고리즘의 현재 파라미터. 지금 편집 중이면 **폼 값**을 쓴다."""
+        a = self._algo_by_code(code)
+        if not a:
+            return None
+        defs = a.get("param_defs") or []
+        values = self._form_values() if a["id"] == self.selected_id else dict(a.get("params") or {})
+        return ParamSet(defs, values)
+
+    def _asset(self) -> int | None:
+        db = self.app.db
+        acct = getattr(self.app, "account_id", None)
+        account_id = acct() if callable(acct) else acct   # 실제 App 에서는 메서드 -> 호출해야 계좌 번호
+        if not db or not account_id:
+            return None
+        try:
+            bal = db.latest_balance(account_id) or {}
+            return int(bal.get("prsm_dpst_aset_amt") or 0) or None
+        except Exception:  # noqa: BLE001 - 미리보기일 뿐이므로 조용히 '확인 불가'
+            log.debug("총자산 조회 실패(유효 한도 미리보기)", exc_info=True)
+            return None
+
+    def _min_price_in_effect(self) -> int:
+        """universe_filter 가 켜져 있거나 지금 편집 중일 때의 최소 주가."""
+        a = self._algo_by_code(UNIVERSE_CODE)
+        if not a:
+            return 0
+        if not (bool(a.get("is_enabled")) or a["id"] == self.selected_id):
+            return 0
+        params = self._params_for(UNIVERSE_CODE)
+        return params.int("min_price", 0) if params else 0
+
+    def current_limit_preview(self):
+        """폼 값 기준 유효 한도(순수 계산). 계산할 수 없으면 None."""
+        rg = self._params_for(RISK_CODE)
+        if rg is None:
+            return None
+        return limit_preview(
+            self._asset(),
+            rg.int("max_total_invest", 0), rg.dec("max_total_invest_pct", 100),
+            rg.int("max_invest_per_stock", 0), rg.dec("max_invest_per_stock_pct", 100),
+            self._min_price_in_effect())
+
+    def refresh_limit_preview(self) -> None:
+        prev = self.current_limit_preview()
+        if prev is None:
+            self._limit_var.set("(risk_guard 파라미터를 찾을 수 없습니다)")
+            self._limit_warn_var.set("")
+            return
+        self._limit_var.set(
+            f"총자산(추정예탁자산) : {prev.asset_text}\n"
+            f"종목당 유효 한도 : {prev.per_limit:,}원   ← {prev.per_desc}\n"
+            f"총 투입 유효 한도 : {prev.total_limit:,}원   ← {prev.total_desc}"
+            + (f"\n최소 주가(universe_filter) : {prev.min_price:,}원"
+               if prev.min_price else ""))
+        self._limit_warn_var.set(f"⚠ {prev.warning}" if prev.has_warning else "")
+
+    def open_universe_preview(self) -> None:
+        from .universe_preview import UniversePreviewDialog
+
+        db = self.app.db
+        params = self._params_for(UNIVERSE_CODE)
+        if not db or params is None:
+            return
+        # 저장 전 값이라도 폼 값 자체가 정의를 벗어나면 먼저 알려준다
+        errors = list(params.invalid)
+        opts = UniverseOptions.from_params(params)
+        errors += opts.errors()
+        if errors:
+            messagebox.showerror("파라미터 오류", "\n".join(errors[:5]), parent=self)
+            return
+        UniversePreviewDialog(self.winfo_toplevel(), db, opts)
+
     # ------------------------------------------------------------------ #
+    def _on_wheel(self, event) -> None:
+        """마우스 휠: 포인터가 파라미터 폼 위에 있고 이 탭이 보일 때만 폼을 스크롤한다."""
+        c = self.canvas
+        try:
+            if not c.winfo_ismapped():
+                return
+            x, y = c.winfo_rootx(), c.winfo_rooty()
+            if x <= event.x_root <= x + c.winfo_width() and y <= event.y_root <= y + c.winfo_height():
+                c.yview_scroll(int(-event.delta / 120) or (-1 if event.delta > 0 else 1), "units")
+        except tk.TclError:
+            pass
+
     def _on_canvas_configure(self, event) -> None:
         """캔버스 폭 변경 시 폼 폭을 맞추고 설명 열의 줄바꿈 폭을 다시 계산한다."""
         self.canvas.itemconfigure(self._form_win, width=event.width)
@@ -211,6 +352,12 @@ class AlgoTab(ttk.Frame):
                 normalized[key] = validate(d, raw)
             except ParamError as exc:
                 errors.append(str(exc))
+        if not errors:
+            # 정의(타입·min/max)만으로는 표현할 수 없는 파라미터 간 제약(예: 최대 주가 < 최소 주가)
+            cls = registry.get(a["code"])
+            if cls is not None:
+                errors += registry.cross_errors(cls, ParamSet(a.get("param_defs") or [],
+                                                              normalized))
         if errors:
             messagebox.showerror("파라미터 오류", "\n".join(errors), parent=self)
             return
@@ -221,9 +368,17 @@ class AlgoTab(ttk.Frame):
                     changed += 1
             except Exception:  # noqa: BLE001
                 log.exception("파라미터 저장 실패 %s", key)
-        self.status_var.set(f"{changed}개 항목 저장됨")
+        # 저장은 허용하되, 1주도 살 수 없는 조합이면 상태 라벨에 경고를 남긴다
+        warning = ""
+        if a["code"] in LIMIT_PANEL_CODES:
+            prev = self.current_limit_preview()
+            if prev is not None and prev.has_warning:
+                warning = prev.warning
+        self.status_var.set(f"{changed}개 항목 저장됨" + (f"  ⚠ {warning}" if warning else ""))
         if changed:
             self.app.log_event("INFO", "algo", f"파라미터 변경: {a['code']} {changed}건")
+        if warning:
+            self.app.log_event("WARN", "algo", f"{a['code']} 파라미터 경고: {warning}")
         self.reload()
 
     def restore_defaults(self) -> None:

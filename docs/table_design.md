@@ -2,7 +2,7 @@
 
 > `tools/gen_table_doc.py` 가 실제 DB 에서 자동 생성한 문서입니다(직접 수정 금지). 원본 DDL: `db/schema.sql`, 초기 데이터: `db/seed.sql`.
 
-- DBMS: MariaDB 10.11, 문자셋 utf8mb4, 총 **25개 테이블**
+- DBMS: MariaDB 10.11, 문자셋 utf8mb4, 총 **29개 테이블** + 뷰 1개
 - 금액/수량/가격 = BIGINT, 비율(%) = DECIMAL(12,4), 시각 = DATETIME(KST)
 - 키움 API 문자열 값(부호·0패딩)은 서버모듈이 정수로 파싱해 저장
 - 권한: `stock_svr`(서버, SELECT/INSERT/UPDATE/DELETE) · `stock_web`(웹, SELECT 전용 + `app_login_log` INSERT + `app_user` 일부 컬럼 UPDATE)
@@ -227,6 +227,10 @@
 | `is_dry_run` | tinyint(1) | N |  | 0 | 1=신호만 기록하고 전송하지 않음 |
 | `created_at` | datetime | N |  | current_timestamp() |  |
 | `updated_at` | datetime | N |  | current_timestamp() |  |
+| `signal_price` | bigint(20) | Y |  | NULL | 신호 발생 시점 기준가(슬리피지 계산용) |
+| `signal_context` | text | Y |  | NULL | 신호 맥락 JSON(kind/score/meta 등) |
+| `params_snapshot` | text | Y |  | NULL | 주문 시점 알고리즘 파라미터 JSON(risk_guard+진입알고리즘) |
+| `reject_reason` | varchar(255) | Y |  | NULL | 거래소 거부사유 |
 
 ### `executions`
 
@@ -433,4 +437,102 @@
 | `return_msg` | varchar(255) | Y |  | NULL |  |
 | `elapsed_ms` | int(11) | Y |  | NULL |  |
 | `created_at` | datetime | N | MUL | current_timestamp() |  |
+
+## 거래 분석 기록(영구 보관)
+
+### `order_event`
+
+주문 상태 변화 이력(접수→부분체결→체결/거부/취소). 영구 보관
+
+| 컬럼 | 타입 | NULL | 키 | 기본값 | 설명 |
+|---|---|---|---|---|---|
+| `id` | bigint(20) unsigned | N | PRI |  |  |
+| `order_id` | bigint(20) unsigned | Y | MUL | NULL | orders.id |
+| `account_id` | int(10) unsigned | Y | MUL | NULL |  |
+| `ord_no` | varchar(20) | Y |  | NULL |  |
+| `event_time` | datetime | N | MUL | current_timestamp() |  |
+| `event_type` | enum('CREATED','SENT','ACCEPTED','PARTIAL','FILLED','CANCELED','REJECTED','FAILED','UNKNOWN','MODIFIED','NOTE') | N |  |  |  |
+| `status` | varchar(20) | Y |  | NULL | 이 시점의 orders.status |
+| `filled_qty` | bigint(20) | Y |  | NULL |  |
+| `remain_qty` | bigint(20) | Y |  | NULL |  |
+| `price` | bigint(20) | Y |  | NULL | 체결가/주문가 |
+| `reject_reason` | varchar(255) | Y |  | NULL | 거래소 거부사유(WS 919 등) |
+| `return_code` | int(11) | Y |  | NULL |  |
+| `message` | varchar(255) | Y |  | NULL |  |
+| `source` | enum('EXECUTOR','WS','REST') | N |  | 'EXECUTOR' |  |
+
+### `event_archive`
+
+주요 이벤트 영구 보관본(WARN/ERROR + 주문·알고리즘·엔진 이벤트). event_log 는 7일 정리, 이 테이블은 archive_retention_days(기본 365일)
+
+| 컬럼 | 타입 | NULL | 키 | 기본값 | 설명 |
+|---|---|---|---|---|---|
+| `id` | bigint(20) unsigned | N | PRI |  |  |
+| `created_at` | datetime | N | MUL | current_timestamp() |  |
+| `level` | enum('DEBUG','INFO','WARN','ERROR') | N |  |  |  |
+| `category` | varchar(30) | N | MUL |  |  |
+| `message` | varchar(500) | N |  |  |  |
+
+### `api_error_log`
+
+키움 API 오류 응답만 영구 보관(정상 호출 로그 api_call_log 는 7일 정리)
+
+| 컬럼 | 타입 | NULL | 키 | 기본값 | 설명 |
+|---|---|---|---|---|---|
+| `id` | bigint(20) unsigned | N | PRI |  |  |
+| `created_at` | datetime | N | MUL | current_timestamp() |  |
+| `api_id` | varchar(10) | N | MUL |  |  |
+| `http_status` | smallint(6) | Y |  | NULL |  |
+| `return_code` | int(11) | Y |  | NULL |  |
+| `return_msg` | varchar(255) | Y |  | NULL |  |
+| `elapsed_ms` | int(11) | Y |  | NULL |  |
+
+## 기타
+
+- `llm_decision_log` — Claude 거부권 필터 판단 기록(모델·근거·토큰·결과). 1주일 이상 보관 가능
+
+## 분석용 뷰
+
+> 읽기 전용입니다. 서버 코드는 뷰에 쓰지 않습니다.
+
+### `v_trade_analysis`
+
+| 컬럼 | 타입 | NULL | 설명 |
+|---|---|---|---|
+| `signal_id` | bigint(20) unsigned | N |  |
+| `signal_time` | datetime | N |  |
+| `algo_code` | varchar(50) | N |  |
+| `signal_type` | enum('BUY','SELL','HOLD','BLOCK') | N | BLOCK=리스크/필터로 차단됨 |
+| `stk_cd` | varchar(12) | N |  |
+| `stk_nm` | varchar(60) | Y |  |
+| `score` | decimal(14,4) | Y |  |
+| `signal_detail` | varchar(500) | Y |  |
+| `order_id` | bigint(20) unsigned | Y |  |
+| `ord_no` | varchar(20) | Y | 키움 주문번호 (전송 실패 시 NULL) |
+| `side` | enum('BUY','SELL') | Y |  |
+| `order_kind` | enum('NEW','MODIFY','CANCEL') | Y |  |
+| `order_status` | enum('SIGNAL_ONLY','SENT','ACCEPTED','PARTIAL','FILLED','CANCELED','REJECTED','FAILED') | Y |  |
+| `is_dry_run` | tinyint(1) | Y | 1=신호만 기록하고 전송하지 않음 |
+| `trde_tp` | varchar(3) | Y | 매매구분 0:보통 3:시장가 ... |
+| `ord_qty` | bigint(20) | Y |  |
+| `ord_uv` | bigint(20) | Y | 주문단가(시장가는 NULL) |
+| `signal_price` | bigint(20) | Y | 신호 발생 시점 기준가(슬리피지 계산용) |
+| `filled_qty` | bigint(20) | Y |  |
+| `avg_fill_pric` | bigint(20) | Y |  |
+| `slippage_pct` | decimal(27,3) | Y |  |
+| `return_code` | int(11) | Y |  |
+| `return_msg` | varchar(255) | Y |  |
+| `reject_reason` | varchar(255) | Y | 거래소 거부사유 |
+| `order_reason` | varchar(255) | Y | 주문 사유(신호 설명) |
+| `signal_context` | text | Y | 신호 맥락 JSON(kind/score/meta 등) |
+| `params_snapshot` | text | Y | 주문 시점 알고리즘 파라미터 JSON(risk_guard+진입알고리즘) |
+| `order_time` | datetime | Y |  |
+| `exec_cnt` | bigint(21) | Y |  |
+| `exec_amount` | decimal(60,0) | Y |  |
+| `exec_fee_tax` | decimal(42,0) | Y |  |
+| `llm_model` | varchar(50) | Y |  |
+| `llm_decision` | enum('allow','block','error') | Y | error=호출 실패/무효 응답(fail_mode 적용) |
+| `llm_final` | enum('pass','block') | Y | 실제 파이프라인 결과(신뢰도·fail_mode 적용 후) |
+| `llm_confidence` | smallint(6) | Y | 0~100 |
+| `llm_reasons` | varchar(1000) | Y | Claude 가 제시한 근거(요약) |
 

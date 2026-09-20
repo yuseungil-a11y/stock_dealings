@@ -122,6 +122,13 @@ $canOrder = ($orderEnabled === '1') && ($mode === 'mock' || $realConfirm === '1'
       <h2>최근 이벤트</h2>
       <a class="btn btn-sm" href="<?= h(u('index.php?p=system.events')) ?>">전체 보기</a>
     </div>
+    <?php if ((int)($d['fail_24h'] ?? 0) > 0): ?>
+      <p class="failline">
+        <span class="failline-t">최근 24시간</span>
+        <span>주문 실패 · 거부 <strong data-k="fail_24h"><?= h(nfmt($d['fail_24h'])) ?></strong>건</span>
+        <a class="btn btn-sm" href="<?= h(u('index.php?p=trade.analysis&result=failed')) ?>">원인 보기</a>
+      </p>
+    <?php endif; ?>
     <?php if ($llm !== null && (int)$llm['total'] > 0): ?>
       <p class="llmline">
         <span class="llmline-t">오늘 Claude 검토</span>

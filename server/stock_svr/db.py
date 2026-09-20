@@ -37,6 +37,57 @@ GATE_CONFIRM_TOKEN = "stock_svr:gate-confirmed-by-ui"  # noqa: S105 - 비밀값 
 _GATE_OPENING_VALUES = {"order_enabled": "1", "real_trading_confirm": "1", "trading_mode": "real"}
 
 
+# ---------------------------------------------------------------------- #
+# 영구 보관 라우팅 (거래 성공/실패 사후 분석용)
+# ---------------------------------------------------------------------- #
+# `event_log`/`api_call_log` 는 7일 뒤 삭제되므로 실패 맥락이 사라진다.
+# 아래 규칙에 걸리는 이벤트만 `event_archive` 에 한 벌 더 남겨 장기 보관한다.
+ARCHIVE_LEVELS = ("WARN", "ERROR")
+ARCHIVE_CATEGORIES = ("order", "algo", "engine", "risk")
+# 반복 INFO 폭주 방지: 동기화·하트비트성 메시지는 보관 대상에서 뺀다
+ARCHIVE_NOISE_WORDS = ("heartbeat", "하트비트", "동기화")
+# 같은 (레벨, 분류, 메시지) 가 이 시간 안에 반복되면 1건만 보관한다
+ARCHIVE_DEDUP_SEC = 60
+# event_archive / api_error_log 보관기간 (system_setting.archive_retention_days)
+ARCHIVE_RETENTION_DEFAULT = 365
+ARCHIVE_RETENTION_MIN = 30
+
+# `purge_old`/`purge_archives` 가 건드려도 되는 테이블 (그 외는 절대 삭제하지 않는다)
+PURGEABLE_TABLES = ("event_log", "api_call_log", "screening_result",
+                    "event_archive", "api_error_log")
+
+
+def should_archive_event(level: str, category: str, message: str) -> bool:
+    """이 이벤트를 `event_archive` 에도 남길지 판단한다.
+
+    * WARN/ERROR 는 분류와 무관하게 보관한다.
+    * 그 외 레벨은 `order`/`algo`/`engine`/`risk` 분류만 보관하되,
+      동기화·하트비트처럼 반복되는 INFO 는 제외한다.
+    """
+    lv = str(level or "").upper()
+    if lv in ARCHIVE_LEVELS:
+        return True
+    if str(category or "").strip().lower() not in ARCHIVE_CATEGORIES:
+        return False
+    low = str(message or "").lower()
+    return not any(word in low for word in ARCHIVE_NOISE_WORDS)
+
+
+def should_log_api_error(http_status, return_code) -> bool:
+    """이 API 호출을 `api_error_log`(영구 보관)에도 남길지 판단한다."""
+    try:
+        if http_status is not None and int(http_status) >= 400:
+            return True
+    except (TypeError, ValueError):
+        pass
+    if return_code is None:
+        return False
+    try:
+        return int(return_code) != 0
+    except (TypeError, ValueError):
+        return True      # 해석 불가한 응답코드는 오류로 본다
+
+
 class GateChangeError(PermissionError):
     """주문 게이트 3키를 허용되지 않은 경로로 바꾸려 할 때."""
 
@@ -50,6 +101,9 @@ class Database:
         self._all_conns: list[Any] = []
         self._conn_lock = threading.Lock()
         self.last_error: str | None = None
+        # event_archive 중복 억제용 {(level, category, message): 마지막 기록시각}
+        self._archive_seen: dict[tuple[str, str, str], _dt.datetime] = {}
+        self._archive_lock = threading.Lock()
 
     # -- 커넥션 -------------------------------------------------------- #
     def _connect(self):
@@ -372,6 +426,22 @@ class Database:
         cnt = self.scalar("SELECT COUNT(*) FROM stock_master WHERE DATE(updated_at)=%s", (today,), default=0)
         return bool(cnt)
 
+    def stock_master_stats(self) -> dict:
+        """종목마스터 건수와 최신 갱신 시각 (universe_filter 순위 캐시 무효화 판단용)."""
+        row = self.query_one("SELECT COUNT(*) AS cnt, MAX(updated_at) AS updated_at FROM stock_master")
+        row = row or {}
+        return {"count": int(row.get("cnt") or 0), "updated_at": row.get("updated_at")}
+
+    def stock_master_universe(self, market_codes: Sequence[str] = ("0", "10")) -> list[dict]:
+        """시가총액 순위 계산에 쓰는 종목마스터 행(코스피·코스닥). 읽기 전용."""
+        codes = [str(c) for c in market_codes] or ["0", "10"]
+        holes = ",".join(["%s"] * len(codes))
+        return self.query(
+            "SELECT stk_cd, stk_nm, market_code, market_name, list_count, last_price, "
+            f"state, order_warning, updated_at FROM stock_master WHERE market_code IN ({holes})",
+            tuple(codes),
+        )
+
     def upsert_price_daily(self, stk_cd: str, bars: list[dict]) -> int:
         sql = (
             "INSERT INTO price_daily (stk_cd, dt, open_pric, high_pric, low_pric, cur_prc, trde_qty, trde_prica) "
@@ -519,9 +589,15 @@ class Database:
     }
 
     def insert_order(self, **f) -> int:
+        """주문 1행 기록.
+
+        `signal_price`/`signal_context`/`params_snapshot`/`reject_reason` 는 사후 분석용
+        선택 컬럼이다(주지 않으면 NULL — 기존 호출부와 호환).
+        """
         cols = ("account_id", "run_id", "algo_code", "ord_no", "orig_ord_no", "side", "order_kind",
                 "stk_cd", "stk_nm", "dmst_stex_tp", "trde_tp", "ord_qty", "ord_uv", "status",
-                "filled_qty", "avg_fill_pric", "reason", "return_code", "return_msg", "is_dry_run")
+                "filled_qty", "avg_fill_pric", "reason", "return_code", "return_msg", "is_dry_run",
+                "signal_price", "signal_context", "params_snapshot", "reject_reason")
         vals = []
         for c in cols:
             v = f.get(c)
@@ -532,12 +608,44 @@ class Database:
         return self.insert(sql, vals)
 
     def update_order(self, order_id: int, **f) -> int:
-        allowed = ("ord_no", "status", "filled_qty", "avg_fill_pric", "return_code", "return_msg", "is_dry_run")
+        allowed = ("ord_no", "status", "filled_qty", "avg_fill_pric", "return_code", "return_msg",
+                   "is_dry_run", "reject_reason")
         sets = {k: v for k, v in f.items() if k in allowed}
         if not sets:
             return 0
         sql = "UPDATE orders SET " + ", ".join(f"{k}=%s" for k in sets) + " WHERE id=%s"
         return self.execute(sql, list(sets.values()) + [order_id])
+
+    # -- order_event (주문 상태 변화 이력 · 영구 보관) -------------------- #
+    _ORDER_EVENT_COLS = ("order_id", "account_id", "ord_no", "event_time", "event_type", "status",
+                         "filled_qty", "remain_qty", "price", "reject_reason", "return_code",
+                         "message", "source")
+
+    def insert_order_event(self, **f) -> int:
+        """주문 상태 변화 1건 기록.
+
+        `orders` 는 최신 상태만 들고 있으므로, 접수→부분체결→체결/거부까지의 **경로**는
+        이 테이블에만 남는다(7일 정리 대상이 아님).
+        """
+        vals = []
+        for c in self._ORDER_EVENT_COLS:
+            v = f.get(c)
+            if c == "event_time" and v is None:
+                v = now_kst()
+            elif c == "source" and not v:
+                v = "EXECUTOR"
+            elif c in ("message", "reject_reason") and v is not None:
+                v = mask_text(str(v))[:255] or None
+            elif c in ("status", "ord_no") and v is not None:
+                v = str(v)[:20]
+            vals.append(v)
+        sql = (f"INSERT INTO order_event ({', '.join(self._ORDER_EVENT_COLS)}) "
+               f"VALUES ({', '.join(['%s'] * len(self._ORDER_EVENT_COLS))})")
+        return self.insert(sql, vals)
+
+    def order_events(self, order_id: int) -> list[dict]:
+        return self.query(
+            "SELECT * FROM order_event WHERE order_id=%s ORDER BY id", (order_id,))
 
     def find_order_by_ordno(self, account_id: int, ord_no: str) -> dict | None:
         return self.query_one(
@@ -734,10 +842,49 @@ class Database:
         )
 
     def log_event(self, level: str, category: str, message: str) -> int:
-        return self.insert(
+        """`event_log`(7일 보관) 기록 + 주요 이벤트는 `event_archive` 에 영구 보관."""
+        lv = level.upper()
+        cat = category[:30]
+        msg = mask_text(message)[:500]
+        row_id = self.insert(
             "INSERT INTO event_log (level, category, message) VALUES (%s,%s,%s)",
-            (level.upper(), category[:30], mask_text(message)[:500]),
+            (lv, cat, msg),
         )
+        self._archive_event(lv, cat, msg)
+        return row_id
+
+    def _archive_event(self, level: str, category: str, message: str) -> None:
+        """규칙에 맞는 이벤트만 `event_archive` 에도 남긴다.
+
+        아카이브 기록 실패는 본 기록(event_log)에 영향을 주지 않는다.
+        """
+        try:
+            if not should_archive_event(level, category, message):
+                return
+            if not self._archive_allow_now(level, category, message):
+                return      # 60초 내 동일 메시지 반복 → 1건만
+            self.execute(
+                "INSERT INTO event_archive (level, category, message) VALUES (%s,%s,%s)",
+                (level, category, message),
+            )
+        except Exception:  # noqa: BLE001 - 보관본 실패가 본 기록을 막지 않는다
+            log.debug("event_archive 기록 실패", exc_info=True)
+
+    def _archive_allow_now(self, level: str, category: str, message: str) -> bool:
+        """같은 (레벨, 분류, 메시지) 의 연속 중복을 60초에 1건으로 줄인다."""
+        key = (level, category, message)
+        now = _dt.datetime.now()
+        with self._archive_lock:
+            last = self._archive_seen.get(key)
+            if last is not None and (now - last).total_seconds() < ARCHIVE_DEDUP_SEC:
+                return False
+            self._archive_seen[key] = now
+            if len(self._archive_seen) > 500:
+                cutoff = now - _dt.timedelta(seconds=ARCHIVE_DEDUP_SEC)
+                for k, ts in list(self._archive_seen.items()):
+                    if ts < cutoff:
+                        self._archive_seen.pop(k, None)
+        return True
 
     def recent_events(self, limit: int = 200, min_level: str | None = None) -> list[dict]:
         order = ("DEBUG", "INFO", "WARN", "ERROR")
@@ -753,14 +900,30 @@ class Database:
 
     def log_api_call(self, api_id: str, http_status: int | None, return_code: int | None,
                      return_msg: str, elapsed_ms: int) -> None:
+        """`api_call_log`(7일 보관) 기록 + 오류 응답은 `api_error_log` 에 영구 보관."""
+        aid = api_id[:10]
+        msg = (return_msg or "")[:255] or None
         self.execute(
             "INSERT INTO api_call_log (api_id, http_status, return_code, return_msg, elapsed_ms) "
             "VALUES (%s,%s,%s,%s,%s)",
-            (api_id[:10], http_status, return_code, (return_msg or "")[:255] or None, elapsed_ms),
+            (aid, http_status, return_code, msg, elapsed_ms),
         )
+        if should_log_api_error(http_status, return_code):
+            try:
+                self.execute(
+                    "INSERT INTO api_error_log (api_id, http_status, return_code, return_msg, "
+                    "elapsed_ms) VALUES (%s,%s,%s,%s,%s)",
+                    (aid, http_status, return_code, msg, elapsed_ms),
+                )
+            except Exception:  # noqa: BLE001 - 보관본 실패가 본 기록을 막지 않는다
+                log.debug("api_error_log 기록 실패", exc_info=True)
 
     def purge_old(self, retention_days: int = 7) -> dict[str, int]:
-        """보관기간 초과 로그 삭제."""
+        """보관기간 초과 로그 삭제.
+
+        대상은 `event_log`/`api_call_log`/`screening_result` **뿐**이다.
+        주문·체결·신호·주문이벤트 등 거래 원장은 여기서 절대 지우지 않는다.
+        """
         days = max(1, int(retention_days))
         out = {}
         out["event_log"] = self.execute(
@@ -769,4 +932,28 @@ class Database:
             "DELETE FROM api_call_log WHERE created_at < (NOW() - INTERVAL %s DAY)", (days,))
         out["screening_result"] = self.execute(
             "DELETE FROM screening_result WHERE captured_at < (NOW() - INTERVAL %s DAY)", (days * 4,))
+        return out
+
+    def archive_retention_days(self) -> int:
+        """`system_setting.archive_retention_days` (기본 365일, 하한 30일)."""
+        try:
+            days = int(str(self.get_setting(
+                "archive_retention_days", str(ARCHIVE_RETENTION_DEFAULT))).strip())
+        except (TypeError, ValueError):
+            days = ARCHIVE_RETENTION_DEFAULT
+        return max(ARCHIVE_RETENTION_MIN, days)
+
+    def purge_archives(self, days: int | None = None) -> dict[str, int]:
+        """영구 보관본 정리 — `event_archive` / `api_error_log` **만** 대상이다.
+
+        `order_event`, `orders`, `executions`, `signal_log`, `llm_decision_log`,
+        `position_state` 는 어떤 경로로도 삭제하지 않는다(거래 분석 원장).
+        """
+        d = self.archive_retention_days() if days is None else max(
+            ARCHIVE_RETENTION_MIN, int(days))
+        out = {}
+        out["event_archive"] = self.execute(
+            "DELETE FROM event_archive WHERE created_at < (NOW() - INTERVAL %s DAY)", (d,))
+        out["api_error_log"] = self.execute(
+            "DELETE FROM api_error_log WHERE created_at < (NOW() - INTERVAL %s DAY)", (d,))
         return out

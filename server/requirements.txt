@@ -9,3 +9,6 @@ anthropic==1.7.0
 
 # 테스트
 pytest==9.1.1
+
+# 아이콘 생성(tools/make_icon.py)·아이콘 테스트 전용 (런타임 불필요)
+Pillow==12.3.0

@@ -69,7 +69,19 @@ class MarketService:
                     })
             total += self.db.upsert_stock_master(batch)
         log.info("종목마스터 갱신 %d건", total)
+        self.clear_cache()
+        self._invalidate_universe()
         return total
+
+    @staticmethod
+    def _invalidate_universe() -> None:
+        """종목마스터가 바뀌었으므로 universe_filter 의 시총 순위 캐시를 버린다."""
+        try:
+            from ..algo.universe_filter import clear_universe_cache
+
+            clear_universe_cache()
+        except Exception:  # noqa: BLE001 - 캐시 무효화 실패가 동기화를 죽이지 않게
+            log.debug("유니버스 캐시 무효화 실패", exc_info=True)
 
     # ------------------------------------------------------------------ #
     def rank_flu_rt(self, mrkt_tp: str = "000", stex_tp: str = "1") -> list[dict]:

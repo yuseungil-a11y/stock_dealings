@@ -499,6 +499,220 @@ function repo_llm_summary(): ?array
     return $sum;
 }
 
+/* --------------------------------------------------------- 거래 분석 (읽기 전용) */
+
+/**
+ * 조회 대상 표/뷰를 읽을 수 있는지 확인한다.
+ * 표 이름은 코드에 고정된 화이트리스트에서만 오며 사용자 입력이 섞이지 않는다.
+ */
+function repo_can_read(string $object): bool
+{
+    static $cache = [];
+    if (!in_array($object, ['v_trade_analysis', 'order_event', 'event_archive', 'api_error_log'], true)) {
+        return false;
+    }
+    if (isset($cache[$object])) {
+        return $cache[$object];
+    }
+    try {
+        db_val('SELECT 1 FROM ' . $object . ' LIMIT 1', [], null);
+        $cache[$object] = true;
+    } catch (Throwable $e) {
+        $cache[$object] = false;
+    }
+    return $cache[$object];
+}
+
+/** 거래 분석 결과 유형 필터 화이트리스트. */
+const ANALYSIS_RESULTS = ['filled', 'partial', 'failed', 'blocked', 'dryrun'];
+
+/** 내보내기 최대 행 수 (초과분은 잘라내고 화면/메타로 안내). */
+const ANALYSIS_EXPORT_MAX = 5000;
+
+function analysis_result_options(): array
+{
+    return [
+        '' => '전체',
+        'filled' => '체결완료',
+        'partial' => '부분체결',
+        'failed' => '실패 · 거부',
+        'blocked' => '차단(BLOCK)',
+        'dryrun' => '관찰만(기록)',
+    ];
+}
+
+/**
+ * 거래 분석 WHERE 조각.
+ * 결과 유형은 화이트리스트 → 고정 SQL 조각 매핑이며 값은 모두 바인딩된다.
+ * @return array{0:string,1:array}
+ */
+function repo_analysis_where(?string $from, ?string $to, string $q, string $result): array
+{
+    [$w, $p] = repo_filter('signal_time', $from, $to, $q, ['stk_cd', 'stk_nm']);
+    $w .= match ($result) {
+        'filled' => " AND order_status = 'FILLED'",
+        'partial' => " AND order_status = 'PARTIAL'",
+        'failed' => " AND order_status IN ('FAILED','REJECTED')",
+        'blocked' => " AND signal_type = 'BLOCK'",
+        'dryrun' => ' AND is_dry_run = 1',
+        default => '',
+    };
+    return [$w, $p];
+}
+
+/** 거래 분석 조회 대상 컬럼(화면·내보내기 공통). */
+function repo_analysis_columns(): string
+{
+    return 'signal_id, signal_time, algo_code, signal_type, stk_cd, stk_nm, score, signal_detail,'
+        . ' order_id, ord_no, side, order_kind, order_status, is_dry_run, trde_tp, ord_qty, ord_uv,'
+        . ' signal_price, filled_qty, avg_fill_pric, slippage_pct, return_code, return_msg, reject_reason,'
+        . ' order_reason, signal_context, params_snapshot, order_time, exec_cnt, exec_amount, exec_fee_tax,'
+        . ' llm_model, llm_decision, llm_final, llm_confidence, llm_reasons';
+}
+
+function repo_analysis_empty(): array
+{
+    return ['rows' => [], 'total' => 0, 'page' => 1, 'pages' => 1, 'size' => PAGE_SIZE];
+}
+
+function repo_trade_analysis(?string $from, ?string $to, string $q, string $result, int $page): array
+{
+    if (!repo_can_read('v_trade_analysis')) {
+        return repo_analysis_empty();
+    }
+    [$w, $p] = repo_analysis_where($from, $to, $q, $result);
+    $base = ' FROM v_trade_analysis WHERE 1=1' . $w;
+    return repo_paginate(
+        'SELECT ' . repo_analysis_columns() . $base . ' ORDER BY signal_time DESC, signal_id DESC',
+        'SELECT COUNT(*)' . $base,
+        $p,
+        $page
+    );
+}
+
+/** 내보내기용 조회 (최신순, 상한 적용). */
+function repo_trade_analysis_export(?string $from, ?string $to, string $q, string $result, int $limit): array
+{
+    if (!repo_can_read('v_trade_analysis')) {
+        return [];
+    }
+    [$w, $p] = repo_analysis_where($from, $to, $q, $result);
+    return db_all(
+        'SELECT ' . repo_analysis_columns() . ' FROM v_trade_analysis WHERE 1=1' . $w
+        . ' ORDER BY signal_time DESC, signal_id DESC LIMIT ?',
+        array_merge($p, [$limit])
+    );
+}
+
+function repo_trade_analysis_count(?string $from, ?string $to, string $q, string $result): int
+{
+    if (!repo_can_read('v_trade_analysis')) {
+        return 0;
+    }
+    [$w, $p] = repo_analysis_where($from, $to, $q, $result);
+    return (int)db_val('SELECT COUNT(*) FROM v_trade_analysis WHERE 1=1' . $w, $p, 0);
+}
+
+/** 거래 분석 요약 카드 값. */
+function repo_trade_analysis_summary(?string $from, ?string $to, string $q, string $result): array
+{
+    $empty = ['signals' => 0, 'orders' => 0, 'filled' => 0, 'failed' => 0, 'blocked' => 0,
+        'avg_slippage' => null, 'fee_tax' => 0];
+    if (!repo_can_read('v_trade_analysis')) {
+        return $empty;
+    }
+    [$w, $p] = repo_analysis_where($from, $to, $q, $result);
+    $row = db_row(
+        "SELECT COUNT(*) AS signals,
+                COALESCE(SUM(CASE WHEN order_id IS NOT NULL AND COALESCE(is_dry_run,0) = 0 THEN 1 ELSE 0 END),0) AS orders,
+                COALESCE(SUM(CASE WHEN order_status = 'FILLED' THEN 1 ELSE 0 END),0) AS filled,
+                COALESCE(SUM(CASE WHEN order_status IN ('FAILED','REJECTED') THEN 1 ELSE 0 END),0) AS failed,
+                COALESCE(SUM(CASE WHEN signal_type = 'BLOCK' THEN 1 ELSE 0 END),0) AS blocked,
+                AVG(slippage_pct) AS avg_slippage,
+                COALESCE(SUM(exec_fee_tax),0) AS fee_tax
+           FROM v_trade_analysis WHERE 1=1" . $w,
+        $p
+    );
+    if ($row === null) {
+        return $empty;
+    }
+    return [
+        'signals' => (int)$row['signals'],
+        'orders' => (int)$row['orders'],
+        'filled' => (int)$row['filled'],
+        'failed' => (int)$row['failed'],
+        'blocked' => (int)$row['blocked'],
+        'avg_slippage' => $row['avg_slippage'] === null ? null : (float)$row['avg_slippage'],
+        'fee_tax' => (float)$row['fee_tax'],
+    ];
+}
+
+/**
+ * 주문 상태 타임라인(order_event) 을 order_id 묶음으로 한 번에 조회한다(N+1 금지).
+ * @param array $orderIds 페이지에 표시할 order_id 목록
+ * @return array<int,array> order_id => 시간순 이벤트 목록
+ */
+function repo_order_events(array $orderIds): array
+{
+    if (!repo_can_read('order_event')) {
+        return [];
+    }
+    $ids = [];
+    foreach ($orderIds as $id) {
+        if ($id === null || $id === '' || !is_numeric($id)) {
+            continue;
+        }
+        $ids[(int)$id] = (int)$id;
+    }
+    if ($ids === []) {
+        return [];
+    }
+    $out = [];
+    // 플레이스홀더 개수는 코드가 만들고 값은 모두 바인딩한다.
+    foreach (array_chunk(array_values($ids), 500) as $chunk) {
+        $ph = implode(',', array_fill(0, count($chunk), '?'));
+        $rows = db_all(
+            'SELECT order_id, ord_no, event_time, event_type, status, filled_qty, remain_qty, price,
+                    reject_reason, return_code, message, source
+               FROM order_event
+              WHERE order_id IN (' . $ph . ')
+              ORDER BY order_id ASC, event_time ASC, id ASC',
+            $chunk
+        );
+        foreach ($rows as $r) {
+            $out[(int)$r['order_id']][] = $r;
+        }
+    }
+    return $out;
+}
+
+/** 결과 목록에서 order_id 만 추출. */
+function repo_collect_order_ids(array $rows, string $key = 'order_id'): array
+{
+    $ids = [];
+    foreach ($rows as $r) {
+        if (isset($r[$key]) && $r[$key] !== null && $r[$key] !== '') {
+            $ids[] = $r[$key];
+        }
+    }
+    return $ids;
+}
+
+/** 최근 N시간 주문 실패·거부 건수(대시보드 한 줄 요약). */
+function repo_recent_order_failures(?int $accountId, int $hours = 24): int
+{
+    if ($accountId === null) {
+        return 0;
+    }
+    return (int)db_val(
+        "SELECT COUNT(*) FROM orders
+          WHERE account_id = ? AND status IN ('FAILED','REJECTED')
+            AND created_at >= (NOW() - INTERVAL ? HOUR)",
+        [$accountId, $hours],
+        0
+    );
+}
+
 /* ------------------------------------------------------------- 시스템 화면 */
 
 function repo_server_status(): array
@@ -576,6 +790,92 @@ function repo_event_categories(): array
     );
 }
 
+/* -------------------------------------------- 시스템: 이벤트 · API 오류 보관 */
+
+/** event_archive (영구 보관본) 조회. */
+function repo_event_archive(?string $from, ?string $to, string $level, string $category, string $q, int $page): array
+{
+    if (!repo_can_read('event_archive')) {
+        return ['rows' => [], 'total' => 0, 'page' => 1, 'pages' => 1, 'size' => PAGE_SIZE];
+    }
+    [$w, $p] = repo_filter('created_at', $from, $to, $q, ['message']);
+    $params = $p;
+    if (in_array($level, ['DEBUG', 'INFO', 'WARN', 'ERROR'], true)) {
+        $w .= ' AND level = ?';
+        $params[] = $level;
+    }
+    if ($category !== '') {
+        $w .= ' AND category = ?';
+        $params[] = $category;
+    }
+    $base = ' FROM event_archive WHERE 1=1' . $w;
+    return repo_paginate(
+        'SELECT id, created_at, level, category, message' . $base . ' ORDER BY created_at DESC, id DESC',
+        'SELECT COUNT(*)' . $base,
+        $params,
+        $page
+    );
+}
+
+function repo_event_archive_categories(): array
+{
+    if (!repo_can_read('event_archive')) {
+        return [];
+    }
+    return array_column(
+        db_all('SELECT DISTINCT category FROM event_archive ORDER BY category LIMIT 50'),
+        'category'
+    );
+}
+
+/** api_error_log (오류 응답 영구 보관) 조회. */
+function repo_api_errors(?string $from, ?string $to, string $apiId, string $returnCode, int $page): array
+{
+    if (!repo_can_read('api_error_log')) {
+        return ['rows' => [], 'total' => 0, 'page' => 1, 'pages' => 1, 'size' => PAGE_SIZE];
+    }
+    [$w, $p] = repo_filter('created_at', $from, $to, '', []);
+    $params = $p;
+    if ($apiId !== '') {
+        $w .= ' AND api_id = ?';
+        $params[] = $apiId;
+    }
+    if ($returnCode !== '') {
+        $w .= ' AND return_code = ?';
+        $params[] = (int)$returnCode;
+    }
+    $base = ' FROM api_error_log WHERE 1=1' . $w;
+    return repo_paginate(
+        'SELECT id, created_at, api_id, http_status, return_code, return_msg, elapsed_ms' . $base
+        . ' ORDER BY created_at DESC, id DESC',
+        'SELECT COUNT(*)' . $base,
+        $params,
+        $page
+    );
+}
+
+function repo_api_error_ids(): array
+{
+    if (!repo_can_read('api_error_log')) {
+        return [];
+    }
+    return array_column(
+        db_all('SELECT DISTINCT api_id FROM api_error_log ORDER BY api_id LIMIT 50'),
+        'api_id'
+    );
+}
+
+function repo_api_error_codes(): array
+{
+    if (!repo_can_read('api_error_log')) {
+        return [];
+    }
+    return array_column(
+        db_all('SELECT DISTINCT return_code FROM api_error_log WHERE return_code IS NOT NULL ORDER BY return_code LIMIT 50'),
+        'return_code'
+    );
+}
+
 function repo_algo_codes(): array
 {
     return array_column(db_all('SELECT code FROM algorithm ORDER BY sort_order, code'), 'code');
@@ -635,5 +935,6 @@ function repo_dashboard(?int $accountId): array
         'today_orders' => $todayOrders,
         'today_signals' => $todaySignals,
         'llm' => repo_llm_summary(),
+        'fail_24h' => repo_recent_order_failures($accountId, 24),
     ];
 }

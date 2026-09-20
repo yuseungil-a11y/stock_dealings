@@ -205,6 +205,11 @@ class _StubApp:
         self.engine = engine
         self._auto_confirm = auto_confirm
         self.logs: list[tuple] = []
+        self._account_id = engine.account_id
+
+    def account_id(self):
+        """실제 App.account_id 와 동일하게 '메서드'(값이 아니라). 함수 자체를 넘기는 버그를 잡기 위함."""
+        return self._account_id
 
     def log_event(self, level, category, message):
         self.logs.append((level, category, message))

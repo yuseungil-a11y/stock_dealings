@@ -11,6 +11,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable
 
+from .. import __version__
 from ..algo import registry
 from ..algo.base import Signal
 from ..algo.claude_advisor import CODE as CLAUDE_CODE
@@ -40,6 +41,8 @@ ACCOUNT_SYNC_CLOSED_SEC = 600
 ORDER_SYNC_OPEN_SEC = 30
 ORDER_SYNC_CLOSED_SEC = 900
 TICK_SEC = 1.0
+# 종목마스터(ka10099) 신선도 점검 주기(초). 장중에도 확인해 날짜가 바뀌면 그날 1회 갱신한다.
+MASTER_CHECK_SEC = 300
 
 # 자동거래(알고리즘 평가·주문) 상태를 웹 관제에 노출하는 server_status 컴포넌트
 AUTO_COMPONENT = "auto_trading"
@@ -403,6 +406,7 @@ class Engine:
         last_account = 0.0
         last_orders = 0.0
         last_eval = 0.0
+        last_master = 0.0
         while not self._stop.is_set():
             now_mono = time.monotonic()
             open_now = self.market_open()
@@ -439,11 +443,16 @@ class Engine:
                 last_eval = now_mono
                 self._safe("알고리즘 평가", self.run_cycle)
 
+            # 종목마스터는 장 상태와 무관하게 하루 1회 신선하게 유지한다
+            # (universe_filter 가 오래된 마스터를 만나면 신규 매수를 차단하므로).
+            if now_mono - last_master >= MASTER_CHECK_SEC:
+                last_master = now_mono
+                self._safe("종목마스터 갱신", self._sync_master_if_needed)
+
             if not open_now:
                 self._safe("장마감 정리", self._eod_if_needed)
                 self._safe("보관기간 정리", lambda: self.house.run_purge(
                     self._retention_days(), self.cfg.logging.path))
-                self._safe("종목마스터 갱신", self._sync_master_if_needed)
 
             self._stop.wait(TICK_SEC)
 
@@ -611,7 +620,7 @@ class Engine:
         ok = self.db.ping()
         self._set_status("db", "ok" if ok else "error",
                          "" if ok else (self.db.last_error or "연결 실패"))
-        self._set_status("server", "ok", f"heartbeat {now_kst():%H:%M:%S}")
+        self._set_status("server", "ok", f"heartbeat {now_kst():%H:%M:%S} · v{__version__}")
         if self.rest:
             if self.rest.last_error:
                 self._set_status("kiwoom_rest", "warn", self.rest.last_error)
@@ -648,12 +657,18 @@ class Engine:
             return 7
 
     def _sync_master_if_needed(self) -> None:
+        """종목마스터(ka10099, 읽기 전용 TR)를 하루 1회 갱신한다.
+
+        갱신 시각이 오늘이 아니면(기동 시·장 시작 전 포함) 다시 받는다.
+        갱신되면 MarketService 가 universe_filter 의 시총 순위 캐시를 무효화한다.
+        """
         today = now_kst().date()
         if self._master_synced_date == today:
             return
         if self.db.stock_master_updated_today(today) and self.db.stock_master_count() > 0:
             self._master_synced_date = today
             return
+        log.info("종목마스터 갱신 시각이 오늘이 아님 - ka10099 재조회")
         self.market.sync_stock_master()
         self._master_synced_date = today
 

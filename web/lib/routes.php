@@ -16,12 +16,14 @@ function app_routes(): array
         'trade.orders' => ['view' => 'trade_orders', 'title' => '주문내역', 'group' => 'trade', 'account' => true],
         'trade.ledger' => ['view' => 'trade_ledger', 'title' => '거래내역', 'group' => 'trade', 'account' => true],
         'trade.daily' => ['view' => 'trade_daily', 'title' => '매매일지', 'group' => 'trade', 'account' => true],
+        'trade.analysis' => ['view' => 'trade_analysis', 'title' => '거래 분석', 'group' => 'trade'],
         'strategy.algorithms' => ['view' => 'strategy_algorithms', 'title' => '알고리즘 현황', 'group' => 'strategy'],
         'strategy.params' => ['view' => 'strategy_params', 'title' => '파라미터 · 변경이력', 'group' => 'strategy'],
         'strategy.signals' => ['view' => 'strategy_signals', 'title' => '신호 기록', 'group' => 'strategy'],
         'strategy.claude' => ['view' => 'strategy_claude', 'title' => 'Claude 판단', 'group' => 'strategy'],
         'system.status' => ['view' => 'system_status', 'title' => '서버 상태', 'group' => 'system'],
         'system.events' => ['view' => 'system_events', 'title' => '이벤트 로그', 'group' => 'system'],
+        'system.archive' => ['view' => 'system_archive', 'title' => '이벤트 · API 오류 보관', 'group' => 'system'],
         'system.profile' => ['view' => 'system_profile', 'title' => '내 정보 · 비밀번호 변경', 'group' => 'system'],
         'system.users' => ['view' => 'system_users', 'title' => '사용자 목록', 'group' => 'system', 'admin' => true],
     ];
@@ -41,6 +43,7 @@ function app_menu(): array
             'trade.orders' => '주문내역',
             'trade.ledger' => '거래내역',
             'trade.daily' => '매매일지',
+            'trade.analysis' => '거래 분석',
         ]],
         'strategy' => ['label' => '전략', 'items' => [
             'strategy.algorithms' => '알고리즘 현황',
@@ -51,6 +54,7 @@ function app_menu(): array
         'system' => ['label' => '시스템', 'items' => [
             'system.status' => '서버 상태',
             'system.events' => '이벤트 로그',
+            'system.archive' => '이벤트 · API 오류 보관',
             'system.profile' => '내 정보',
             'system.users' => '사용자 목록',
         ]],

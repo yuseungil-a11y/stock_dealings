@@ -83,6 +83,16 @@ class Algorithm:
         return signals
 
     # ------------------------------------------------------------------ #
+    @staticmethod
+    def validate_params(params: ParamSet) -> list[str]:
+        """`algorithm_param_def`(타입·min/max)만으로는 표현할 수 없는 **파라미터 간 제약**.
+
+        오류 메시지를 돌려주면 레지스트리가 그 알고리즘을 비활성화하고 경보를 낸다(R-01/S-16).
+        UI 저장 시에도 같은 함수로 검증한다.
+        """
+        return []
+
+    # ------------------------------------------------------------------ #
     @property
     def priority(self) -> int:
         return int(self.meta.get("priority", self.meta.get("sort_order", 100)) or 100)

@@ -6,12 +6,28 @@
 from __future__ import annotations
 
 import tkinter as tk
+from decimal import Decimal, InvalidOperation
 from tkinter import ttk
 
 CONFIRM_WORD = "START"
 
 
-def collect_start_info(db) -> dict:
+def universe_summary(algo: dict | None) -> str:
+    """확인창에 띄울 universe_filter 한 줄 요약."""
+    if not algo:
+        return "미사용 — 시가총액·주가 제한 없이 모든 종목이 매수 대상입니다"
+    from ..algo.params import ParamSet
+    from ..algo.universe_filter import SCOPE_COMBINED, UniverseOptions
+
+    opts = UniverseOptions.from_params(
+        ParamSet(algo.get("param_defs") or [], algo.get("params") or {}))
+    scope = "합산" if opts.rank_scope == SCOPE_COMBINED else "시장별"
+    target = "신규 진입만" if not opts.applies_to_avg_down else "신규 진입 + 물타기"
+    return (f"사용 — {opts.markets_text} · {scope} 시총 상위 {opts.top_n} · "
+            f"최소 주가 {opts.min_price:,}원 ({target}, 매도·손절 제외)")
+
+
+def collect_start_info(db, account_id: int | None = None) -> dict:
     """확인창에 띄울 정보를 DB 에서 모은다."""
     from ..engine.context import OrderGateState
 
@@ -27,6 +43,8 @@ def collect_start_info(db) -> dict:
     params = (risk or {}).get("params") or {}
     claude = next((a for a in active if a.get("code") == "claude_advisor"), None)
     claude_model = ((claude or {}).get("params") or {}).get("model", "-")
+    universe = next((a for a in active if a.get("code") == "universe_filter"), None)
+    limit = _limit_preview(db, account_id, params, universe)
     return {
         "claude_on": bool(claude),
         "claude_text": (f"사용 ({claude_model}) — 매수 신호만 검토, 매도·손절은 검토 안 함"
@@ -44,7 +62,41 @@ def collect_start_info(db) -> dict:
         "daily_loss_limit_pct": params.get("daily_loss_limit_pct", "-"),
         "trade_window": f"{params.get('trade_start_time', '-')} ~ {params.get('trade_end_time', '-')}",
         "require_word": gate.can_send_order and gate.trading_mode != "mock",
+        "universe_on": bool(universe),
+        "universe_text": universe_summary(universe),
+        "limit_asset_text": limit.asset_text,
+        "limit_per_text": f"{limit.per_limit:,}원 ({limit.per_desc})",
+        "limit_warning": limit.warning,
     }
+
+
+def _limit_preview(db, account_id, risk_params: dict, universe: dict | None):
+    """유효 한도(종목당) + 최소 주가 경고. 조회 실패는 '확인 불가'로 처리한다."""
+    from ..algo.params import ParamSet
+    from ..algo.risk_guard import limit_preview
+    from ..algo.universe_filter import UniverseOptions
+
+    asset = None
+    if account_id:
+        try:
+            asset = int((db.latest_balance(account_id) or {}).get("prsm_dpst_aset_amt") or 0)
+        except Exception:  # noqa: BLE001
+            asset = None
+    min_price = 0
+    if universe:
+        min_price = UniverseOptions.from_params(
+            ParamSet(universe.get("param_defs") or [], universe.get("params") or {})).min_price
+
+    def _num(key, default):
+        try:
+            return Decimal(str(risk_params.get(key, default)))
+        except (InvalidOperation, TypeError, ValueError):
+            return Decimal(str(default))
+
+    return limit_preview(asset, int(_num("max_total_invest", 0)),
+                         _num("max_total_invest_pct", 100),
+                         int(_num("max_invest_per_stock", 0)),
+                         _num("max_invest_per_stock_pct", 100), min_price)
 
 
 def _money(value) -> str:
@@ -84,6 +136,8 @@ class AutoTradeStartDialog(tk.Toplevel):
         self._row(box, 2, "주문 게이트", info["gate_text"], "#555555")
         self._row(box, 3, "Claude 검토", info.get("claude_text", "미사용"),
                   "#1565c0" if info.get("claude_on") else "#777777")
+        self._row(box, 4, "종목 유니버스", info.get("universe_text", "미사용"),
+                  "#1565c0" if info.get("universe_on") else "#777777")
 
         # -- 알고리즘 ---------------------------------------------------- #
         algo_box = ttk.LabelFrame(frm, text="활성 알고리즘", padding=8)
@@ -110,6 +164,12 @@ class AutoTradeStartDialog(tk.Toplevel):
         self._row(risk_box, 2, "총 투입 한도", _money(info["max_total_invest"]))
         self._row(risk_box, 3, "종목당 한도", _money(info["max_invest_per_stock"]))
         self._row(risk_box, 4, "매매 시간", info["trade_window"])
+        self._row(risk_box, 5, "총자산(추정예탁)", info.get("limit_asset_text", "확인 불가"))
+        self._row(risk_box, 6, "종목당 유효 한도", info.get("limit_per_text", "-"))
+        if info.get("limit_warning"):
+            ttk.Label(risk_box, text=f"⚠ {info['limit_warning']}", foreground="#c62828",
+                      wraplength=520, justify="left").grid(
+                row=7, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
         # -- 확인 입력 ---------------------------------------------------- #
         self.word_var = tk.StringVar()

@@ -9,21 +9,24 @@
 원칙
   * 실 데이터를 오염시키지 않도록 계좌 account_no='DEMO-0000', env='mock' 로 격리한다.
   * 계좌에 종속되지 않는 표(event_log / signal_log / api_call_log / algo_run /
-    algorithm_param_history)는 '[DEMO]' 마커 또는 고정 작성자명으로 표시해
-    clear 시 그 행만 정확히 지운다.
+    algorithm_param_history / event_archive / api_error_log)는 '[DEMO]' 마커 또는
+    고정 작성자명으로 표시해 clear 시 그 행만 정확히 지운다.
     llm_decision_log 는 stk_cd 접두 'DEMO' 로 격리한다.
+  * 거래 분석 화면 검증용으로 신호 → 주문 → 체결 → order_event 타임라인
+    (성공 / 부분체결 / 거부 / 실패 / 차단 / 관찰만) 시나리오를 함께 적재한다.
   * 보유종목에는 상장폐지 종목(현재가 0, 종목명 '(폐)' 시작) 1건을 포함해
     웹 화면의 상장폐지 표시/실제 수익률 계산을 검증할 수 있게 한다.
   * 전역 표(system_setting / server_status / algorithm_selection)는 건드리지 않는다.
     (서버 모듈 stock_svr 이 같은 DB 를 동시에 사용하기 때문)
   * DB 접속정보는 server/config/config.local.ini 의 [db] (stock_svr 계정)에서 읽는다.
   * 로그인 잠금 검증용 임시 계정(demo_lock_test)의 비밀번호는 환경변수
-    STOCK_DEMO_PW 로만 받으며, 소스/로그/화면에 남기지 않는다.
+    STOCK_TEST_PW (또는 STOCK_DEMO_PW) 로만 받으며, 소스/로그/화면에 남기지 않는다.
 """
 from __future__ import annotations
 
 import configparser
 import datetime as dt
+import json
 import os
 import random
 import subprocess
@@ -96,6 +99,190 @@ def php_password_hash(plain: str) -> str:
     if not h.startswith("$2y$"):
         raise SystemExit("비밀번호 해시 생성에 실패했습니다.")
     return h
+
+
+# ------------------------------------------------- 거래 분석용 데모 맥락 JSON
+def params_snapshot_json(algo: str) -> str:
+    """주문 시점 파라미터 스냅샷(risk_guard + 진입 알고리즘) 데모 JSON."""
+    entry = {
+        "momentum_screen": {"min_volume_ratio": 2.0, "lookback_days": 5, "score_threshold": 7.5},
+        "volatility_breakout": {"k": 0.5, "use_prev_range": True, "entry_time": "09:05"},
+        "averaging_down": {"drop_pct_step": -5.0, "max_steps": 3, "step_qty_ratio": 0.5},
+        "ma_cross_filter": {"short": 5, "long": 20, "confirm_bars": 1},
+    }.get(algo, {"note": "기본값"})
+    return json.dumps(
+        {"risk_guard": {"max_position_pct": 20, "stop_loss_pct": -12, "max_orders_per_day": 20,
+                        "trade_start_time": "09:10", "trade_end_time": "15:15"},
+         algo: entry},
+        ensure_ascii=False)
+
+
+def signal_context_json(kind: str, score: float, close: int, extra: dict | None = None) -> str:
+    ctx = {"kind": kind, "score": round(score, 2), "close": close,
+           "meta": {"market": "KOSPI", "session": "regular"}}
+    if extra:
+        ctx.update(extra)
+    return json.dumps(ctx, ensure_ascii=False)
+
+
+def load_analysis(cur, acct: int, run_id: int, now: dt.datetime) -> None:
+    """
+    거래 분석 화면 검증용 시나리오.
+      성공(체결) / 부분체결 / 거부(+사유) / 실패 / 차단(BLOCK) / 관찰만(is_dry_run)
+    각 건은 signal_log → orders → executions → order_event 타임라인 → llm_decision_log 로 이어진다.
+    모든 행은 [DEMO] 마커 또는 DEMO 계좌/DEMO 종목코드로 격리되어 clear 로 완전히 회수된다.
+    """
+    xss = "<script>alert('xss')</script>"
+    # (코드, 종목명, 알고리즘, 매매, 신호유형, 수량, 신호가, 체결가, 체결수량, 상태,
+    #  응답코드, 응답메시지, 거부사유, 분 전, 이벤트, llm(판단, 최종, 확신도, 근거))
+    scen = [
+        dict(code="DEMOA001", name="데모성공종목", algo="momentum_screen", side="BUY", sig="BUY",
+             qty=10, sig_price=70_000, fill=70_140, filled=10, status="FILLED",
+             rc=0, rmsg="정상처리", reject=None, mins=25, dry=0,
+             detail="거래량 2.6배 · MA5 > MA20 정배열로 진입 조건 충족",
+             ctx=signal_context_json("breakout", 8.42, 70_000, {"ma5": 69_200, "ma20": 67_800, "vol_ratio": 2.6}),
+             llm=("allow", "pass", 82, "거래량 증가와 정배열이 확인되어 진입 근거가 충분합니다."),
+             events=[(0, "CREATED", "SENT", 0, 10, 70_000, None, None, "주문 생성 (신호가 70,000)", "EXECUTOR"),
+                     (2, "SENT", "SENT", 0, 10, 70_000, None, 0, "키움 REST 주문 전송 성공", "REST"),
+                     (5, "ACCEPTED", "ACCEPTED", 0, 10, 70_000, None, None, "거래소 접수", "WS"),
+                     (31, "FILLED", "FILLED", 10, 0, 70_140, None, None, "전량 체결", "WS")]),
+        dict(code="DEMOA002", name="데모부분체결", algo="volatility_breakout", side="BUY", sig="BUY",
+             qty=20, sig_price=52_000, fill=52_600, filled=7, status="PARTIAL",
+             rc=0, rmsg="정상처리", reject=None, mins=48, dry=0,
+             detail="전일 변동폭 돌파(k=0.5) — 목표가 52,300 상향 돌파",
+             ctx=signal_context_json("breakout", 6.10, 52_000, {"target": 52_300, "k": 0.5, "prev_range": 1_400}),
+             llm=("allow", "pass", 61, "돌파는 유효하나 거래량이 평균 수준이라 분할 진입을 권합니다."),
+             events=[(0, "CREATED", "SENT", 0, 20, 52_000, None, None, "주문 생성 (지정가 52,300)", "EXECUTOR"),
+                     (1, "SENT", "SENT", 0, 20, 52_300, None, 0, "키움 REST 주문 전송 성공", "REST"),
+                     (4, "ACCEPTED", "ACCEPTED", 0, 20, 52_300, None, None, "거래소 접수", "WS"),
+                     (66, "PARTIAL", "PARTIAL", 7, 13, 52_600, None, None, "부분 체결 7주 · 잔량 13주", "WS")]),
+        dict(code="DEMOA003", name="데모거부종목", algo="averaging_down", side="BUY", sig="BUY",
+             qty=5, sig_price=118_000, fill=None, filled=0, status="REJECTED",
+             rc=919, rmsg="주문거부", reject=f"증거금 부족 — 주문가능금액 초과 {xss}", mins=95, dry=0,
+             detail="평단 대비 -6.8% 구간 · 추가 매수 2/3 단계",
+             ctx=signal_context_json("avg_down", 4.30, 118_000, {"avg_price": 126_600, "drop_pct": -6.8, "step": 2}),
+             llm=("allow", "pass", 55, "한도 내 물타기이나 잔여 현금이 부족할 수 있습니다."),
+             events=[(0, "CREATED", "SENT", 0, 5, 118_000, None, None, "주문 생성", "EXECUTOR"),
+                     (1, "SENT", "SENT", 0, 5, 118_000, None, 0, "키움 REST 주문 전송 성공", "REST"),
+                     (3, "REJECTED", "REJECTED", 0, 5, None, f"증거금 부족 — 주문가능금액 초과 {xss}", 919,
+                      "거래소 주문 거부 (WS 919)", "WS")]),
+        dict(code="DEMOA004", name="데모실패종목", algo="momentum_screen", side="SELL", sig="SELL",
+             qty=3, sig_price=205_000, fill=None, filled=0, status="FAILED",
+             rc=-1, rmsg="주문 전송 실패 (HTTP 500 · 응답 없음)", reject=None, mins=140, dry=0,
+             detail="목표 수익률 도달 — 익절 신호",
+             ctx=signal_context_json("take_profit", 7.05, 205_000, {"entry_price": 188_000, "gain_pct": 9.04}),
+             llm=("error", "block", None, ""),
+             events=[(0, "CREATED", "SENT", 0, 3, 205_000, None, None, "주문 생성", "EXECUTOR"),
+                     (1, "SENT", "SENT", 0, 3, 205_000, None, None, "키움 REST 주문 전송 시도", "REST"),
+                     (11, "FAILED", "FAILED", 0, 3, None, None, -1,
+                      "HTTP 500 · 10초 내 응답 없음 — 재시도 중단", "REST")]),
+        dict(code="DEMOA005", name="데모차단종목", algo="risk_guard", side=None, sig="BLOCK",
+             qty=None, sig_price=None, fill=None, filled=None, status=None,
+             rc=None, rmsg=None, reject=None, mins=180, dry=0,
+             detail="리스크 가드: 일 손실 한도(-3%) 도달로 신규 진입 차단",
+             ctx=signal_context_json("risk_block", 0.0, 44_500, {"day_pl_pct": -3.12, "limit_pct": -3.0}),
+             llm=("block", "block", 35, "일 손실 한도에 도달해 추가 진입은 위험합니다."),
+             events=[]),
+        dict(code="DEMOA006", name=f"데모검증{xss}", algo="ma_cross_filter", side="BUY", sig="BUY",
+             qty=4, sig_price=9_800, fill=None, filled=0, status="SIGNAL_ONLY",
+             # CSV 인젝션 방지 검증용 — 내보낸 CSV 에서 이 셀은 앞에 작은따옴표가 붙어야 한다.
+             rc=None, rmsg=None, reject='=HYPERLINK("http://demo.invalid/?x="&A1,"CSV 인젝션 검증")',
+             mins=240, dry=1,
+             detail=f"골든크로스 신호 · 이스케이프 검증 {xss} <img src=x onerror=alert(1)>",
+             ctx='{"kind":"ma_cross","note":"' + xss + '","quote":"\\" onmouseover=alert(1) x=\\""}',
+             llm=("allow", "pass", 70, f"관찰 모드 기록입니다 {xss}"),
+             events=[(0, "CREATED", "SIGNAL_ONLY", 0, 4, 9_800, None, None,
+                      f"주문 게이트 OFF — 신호만 기록 {xss}", "EXECUTOR")]),
+    ]
+
+    sig_rows, ord_evt_rows, exec_rows, llm_rows = [], [], [], []
+    for s in scen:
+        ts = now - dt.timedelta(minutes=s["mins"])
+        order_id = None
+        ord_no = None
+        if s["status"] is not None:
+            ord_no = None if s["dry"] else f"95{s['code'][-4:]}"
+            cur.execute(
+                "INSERT INTO orders (account_id, run_id, algo_code, ord_no, side, order_kind, stk_cd, stk_nm,"
+                " dmst_stex_tp, trde_tp, ord_qty, ord_uv, status, filled_qty, avg_fill_pric, reason,"
+                " return_code, return_msg, is_dry_run, created_at, signal_price, signal_context,"
+                " params_snapshot, reject_reason)"
+                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (acct, run_id, s["algo"], ord_no, s["side"], "NEW", s["code"], s["name"], "KRX", "0",
+                 s["qty"], s["sig_price"], s["status"], s["filled"] or 0, s["fill"],
+                 f"{DEMO_MARK} {s['detail']}", s["rc"], s["rmsg"], s["dry"], ts,
+                 s["sig_price"], s["ctx"], params_snapshot_json(s["algo"]), s["reject"]))
+            order_id = cur.lastrowid
+            for (sec, etype, status, fq, rq, price, reject, rc, msg, src) in s["events"]:
+                ord_evt_rows.append((order_id, acct, ord_no, ts + dt.timedelta(seconds=sec), etype,
+                                     status, fq, rq, price, reject, rc, f"{DEMO_MARK} {msg}", src))
+            if s["filled"]:
+                exec_rows.append((acct, ord_no, f"C{s['code']}", s["code"], s["name"], s["side"],
+                                  s["filled"], s["fill"],
+                                  int(s["fill"] * s["filled"] * 0.00015),
+                                  int(s["fill"] * s["filled"] * 0.0018) if s["side"] == "SELL" else 0,
+                                  ts + dt.timedelta(seconds=40), "WS"))
+        try:
+            score = float(json.loads(s["ctx"]).get("score", 0) or 0)
+        except Exception:
+            score = 0.0
+        sig_rows.append((run_id, s["algo"], s["code"], s["name"], s["sig"], round(score, 4),
+                         f"{DEMO_MARK} {s['detail']}", order_id, ts))
+        dec, final, conf, reasons = s["llm"]
+        llm_rows.append((ts, run_id, s["code"], s["name"], s["algo"], s["side"] or "BUY",
+                         "claude-sonnet-4-5", dec, final, conf, reasons, "", s["ctx"], 0,
+                         1200, 900, 140, None if dec != "error" else "API timeout (10s) — fail_mode=block 적용",
+                         order_id))
+
+    if ord_evt_rows:
+        cur.executemany(
+            "INSERT INTO order_event (order_id, account_id, ord_no, event_time, event_type, status,"
+            " filled_qty, remain_qty, price, reject_reason, return_code, message, source)"
+            " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)", ord_evt_rows)
+    if exec_rows:
+        cur.executemany(
+            "INSERT INTO executions (account_id, ord_no, cntr_no, stk_cd, stk_nm, side, cntr_qty, cntr_pric,"
+            " cmsn, tax, executed_at, source) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)", exec_rows)
+    cur.executemany(
+        "INSERT INTO signal_log (run_id, algo_code, stk_cd, stk_nm, signal_type, score, detail, order_id,"
+        " created_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)", sig_rows)
+    cur.executemany(
+        "INSERT INTO llm_decision_log (created_at, run_id, stk_cd, stk_nm, source_algo, side, model,"
+        " decision, final_action, confidence, reasons, risk_flags, input_summary, from_cache,"
+        " latency_ms, input_tokens, output_tokens, error_msg, order_id)"
+        " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)", llm_rows)
+    print(f"거래분석 데모: signal_log {len(sig_rows)}건 / order_event {len(ord_evt_rows)}건 /"
+          f" executions {len(exec_rows)}건 / llm_decision_log {len(llm_rows)}건")
+
+    # ---------------------------------------------------- 이벤트 영구 보관본
+    arch = [
+        ("ERROR", "order", "주문 거부 — DEMOA003 증거금 부족 (WS 919)", 95),
+        ("ERROR", "api", "키움 REST 주문 전송 실패 — HTTP 500 (재시도 2회 후 포기)", 140),
+        ("WARN", "algo", "risk_guard: 일 손실 한도(-3%) 도달 — 신규 진입 차단", 180),
+        ("WARN", "ws", "체결 통보 지연 12초 — 주문 상태 재조회", 210),
+        ("INFO", "order", "전량 체결 — DEMOA001 10주 @70,140", 25),
+        ("INFO", "system", "엔진 기동 (관찰모드, 주문 전송 비활성)", 400),
+        ("ERROR", "engine", "포지션 동기화 실패 — 다음 주기에 재시도", 520),
+    ]
+    arch_rows = [(now - dt.timedelta(minutes=m), lv, cat, f"{DEMO_MARK} {msg}") for (lv, cat, msg, m) in arch]
+    cur.executemany(
+        "INSERT INTO event_archive (created_at, level, category, message) VALUES (%s,%s,%s,%s)", arch_rows)
+    print(f"event_archive: {len(arch_rows)}건")
+
+    # ---------------------------------------------------- API 오류 영구 보관본
+    api_err = [
+        ("kt10000", 500, -1, "서버 내부 오류 — 주문 전송 실패", 10_240, 140),
+        ("ka10027", 200, 1700, "허용 요청 수 초과 — 백오프 후 재시도", 310, 200),
+        ("kt00018", 200, 8004, "조회 조건 오류 (연속조회 키 만료)", 420, 260),
+        ("ka10075", 401, 8005, "토큰 만료 — 재발급 후 재시도", 180, 330),
+        ("kt10001", 200, 919, "주문 거부 — 증거금 부족", 260, 95),
+    ]
+    api_rows = [(now - dt.timedelta(minutes=m), api, hs, rc, f"{DEMO_MARK} {msg}", ms)
+                for (api, hs, rc, msg, ms, m) in api_err]
+    cur.executemany(
+        "INSERT INTO api_error_log (created_at, api_id, http_status, return_code, return_msg, elapsed_ms)"
+        " VALUES (%s,%s,%s,%s,%s,%s)", api_rows)
+    print(f"api_error_log: {len(api_rows)}건")
 
 
 # ----------------------------------------------------------------- 적재
@@ -200,13 +387,16 @@ def load(conn) -> None:
                 ts = dt.datetime.combine(day, dt.time(9 + k, 12 + k * 7, 30))
                 dry = (k == 3)  # 일부는 신호만 기록된 건으로
                 ord_seq += 1
+                # 신호 시점 기준가 — 주문내역/거래분석 화면의 슬리피지 계산에 쓰인다.
+                sig_price = int(price * rnd.uniform(0.994, 1.004))
                 order_rows.append((
                     acct, run_id, algos[(d + k) % len(algos)],
                     None if dry else str(ord_seq), side, "NEW", code, name, "KRX", "3",
                     qty, None, "SIGNAL_ONLY" if dry else "FILLED",
                     0 if dry else qty, None if dry else price,
                     f"{DEMO_MARK} " + ("주문 게이트 OFF — 신호만 기록" if dry else "알고리즘 신호에 따른 주문"),
-                    None if dry else 0, None if dry else "정상처리", 1 if dry else 0, ts))
+                    None if dry else 0, None if dry else "정상처리", 1 if dry else 0, ts,
+                    sig_price, params_snapshot_json(algos[(d + k) % len(algos)])))
                 if not dry:
                     exec_rows.append((acct, str(ord_seq), f"C{ord_seq}", code, name, side, qty, price,
                                       int(price * qty * 0.00015), int(price * qty * 0.0018) if side == "SELL" else 0,
@@ -214,8 +404,8 @@ def load(conn) -> None:
         cur.executemany(
             "INSERT INTO orders (account_id, run_id, algo_code, ord_no, side, order_kind, stk_cd, stk_nm,"
             " dmst_stex_tp, trde_tp, ord_qty, ord_uv, status, filled_qty, avg_fill_pric, reason,"
-            " return_code, return_msg, is_dry_run, created_at)"
-            " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)", order_rows)
+            " return_code, return_msg, is_dry_run, created_at, signal_price, params_snapshot)"
+            " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)", order_rows)
         cur.executemany(
             "INSERT INTO executions (account_id, ord_no, cntr_no, stk_cd, stk_nm, side, cntr_qty, cntr_pric,"
             " cmsn, tax, executed_at, source) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)", exec_rows)
@@ -369,7 +559,7 @@ def load(conn) -> None:
             print(f"algorithm_param_history: {len(hist)}건")
 
         # ---------------------------------------------------- 잠금 검증용 임시 계정
-        pw = os.environ.get("STOCK_DEMO_PW", "")
+        pw = os.environ.get("STOCK_TEST_PW", "") or os.environ.get("STOCK_DEMO_PW", "")
         if pw:
             h = php_password_hash(pw)
             cur.execute(
@@ -380,7 +570,10 @@ def load(conn) -> None:
                 (DEMO_LOCK_USER, h, "잠금 검증용 임시계정"))
             print(f"app_user: {DEMO_LOCK_USER} 생성/초기화 (비밀번호는 환경변수에서만 읽음)")
         else:
-            print("app_user: STOCK_DEMO_PW 미설정 — 임시 계정 생성 생략")
+            print("app_user: STOCK_TEST_PW 미설정 — 임시 계정 생성 생략")
+
+        # ---------------------------------------------------- 거래 분석 데모
+        load_analysis(cur, acct, run_id, now)
 
     conn.commit()
     print("\nDEMO 데이터 적재 완료. 검증 후 반드시 `demo_data.py clear` 를 실행하세요.")
@@ -392,7 +585,7 @@ def clear(conn) -> None:
         acct = demo_account_id(cur)
         deleted = {}
         if acct is not None:
-            for tbl in ("executions", "orders", "trade_ledger", "daily_trade_summary",
+            for tbl in ("order_event", "executions", "orders", "trade_ledger", "daily_trade_summary",
                         "holding", "holding_snapshot", "position_state", "account_balance"):
                 cur.execute(f"DELETE FROM {tbl} WHERE account_id=%s", (acct,))
                 deleted[tbl] = cur.rowcount
@@ -409,6 +602,13 @@ def clear(conn) -> None:
         deleted["api_call_log"] = cur.rowcount
         cur.execute("DELETE FROM llm_decision_log WHERE stk_cd LIKE %s", (DEMO_LLM_PREFIX + "%",))
         deleted["llm_decision_log"] = cur.rowcount
+        # 계좌 없이 남아있을 수 있는 분석용 데모 행([DEMO] 마커로 이중 식별)
+        cur.execute("DELETE FROM order_event WHERE message LIKE %s", (DEMO_MARK + "%",))
+        deleted["order_event(mark)"] = cur.rowcount
+        cur.execute("DELETE FROM event_archive WHERE message LIKE %s", (DEMO_MARK + "%",))
+        deleted["event_archive"] = cur.rowcount
+        cur.execute("DELETE FROM api_error_log WHERE return_msg LIKE %s", (DEMO_MARK + "%",))
+        deleted["api_error_log"] = cur.rowcount
         cur.execute("DELETE FROM algo_run WHERE note LIKE %s", (DEMO_MARK + "%",))
         deleted["algo_run"] = cur.rowcount
         cur.execute("DELETE FROM algorithm_param_history WHERE changed_by=%s", (DEMO_AUTHOR,))
@@ -433,13 +633,16 @@ def status(conn) -> int:
         if acct is not None:
             remain += 1
             for tbl in ("account_balance", "holding", "holding_snapshot", "orders",
-                        "executions", "trade_ledger", "daily_trade_summary"):
+                        "executions", "trade_ledger", "daily_trade_summary", "order_event"):
                 cur.execute(f"SELECT COUNT(*) c FROM {tbl} WHERE account_id=%s", (acct,))
                 print(f"  {tbl:22s} {cur.fetchone()['c']}")
         checks = [
             ("signal_log", "detail LIKE %s", DEMO_MARK + "%"),
             ("event_log", "message LIKE %s", DEMO_MARK + "%"),
             ("api_call_log", "return_msg LIKE %s", DEMO_MARK + "%"),
+            ("order_event", "message LIKE %s", DEMO_MARK + "%"),
+            ("event_archive", "message LIKE %s", DEMO_MARK + "%"),
+            ("api_error_log", "return_msg LIKE %s", DEMO_MARK + "%"),
             ("llm_decision_log", "stk_cd LIKE %s", DEMO_LLM_PREFIX + "%"),
             ("algo_run", "note LIKE %s", DEMO_MARK + "%"),
             ("algorithm_param_history", "changed_by = %s", DEMO_AUTHOR),

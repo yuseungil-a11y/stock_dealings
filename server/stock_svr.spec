@@ -20,6 +20,8 @@ for pkg in ('pydantic', 'pydantic_core', 'anyio', 'httpx2', 'httpcore2'):
     hidden += collect_submodules(pkg)
 
 datas = collect_data_files('certifi')
+# 서버 프로그램 아이콘(창/작업표시줄용) — tools/make_icon.py 로 생성
+datas += [('assets/stock_svr.ico', 'assets'), ('assets/stock_svr.png', 'assets')]
 
 a = Analysis(
     ['stock_svr_entry.py'],
@@ -42,7 +44,8 @@ a = Analysis(
 pyz = PYZ(a.pure)
 
 exe_gui = EXE(pyz, a.scripts, [], exclude_binaries=True,
-              name='stock_svr', console=False, disable_windowed_traceback=False)
+              name='stock_svr', console=False, disable_windowed_traceback=False,
+              icon='assets/stock_svr.ico')
 
 coll = COLLECT(exe_gui, a.binaries, a.datas,
                strip=False, upx=False, name='stock_svr')

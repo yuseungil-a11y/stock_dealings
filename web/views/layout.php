@@ -26,7 +26,7 @@ foreach ($statusRows as $srow) {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
 <title><?= h($route['title']) ?> · <?= h(APP_NAME) ?></title>
-<link rel="icon" href="<?= h(u('assets/img/favicon.svg')) ?>" type="image/svg+xml">
+<?= favicon_links() ?>
 <link rel="stylesheet" href="<?= h(u('assets/css/app.css')) ?>">
 </head>
 <body data-base="<?= h(u('')) ?>" data-page="<?= h($page) ?>">
@@ -78,6 +78,7 @@ foreach ($statusRows as $srow) {
         <input type="hidden" name="action" value="logout">
         <button class="btn btn-ghost" type="submit">로그아웃</button>
       </form>
+      <span class="ver" title="운영 웹 v<?= h(STOCK_WEB_VERSION) ?> (<?= h(STOCK_WEB_RELEASED) ?>)"><?= h(app_version_text($statusRows)) ?></span>
     </div>
   </div>
 </header>

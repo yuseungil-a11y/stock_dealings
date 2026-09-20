@@ -21,6 +21,15 @@ $page = isset($_GET['p']) && is_string($_GET['p']) ? $_GET['p'] : 'dashboard';
 $method = strtoupper((string)($_SERVER['REQUEST_METHOD'] ?? 'GET'));
 $user = auth_user();
 
+/* ------------------------------------------------- 내보내기는 GET 전용 */
+if (isset($_GET['export']) && $method !== 'GET') {
+    http_response_code(405);
+    header('Allow: GET');
+    render_standalone(['title' => '허용되지 않는 요청 방식',
+        'message' => '내보내기는 GET 요청만 허용됩니다.']);
+    exit;
+}
+
 /* ---------------------------------------------------------- POST 액션 */
 $loginError = null;
 $flash = null;
@@ -113,6 +122,19 @@ if (!empty($route['admin']) && !auth_is_admin()) {
     exit;
 }
 
+/* ---------------------------------------------- 분석용 내보내기(CSV/JSON)
+ * 인증을 통과한 뒤에만 도달하며, 화면과 동일한 필터를 그대로 사용한다. */
+if ($page === 'trade.analysis' && isset($_GET['export']) && is_string($_GET['export'])) {
+    require __DIR__ . '/lib/export.php';
+    export_trade_analysis(
+        clean_enum($_GET['export'], ['csv', 'json'], 'csv'),
+        clean_date($_GET['from'] ?? null),
+        clean_date($_GET['to'] ?? null),
+        clean_text($_GET['q'] ?? '', 40),
+        clean_enum($_GET['result'] ?? '', ANALYSIS_RESULTS, '')
+    );
+}
+
 $accounts = repo_accounts();
 $account = repo_resolve_account($accounts);
 $accountId = $account !== null ? (int)$account['id'] : null;
@@ -140,7 +162,7 @@ function render_standalone(array $tpl): void
         . '<meta name="viewport" content="width=device-width, initial-scale=1">'
         . '<title>' . h($title) . ' · ' . h(APP_NAME) . '</title>'
         . '<link rel="stylesheet" href="' . h(u('assets/css/app.css')) . '">'
-        . '<link rel="icon" href="' . h(u('assets/img/favicon.svg')) . '" type="image/svg+xml"></head>'
+        . favicon_links() . '</head>'
         . '<body class="standalone"><main class="msg-box"><h1>' . h($title) . '</h1><p>' . h($message) . '</p>'
         . '<p><a class="btn" href="' . h(u('index.php')) . '">처음 화면으로</a></p></main></body></html>';
 }

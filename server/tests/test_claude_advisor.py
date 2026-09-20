@@ -639,8 +639,9 @@ RISK_DEFS_FULL = [
         ("stop_loss_pct", "decimal", "-15", None),
         ("daily_loss_limit_pct", "decimal", "-3", None),
         ("max_orders_per_day", "int", "30", None),
-        ("trade_start_time", "time", "09:05", None),
-        ("trade_end_time", "time", "15:15", None),
+        # 실제 시각(장 시간)에 의존하지 않도록 매매시간 제한을 비운다
+        ("trade_start_time", "time", "", None),
+        ("trade_end_time", "time", "", None),
         ("exchange", "enum", "KRX", "KRX:KRX"),
     ]
 ]

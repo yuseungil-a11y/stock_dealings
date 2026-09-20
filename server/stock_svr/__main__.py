@@ -13,6 +13,7 @@ import logging
 import sys
 import time
 
+from . import __released__, __version__
 from .config import ConfigError, load_config
 from .db import Database
 from .logging_setup import attach_db_handler, get_logger, setup_logging
@@ -341,7 +342,7 @@ def main(argv: list[str] | None = None) -> int:
 
         attach_db_handler(db, logging.INFO)
         from .ui.app import run_ui
-        log.info("GUI 시작 (smoke=%s)", args.smoke)
+        log.info("stock_svr v%s (%s) GUI 시작 (smoke=%s)", __version__, __released__, args.smoke)
         with single_instance():
             return run_ui(cfg, db, autostart=not args.no_autostart, smoke_seconds=args.smoke)
     except AlreadyRunningError as exc:

@@ -23,6 +23,27 @@ _STATUS_MAP = {
 }
 
 
+# order_event 로 남기는 상태(그 외는 NOTE 로 남긴다)
+EVENT_STATUSES = ("ACCEPTED", "PARTIAL", "FILLED", "CANCELED", "REJECTED")
+
+# WS `00` 주문체결의 거부사유(919) 가 '사유 없음'을 뜻하는 값
+REJECT_NONE_VALUES = ("", "0")
+NO_REJECT_REASON_MSG = "거부사유 미제공"
+
+
+def parse_reject_reason(value) -> str | None:
+    """WS `919`(거부사유) 파싱.
+
+    값이 없거나 `"0"`/빈 문자열이면 사유 없음(None), 그 외는 255자로 잘라 돌려준다.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if text in REJECT_NONE_VALUES:
+        return None
+    return text[:255]
+
+
 def execution_key(ord_no: str, ord_tm, cntr_pric: int, cntr_qty: int) -> str:
     """체결번호가 없는 REST 응답용 **결정적 체결키** (B2).
 
@@ -54,6 +75,49 @@ class OrderSyncService:
         self.db = db
         self.rest = rest
         self.account_id = account_id
+
+    # -- 주문 상태 변화 이력 (order_event) ------------------------------ #
+    def _order_before(self, ord_no: str) -> dict | None:
+        """변화 판정용 '현재 저장된 주문'. 조회 실패는 None(=새 주문으로 취급)."""
+        try:
+            return self.db.find_order_by_ordno(self.account_id, ord_no)
+        except Exception:  # noqa: BLE001 - 이력 기록용 조회다. 동기화를 막지 않는다.
+            log.debug("order_event 비교용 주문 조회 실패: %s", ord_no, exc_info=True)
+            return None
+
+    def _emit_order_event(self, order_id, ord_no: str, before: dict | None, *,
+                          status: str, filled_qty: int, remain_qty=None, price=None,
+                          reject_reason: str | None = None, source: str = "WS",
+                          message: str | None = None) -> bool:
+        """**저장된 상태/체결수량과 달라졌을 때만** 이벤트 1건을 남긴다(중복 방지).
+
+        기록 실패는 로그만 남기고 동기화를 계속한다.
+        """
+        try:
+            filled = int(filled_qty or 0)
+            if before:
+                try:
+                    prev_filled = int(before.get("filled_qty") or 0)
+                except (TypeError, ValueError):
+                    prev_filled = -1
+                # 거부사유는 '새로 생기거나 바뀐' 경우만 변화로 본다
+                # (같은 메시지가 919 없이 다시 와도 이벤트가 늘지 않게)
+                reason_changed = bool(reject_reason) and reject_reason != (
+                    before.get("reject_reason") or None)
+                if (str(before.get("status") or "") == str(status)
+                        and prev_filled == filled and not reason_changed):
+                    return False        # 변화 없음 → 이벤트를 만들지 않는다
+            if status == "REJECTED" and not reject_reason and not message:
+                message = NO_REJECT_REASON_MSG
+            self.db.insert_order_event(
+                order_id=order_id, account_id=self.account_id, ord_no=ord_no,
+                event_type=status if status in EVENT_STATUSES else "NOTE",
+                status=status, filled_qty=filled, remain_qty=remain_qty, price=price,
+                reject_reason=reject_reason, message=message, source=source)
+            return True
+        except Exception:  # noqa: BLE001
+            log.debug("order_event 기록 실패: %s", ord_no, exc_info=True)
+            return False
 
     # -- REST ---------------------------------------------------------- #
     def fetch_open_orders(self, exchange_tp: str = "0") -> list[dict]:
@@ -92,7 +156,9 @@ class OrderSyncService:
                 ord_qty = to_int(r.get("ord_qty"), 0) or 0
                 oso_qty = to_int(r.get("oso_qty"), 0) or 0
                 filled = max(0, ord_qty - oso_qty)
-                self.db.upsert_order_by_ordno(
+                status = map_status(r.get("ord_stt"), oso_qty, filled, ord_qty)
+                before = self._order_before(ord_no)
+                order_id = self.db.upsert_order_by_ordno(
                     self.account_id, ord_no,
                     orig_ord_no=(r.get("orig_ord_no") or "").strip() or None,
                     side=side_from_code(r.get("io_tp_nm")) or "BUY",
@@ -101,10 +167,13 @@ class OrderSyncService:
                     trde_tp=(r.get("trde_tp") or "0")[:3],
                     ord_qty=ord_qty,
                     ord_uv=to_int(r.get("ord_pric")),
-                    status=map_status(r.get("ord_stt"), oso_qty, filled, ord_qty),
+                    status=status,
                     filled_qty=filled,
                     dmst_stex_tp=(r.get("stex_tp_txt") or "KRX")[:5],
                 )
+                self._emit_order_event(order_id, ord_no, before, status=status,
+                                       filled_qty=filled, remain_qty=oso_qty,
+                                       price=to_int(r.get("ord_pric")), source="REST")
                 n += 1
         if n:
             log.info("미체결 %d건 동기화", n)
@@ -139,17 +208,22 @@ class OrderSyncService:
                     cmsn=to_int(r.get("tdy_trde_cmsn")), tax=to_int(r.get("tdy_trde_tax")),
                     source="REST", only_if_absent=True,
                 )
-                self.db.upsert_order_by_ordno(
+                status = map_status(r.get("ord_stt"), oso_qty, filled, ord_qty)
+                before = self._order_before(ord_no)
+                order_id = self.db.upsert_order_by_ordno(
                     self.account_id, ord_no,
                     side=side, stk_cd=stk_cd,
                     stk_nm=(r.get("stk_nm") or "").strip()[:60] or None,
                     trde_tp=(r.get("trde_tp") or "0")[:3],
                     ord_qty=ord_qty or cntr_qty,
                     ord_uv=to_int(r.get("ord_pric")),
-                    status=map_status(r.get("ord_stt"), oso_qty, filled, ord_qty),
+                    status=status,
                     filled_qty=filled,
                     avg_fill_pric=cntr_pric,
                 )
+                self._emit_order_event(order_id, ord_no, before, status=status,
+                                       filled_qty=filled, remain_qty=oso_qty,
+                                       price=cntr_pric, source="REST")
                 n += 1
         if n:
             log.info("체결 %d건 동기화", n)
@@ -170,17 +244,26 @@ class OrderSyncService:
         cntr_pric = abs(to_int(values.get("910"), 0) or 0)
         cntr_no = str(values.get("909", "")).strip()
         status = map_status(values.get("913"), oso_qty, cntr_qty, ord_qty)
+        # 919: 거래소 거부사유. 없거나 '0'/빈 문자열이면 사유 없음.
+        reject = parse_reject_reason(values.get("919"))
+        filled_qty = max(0, ord_qty - oso_qty) if ord_qty else cntr_qty
 
-        self.db.upsert_order_by_ordno(
+        before = self._order_before(ord_no)
+        extra = {"reject_reason": reject} if reject else {}
+        order_id = self.db.upsert_order_by_ordno(
             self.account_id, ord_no,
             orig_ord_no=str(values.get("904", "")).strip() or None,
             side=side, stk_cd=stk_cd, stk_nm=stk_nm,
             trde_tp=str(values.get("906", "0"))[:3],
             ord_qty=ord_qty, ord_uv=abs(to_int(values.get("901"), 0) or 0) or None,
             status=status,
-            filled_qty=max(0, ord_qty - oso_qty) if ord_qty else cntr_qty,
+            filled_qty=filled_qty,
             avg_fill_pric=cntr_pric or None,
+            **extra,
         )
+        self._emit_order_event(order_id, ord_no, before, status=status,
+                               filled_qty=filled_qty, remain_qty=oso_qty,
+                               price=cntr_pric or None, reject_reason=reject, source="WS")
         if cntr_qty > 0 and cntr_pric > 0:
             executed_at = hhmmss_to_dt(values.get("908"), today_kst()) or now_kst()
             self.db.upsert_execution(

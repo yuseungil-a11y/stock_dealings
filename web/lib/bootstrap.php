@@ -27,6 +27,7 @@ date_default_timezone_set('Asia/Seoul');
 mb_internal_encoding('UTF-8');
 
 require __DIR__ . '/util.php';
+require __DIR__ . '/version.php';
 require __DIR__ . '/config.php';
 require __DIR__ . '/security.php';
 require __DIR__ . '/db.php';

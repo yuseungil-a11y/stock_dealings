@@ -435,4 +435,83 @@ CREATE TABLE IF NOT EXISTS llm_decision_log (
   KEY ix_llm_stk (stk_cd, created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Claude 거부권 필터 판단 기록(모델·근거·토큰·결과). 1주일 이상 보관 가능';
 
+-- ---------------------------------------------------------------------
+-- 8. 거래 분석용 기록 (영구 보관 — 7일 로그 정리 대상 아님)
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS order_event (
+  id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  order_id      BIGINT UNSIGNED NULL COMMENT 'orders.id',
+  account_id    INT UNSIGNED NULL,
+  ord_no        VARCHAR(20) NULL,
+  event_time    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  event_type    ENUM('CREATED','SENT','ACCEPTED','PARTIAL','FILLED','CANCELED','REJECTED','FAILED','UNKNOWN','MODIFIED','NOTE') NOT NULL,
+  status        VARCHAR(20) NULL COMMENT '이 시점의 orders.status',
+  filled_qty    BIGINT NULL,
+  remain_qty    BIGINT NULL,
+  price         BIGINT NULL COMMENT '체결가/주문가',
+  reject_reason VARCHAR(255) NULL COMMENT '거래소 거부사유(WS 919 등)',
+  return_code   INT NULL,
+  message       VARCHAR(255) NULL,
+  source        ENUM('EXECUTOR','WS','REST') NOT NULL DEFAULT 'EXECUTOR',
+  PRIMARY KEY (id),
+  KEY ix_oe_order (order_id, event_time),
+  KEY ix_oe_time (event_time),
+  KEY ix_oe_ordno (account_id, ord_no)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='주문 상태 변화 이력(접수→부분체결→체결/거부/취소). 영구 보관';
+
+CREATE TABLE IF NOT EXISTS event_archive (
+  id          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  level       ENUM('DEBUG','INFO','WARN','ERROR') NOT NULL,
+  category    VARCHAR(30) NOT NULL,
+  message     VARCHAR(500) NOT NULL,
+  PRIMARY KEY (id),
+  KEY ix_ea_time (created_at),
+  KEY ix_ea_cat (category, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='주요 이벤트 영구 보관본(WARN/ERROR + 주문·알고리즘·엔진 이벤트). event_log 는 7일 정리, 이 테이블은 archive_retention_days(기본 365일)';
+
+CREATE TABLE IF NOT EXISTS api_error_log (
+  id          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  api_id      VARCHAR(10) NOT NULL,
+  http_status SMALLINT NULL,
+  return_code INT NULL,
+  return_msg  VARCHAR(255) NULL,
+  elapsed_ms  INT NULL,
+  PRIMARY KEY (id),
+  KEY ix_ael_time (created_at),
+  KEY ix_ael_api (api_id, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='키움 API 오류 응답만 영구 보관(정상 호출 로그 api_call_log 는 7일 정리)';
+
+-- orders 확장 (재실행 안전). 신호 시점 맥락 저장 → 슬리피지·당시 설정 분석용
+ALTER TABLE orders
+  ADD COLUMN IF NOT EXISTS signal_price   BIGINT NULL COMMENT '신호 발생 시점 기준가(슬리피지 계산용)',
+  ADD COLUMN IF NOT EXISTS signal_context TEXT NULL COMMENT '신호 맥락 JSON(kind/score/meta 등)',
+  ADD COLUMN IF NOT EXISTS params_snapshot TEXT NULL COMMENT '주문 시점 알고리즘 파라미터 JSON(risk_guard+진입알고리즘)',
+  ADD COLUMN IF NOT EXISTS reject_reason  VARCHAR(255) NULL COMMENT '거래소 거부사유';
+
+-- Claude 등 외부 분석용: 신호 → 주문 → 체결 → Claude 판단을 한 줄로
+CREATE OR REPLACE VIEW v_trade_analysis AS
+SELECT
+  s.id AS signal_id, s.created_at AS signal_time, s.algo_code, s.signal_type,
+  s.stk_cd, s.stk_nm, s.score, s.detail AS signal_detail,
+  o.id AS order_id, o.ord_no, o.side, o.order_kind, o.status AS order_status, o.is_dry_run,
+  o.trde_tp, o.ord_qty, o.ord_uv, o.signal_price, o.filled_qty, o.avg_fill_pric,
+  CASE WHEN o.signal_price > 0 AND o.avg_fill_pric > 0
+       THEN ROUND((o.avg_fill_pric - o.signal_price) / o.signal_price * 100, 3) END AS slippage_pct,
+  o.return_code, o.return_msg, o.reject_reason, o.reason AS order_reason,
+  o.signal_context, o.params_snapshot, o.created_at AS order_time,
+  (SELECT COUNT(*) FROM executions e WHERE e.account_id = o.account_id AND e.ord_no = o.ord_no) AS exec_cnt,
+  (SELECT SUM(e.cntr_qty * e.cntr_pric) FROM executions e WHERE e.account_id = o.account_id AND e.ord_no = o.ord_no) AS exec_amount,
+  (SELECT SUM(COALESCE(e.cmsn,0) + COALESCE(e.tax,0)) FROM executions e WHERE e.account_id = o.account_id AND e.ord_no = o.ord_no) AS exec_fee_tax,
+  l.model AS llm_model, l.decision AS llm_decision, l.final_action AS llm_final,
+  l.confidence AS llm_confidence, l.reasons AS llm_reasons
+FROM signal_log s
+LEFT JOIN orders o ON o.id = s.order_id
+LEFT JOIN llm_decision_log l ON l.id = COALESCE(
+  (SELECT MAX(x.id) FROM llm_decision_log x WHERE x.order_id = o.id),
+  (SELECT MAX(x.id) FROM llm_decision_log x
+    WHERE x.stk_cd = s.stk_cd AND x.order_id IS NULL
+      AND x.created_at BETWEEN s.created_at - INTERVAL 2 MINUTE AND s.created_at + INTERVAL 2 MINUTE));
+
 SET FOREIGN_KEY_CHECKS = 1;

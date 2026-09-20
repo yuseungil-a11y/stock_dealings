@@ -59,7 +59,9 @@ run_stock_svr.bat                             REM GUI 실행 (엔진 자동 시�
   `실행중 · 주문 전송 ON`(적색, 실계좌면 ⚠ 표시). 상태바에도 `자동거래` 아이콘이 있다.
 * **서버를 켜면 자동거래는 항상 '중지' 상태**로 시작한다(이전 상태를 복원하지 않음).
   상태는 `server_status`(component=`auto_trading`)로 웹 관제에 노출된다.
-* 시작 시 확인창이 현재 모드·게이트 상태·활성 알고리즘·손절선/투입한도를 보여준다.
+* 시작 시 확인창이 현재 모드·게이트 상태·활성 알고리즘·손절선/투입한도와 함께
+  **종목 유니버스(universe_filter) 사용 여부·시장/순위/최소 주가**,
+  **총자산 기준 종목당 유효 한도와 1주 값 대비 경고**를 보여준다.
   **게이트가 열려 있고 REAL 이면** 확인창에 `START` 를 직접 입력해야 시작된다.
   진입 알고리즘이 하나도 선택되지 않았으면 경고를 띄운다.
 * 중지하면 새 평가 사이클이 시작되지 않고, **진행 중이던 사이클에서도 주문 직전마다
@@ -114,7 +116,7 @@ server/
   stock_svr/
     __main__.py        CLI (GUI / --check / --eval-once)
     config.py          설정 로딩(비밀 마스킹, root 계정 거부)
-    db.py              MariaDB 접근 + 도메인 헬퍼(스레드 로컬 커넥션)
+    db.py              MariaDB 접근 + 도메인 헬퍼(스레드 로컬 커넥션), 영구 보관 라우팅
     logging_setup.py   파일 회전(7일)·마스킹 필터·UI 큐·event_log 핸들러
     util.py            KST 시각, 장 운영시간, 마스킹
     kiwoom/
@@ -127,12 +129,13 @@ server/
       fake.py          **테스트 전용** 가짜 클라이언트
     services/
       sync_account.py  ka00001 / kt00001 / kt00018 → account, account_balance, holding
-      sync_orders.py   ka10075 / ka10076 + WS 00·04 → orders, executions, holding
+      sync_orders.py   ka10075 / ka10076 + WS 00·04 → orders, executions, order_event, holding
       sync_market.py   ka10099 / ka10081 / ka10027 / ka10023 / ka10001 → stock_master, price_daily, screening_result
-      housekeeping.py  kt00015 → trade_ledger, ka10170 → daily_trade_summary, holding_snapshot, 7일 정리
+      housekeeping.py  kt00015 → trade_ledger, ka10170 → daily_trade_summary, holding_snapshot,
+                       7일 정리(purge_old) + 아카이브 정리(purge_archives)
     engine/
       context.py       EngineContext + **OrderGateState(게이트 판정)** + fail-closed 플래그
-      executor.py      **주문 게이트 · 유일한 주문 전송 지점** (재시도 금지·환경 검증)
+      executor.py      **주문 게이트 · 유일한 주문 전송 지점** (재시도 금지·환경 검증, 주문 맥락/이벤트 기록)
       runner.py        기동/주기 루프/종료, **자동거래 스위치**, 하트비트(10초), 예외 격리
     llm/
       client.py        Anthropic Messages API 래퍼(구조화 출력·오류 분류·키 미노출)
@@ -140,10 +143,11 @@ server/
     algo/
       base.py registry.py params.py
       risk_guard.py  momentum_screen.py  volatility_breakout.py
-      averaging_down.py  ma_cross_filter.py  claude_advisor.py
+      averaging_down.py  ma_cross_filter.py  universe_filter.py  claude_advisor.py
     ui/
       app.py           메인 창 + **자동거래 툴바**(시작/중지·긴급 취소)
       auto_trade_dialog.py  자동거래 시작 확인창(START 입력)
+      universe_preview.py   universe_filter 대상 종목 미리보기 팝업
       widgets.py  dashboard_tab.py  log_tab.py  algo_tab.py  settings_tab.py
     single_instance.py PID 락(다중 실행 방지)
   tests/     단위테스트(fake 데이터만, 실 API·실 DB 미사용)
@@ -161,6 +165,7 @@ server/
 | `volatility_breakout` | entry | `ka10081` 일봉으로 목표가 = 당일시가 + 전일변동폭×K, 돌파 시 매수·지정 시각 청산 |
 | `averaging_down` | risk | 평단 대비 `-drop_pct%` 시 추가매수. `avg_down_count ≤ max_steps` 로 **무한 물타기 차단**, 손절선 도달 시 전량 매도 |
 | `ma_cross_filter` | filter | 단기 MA < 장기 MA 종목의 신규 진입 차단 |
+| `universe_filter` | filter | **종목 유니버스 필터**. 코스피/코스닥 시가총액 순위·시총 하한·1주 가격 범위를 벗어나는 **신규 매수 신호만** 차단(기본 비활성) |
 | `claude_advisor` | filter | **Claude 거부권 필터**. risk_guard 까지 통과해 곧 주문될 **매수 신호만** Claude 가 한 번 더 검토해 위험하면 차단(기본 비활성) |
 
 ### risk_guard 파라미터 (알고리즘 탭에서 편집)
@@ -195,7 +200,67 @@ server/
 → UI 알고리즘 탭에 자동 노출되고, 파라미터 편집 폼도 `algorithm_param_def` 로 동적 생성된다.
 
 평가 파이프라인: **DB 에서 활성 알고리즘/파라미터 재로드 → entry·risk 알고리즘 신호 →
-filter 알고리즘 → risk_guard.check → ★claude_advisor 검토(매수만)★ → Executor(게이트)**.
+filter 알고리즘(ma_cross_filter · universe_filter) → risk_guard.check →
+★claude_advisor 검토(매수만)★ → Executor(게이트)**.
+
+`algorithm_param_def`(타입·min/max)로 표현할 수 없는 **파라미터 간 제약**은 알고리즘 클래스의
+`validate_params(ParamSet) -> list[str]` 에 둔다. 오류가 있으면 레지스트리가 그 알고리즘을
+비활성화하고 경보를 남기며(R-01/S-16), 알고리즘 탭 저장도 같은 함수로 막는다.
+
+### universe_filter — 종목 유니버스 필터(시가총액·주가)
+
+`stock_master`(ka10099 로 받아 둔 종목마스터)의 **상장주식수 × 전일종가**로 시가총액을 구해
+코스피/코스닥 시총 순위를 만들고, 그 밖의 종목에 대한 **신규 매수 신호만** 차단한다.
+
+* **매도·손절·청산에는 어떤 설정에서도 관여하지 않는다**(코드·테스트로 강제).
+* 순위 산출은 **DB 조회만** 한다. 키움 API 를 추가로 호출하지 않는다.
+* 순위는 종목마스터 `updated_at` 이 바뀌기 전까지 메모리에 캐시한다(사이클마다 재계산하지 않음).
+  종목마스터를 다시 받으면(`MarketService.sync_stock_master`) 캐시가 무효화된다.
+* 종목마스터가 비었거나 `stale_days` 보다 오래됐거나 조회에 실패하면 **신규 매수를 차단**한다
+  (fail-closed). 매도·손절은 영향받지 않는다.
+* 차단 시 `signal_log` 에 `BLOCK` 과 **구체적 사유**가 남는다 —
+  예: `유니버스 제외: 코스닥 시총순위 143위 > 100`, `주가 32,000원 < 최소 50,000원`
+
+| param_key | 라벨 | 타입 | 기본 | 범위 | 설명 |
+|---|---|---|---|---|---|
+| `use_kospi` | 코스피 포함 | bool | **1** | — | 코스피(거래소, `market_code='0'`) 포함 |
+| `use_kosdaq` | 코스닥 포함 | bool | **1** | — | 코스닥(`market_code='10'`) 포함 |
+| `rank_scope` | 순위 기준 | enum | `per_market` | per_market / combined | 시장별 순위 vs 코스피+코스닥 합산 순위 |
+| `top_n` | 시가총액 상위 N | int | **100** | 1 ~ 2000 | 시총 순위 상위 N개만 거래 대상 |
+| `min_market_cap_eok` | 최소 시가총액 | int | 0 (미사용) | 0 ~ 100,000,000 억원 | 억원 단위 하한. `0` = 사용 안 함 |
+| `min_price` | 최소 주가(1주) | int | **50,000원** | 0 ~ 10,000,000원 | 1주 가격 하한. `0` = 사용 안 함 |
+| `max_price` | 최대 주가(1주) | int | 0 (미사용) | 0 ~ 100,000,000원 | `0` 이 아니면 `min_price` 이상이어야 함(검증 오류) |
+| `exclude_preferred` | 우선주 제외 | bool | **1** | — | 보통주가 함께 상장된 경우에만 우선주로 판정(보수적) |
+| `exclude_spac` | 스팩 제외 | bool | **1** | — | 종목명에 `스팩` |
+| `exclude_warning` | 관리·경고 종목 제외 | bool | **1** | — | 관리종목·거래정지·정리매매 + `order_warning<>'0'` |
+| `apply_to` | 적용 대상 | enum | `entry` | entry / entry_and_avg | 신규 진입만 vs 신규 진입 + 물타기 |
+| `stale_days` | 종목마스터 허용 경과일 | int | **5일** | 1 ~ 30 | 이보다 오래된 마스터면 신규 매수 차단 |
+
+**순위 기준 — 시장별 vs 합산**
+
+합산 시총 상위 100 은 실제로 코스피 94 + 코스닥 6 수준이라, 합산(`combined`)을 고르면 코스닥이
+거의 대상에서 빠진다. 시장을 고르게 담고 싶으면 `per_market`(기본)을 쓴다
+— 코스피 상위 100 + 코스닥 상위 100 이 각각 대상이 된다.
+
+**우선주 판정**은 이름 접미(`우`, `2우B`, `우(전환)` …)만으로 정하지 않고,
+① 접미를 뗀 이름이 상장돼 있거나 ② 종목코드 끝자리를 `0` 으로 바꾼 보통주 코드가 있을 때만
+우선주로 본다. `우리금융지주`·`우진`·`이오플로우` 같은 이름은 제외되지 않는다.
+
+**주가 필터와 종목당 한도의 관계 (중요)**
+
+`min_price` 를 올리면 1주 값이 비싸지므로, risk_guard 의
+**종목당 유효 한도 = min(절대한도, 총자산 × 비중%)** 가 1주 값보다 작으면 **한 주도 살 수 없다**.
+알고리즘 탭의 `risk_guard` / `universe_filter` 폼 아래 **[유효 한도 미리보기]** 패널이 폼에 입력된
+값 기준으로 이를 계산해 경고한다 — 예:
+
+> ⚠ 현재 종목당 한도 18,720원으로는 1주 50,000원 종목을 매수할 수 없습니다 —
+> 종목당 비중을 26.71% 이상으로 올리거나 예수금을 늘리세요
+
+경고가 있어도 저장은 되며(상태 라벨에 경고 표시), 자동거래 시작 확인창에도 같은 경고가 나온다.
+
+**[대상 종목 미리보기]** 버튼(universe_filter 폼 아래)은 **저장 전 폼 값**을 그대로 적용해
+대상 종목 수(시장별)·시총 컷오프·종목마스터 최신 갱신 시각과 순위표(순위·코드·종목명·시장·
+시총(억)·전일종가·통과/제외 사유)를 보여준다. DB 만 읽고 조회는 백그라운드 스레드에서 한다.
 
 ### claude_advisor — Claude 거부권 필터
 
@@ -253,7 +318,8 @@ OHLCV 와 MA5/MA20, 신호 출처 알고리즘/점수/사유, 물타기면 평�
   (녹색=정상, 황색=주의·재연결중, 적색=오류, 회색=미확인, 실전 주문 ON 은 경고색). 마우스 오버 시 최근 메시지.
 * 그 아래 **자동거래 툴바**(탭 위, 항상 표시): 시작/중지 토글 + 상태 라벨 + 긴급 미체결 취소
 * 탭 ① 대시보드(요약 + 보유종목, 상승 빨강·하락 파랑) ② 주요 기록(실시간 이벤트, 레벨 필터·자동 스크롤)
-  ③ 알고리즘(선택·우선순위 + 동적 파라미터 폼, 기본값 복원) ④ 설정(+ 엔진(조회·동기화) 시작/정지)
+  ③ 알고리즘(선택·우선순위 + 동적 파라미터 폼, 기본값 복원, **유효 한도 미리보기** ·
+  universe_filter 의 **대상 종목 미리보기**) ④ 설정(+ 엔진(조회·동기화) 시작/정지)
 * 엔진은 별도 스레드, 로그는 큐로 전달 → **UI 스레드 블로킹 없음**
 * 창 닫기 시 확인 후 정상 종료: WS 해제 → `algo_run.ended_at` → 토큰 폐기(`au10002`) → `server_status` 갱신
 
@@ -262,12 +328,96 @@ OHLCV 와 MA5/MA20, 신호 출처 알고리즘/점수/사유, 물타기면 평�
 * 파일 `logs/stock_svr.log` — `TimedRotatingFileHandler(when=midnight, backupCount=7)`
   + 기동 시/매일 7일 초과 파일 삭제
 * DB `event_log`, `api_call_log` 도 `log_retention_days` 초과분 삭제(`screening_result` 는 4배 기간)
+* **중요한 이벤트·API 오류는 지워지기 전에 `event_archive`/`api_error_log` 로 복사**해
+  `archive_retention_days`(기본 365일) 동안 보관한다 → 9절
 * 모든 로그·DB 메시지에 비밀값 마스킹 필터 적용
   (앱키/시크릿키/토큰/비밀번호/`api_key`/`Bearer` + Anthropic 키 패턴 `sk-ant-…`)
 * `llm_decision_log` 는 Claude 검토 판단 기록(입력 요약 JSON·모델·결정·토큰). 키 값은 포함되지 않는다.
 * 계좌번호는 끝 4자리만 표시
 
-## 9. 개발 시 지켜야 할 것
+## 9. 거래 기록 / 분석
+
+실거래의 성공·실패를 나중에 되짚을 수 있도록, **주문 한 건의 전 과정**(신호 → 주문 → 전송 →
+접수/부분체결/체결 또는 거부/실패 → 정산)이 지워지지 않는 곳에 남는다.
+
+### 어디에 무엇이 남는가
+
+| 테이블 | 남는 것 | 보관 | 쓰는 곳 |
+|---|---|---|---|
+| `signal_log` | 모든 신호와 차단 사유(BUY/SELL/HOLD/BLOCK) | 영구 | 알고리즘·risk_guard·claude_advisor |
+| `orders` | 주문 1건의 **최신** 상태 + 신호 맥락(아래) | 영구 | `engine/executor.py`, 동기화 |
+| `order_event` | 주문 **상태 변화 이력**(CREATED→SENT→ACCEPTED→PARTIAL→FILLED, 또는 REJECTED/CANCELED/FAILED/UNKNOWN) | 영구 | Executor(`source=EXECUTOR`), WS `00`(`WS`), ka10075/ka10076(`REST`) |
+| `executions` | 체결 1건씩(수량·가격·수수료·세금) | 영구 | WS `00`(정본) + ka10076(보정) |
+| `llm_decision_log` | Claude 검토 판단(모델·결정·확신도·근거·토큰) | 영구 | `claude_advisor` |
+| `trade_ledger` / `daily_trade_summary` | 사후 정산(kt00015 / ka10170) | 영구 | 장마감 정리 |
+| `position_state` | 종목별 누적 투입금·물타기 회차·손절 봉인 | 영구 | Executor / 동기화 |
+| `event_archive` | 주요 이벤트 보관본(WARN·ERROR 전부 + `order`/`algo`/`engine`/`risk` 분류) | `archive_retention_days`(기본 365일, 하한 30일) | `db.log_event()` |
+| `api_error_log` | 키움 API **오류 응답만**(HTTP ≥ 400 또는 `return_code` ≠ 0) | 위와 동일 | `db.log_api_call()` |
+| `event_log` / `api_call_log` / `screening_result` | 단기 운영 로그 | `log_retention_days`(기본 7일, 스크리닝은 4배) | 전역 |
+
+* `event_archive` 는 **반복 INFO 폭주를 막는다**: 동기화·하트비트성 INFO 는 보관하지 않고,
+  같은 (레벨, 분류, 메시지) 가 60초 안에 반복되면 1건만 남긴다.
+* 보관본 기록이 실패해도 원래 기록(`event_log`/`api_call_log`)과 주문 처리는 그대로 진행된다.
+* **`order_event`·`orders`·`executions`·`signal_log`·`llm_decision_log`·`position_state` 를
+  지우는 코드는 존재하지 않는다.** 정리 대상은 `purge_old`(event_log/api_call_log/screening_result)
+  와 `purge_archives`(event_archive/api_error_log) 뿐이며 테스트로 고정돼 있다.
+
+### `orders` 의 신호 맥락 (슬리피지·당시 설정 분석용)
+
+주문 행을 만들 때(관찰모드 `SIGNAL_ONLY` 행 포함) 아래 4개를 함께 기록한다.
+
+| 컬럼 | 내용 |
+|---|---|
+| `signal_price` | 신호 시점 기준가 — 지정가면 그 값, 아니면 신호가 들고 온 현재가/보유 현재가. `avg_fill_pric` 와 비교하면 **슬리피지**가 나온다 |
+| `signal_context` | JSON: `kind`(entry/avg_down/stop_loss/…), `side`, `algo_code`, `score`, `qty`, `price`, `trde_tp`, `est_amount`, `reason`(신호 사유 전문, ≤2000자), `meta` |
+| `params_snapshot` | JSON: 그 시점의 `risk_guard` 파라미터 전체 + 신호를 낸 알고리즘 파라미터 + `claude_advisor` 활성여부·모델·`min_confidence` |
+| `reject_reason` | 거래소 거부사유(WS `919`, 또는 주문 API 가 `return_code ≠ 0` 으로 거부한 사유) |
+
+**비밀값은 넣지 않는다**: 키/시크릿/토큰/비밀번호/계좌번호성 항목은 키 이름 단계에서 제외되고,
+남은 문자열에도 마스킹 필터가 한 번 더 적용된다(`tests/test_trade_records.py` 가 검증).
+
+### 거부사유(WS `919`) 처리
+
+| 수신 값 | 처리 |
+|---|---|
+| 없음 · 빈 문자열 · `"0"` | 사유 없음(`reject_reason` = NULL) |
+| 그 외 | 255자로 잘라 `order_event.reject_reason` + `orders.reject_reason` 양쪽에 저장 |
+| 상태가 `REJECTED` 인데 사유가 없음 | `order_event.message` 에 `거부사유 미제공` |
+
+동기화는 **저장된 상태·체결수량과 달라졌을 때만** `order_event` 를 1건 추가한다
+(같은 실시간 메시지가 반복 수신돼도 이벤트가 늘어나지 않는다).
+
+### 뷰 `v_trade_analysis`
+
+신호 → 주문 → 체결 → Claude 판단을 **한 줄로** 묶어 주는 읽기 전용 뷰다(서버 코드는 쓰지 않는다).
+슬리피지(`slippage_pct`), 체결금액·수수료, 거부사유, 당시 파라미터가 한 번에 나온다.
+
+```sql
+-- 최근 2주 실거래 중 실패·거부 건과 그때의 설정
+SELECT signal_time, algo_code, stk_cd, order_status, return_code, reject_reason,
+       signal_price, avg_fill_pric, slippage_pct, params_snapshot
+FROM v_trade_analysis
+WHERE is_dry_run = 0
+  AND order_status IN ('REJECTED','FAILED','CANCELED')
+  AND signal_time >= NOW() - INTERVAL 14 DAY
+ORDER BY signal_time DESC;
+
+-- 알고리즘별 체결률 / 평균 슬리피지
+SELECT algo_code,
+       COUNT(*) AS orders,
+       SUM(order_status = 'FILLED') AS filled,
+       ROUND(AVG(slippage_pct), 3) AS avg_slippage_pct
+FROM v_trade_analysis
+WHERE is_dry_run = 0 AND order_id IS NOT NULL
+GROUP BY algo_code;
+
+-- 주문 한 건이 어떤 경로를 거쳤는지
+SELECT event_time, event_type, status, filled_qty, remain_qty, price,
+       reject_reason, return_code, message, source
+FROM order_event WHERE order_id = ? ORDER BY id;
+```
+
+## 10. 개발 시 지켜야 할 것
 
 * **실주문 API(`kt10000~3`, `kt10006~9`, `kt50000~3`, `ust2*`)를 실서버로 호출하지 않는다.**
   주문 경로 테스트는 `stock_svr/kiwoom/fake.py::FakeRest` 로만 한다.

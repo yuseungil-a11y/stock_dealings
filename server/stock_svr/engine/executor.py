@@ -13,6 +13,7 @@ DEV_SPEC 2-3:
 from __future__ import annotations
 
 import datetime as _dt
+import json
 import logging
 from dataclasses import dataclass
 from typing import Callable
@@ -20,6 +21,7 @@ from typing import Callable
 from ..algo.base import KIND_AVG_DOWN, KIND_STOP_LOSS, Signal, amount_with_buffer
 from ..db import Database
 from ..kiwoom.errors import KiwoomError
+from ..util import mask_text
 from .context import BALANCE_STALE_SEC, EngineContext, OrderGateState  # noqa: F401
 
 log = logging.getLogger(__name__)
@@ -44,6 +46,126 @@ PENDING_UNKNOWN_MIN_SYNCS = 3              # 연속 동기화 3회
 # --- 매도 연속 실패 봉인 (R-06) -------------------------------------- #
 MAX_SELL_FAILURES = 3                      # 연속 REJECTED/FAILED 이 횟수면 종목 봉인
 FAILURE_BACKOFF_SEC = 60                   # 실패 1회마다 최소 이만큼 쉬었다 재시도
+
+# --- 주문 맥락 기록 (사후 분석용) ------------------------------------- #
+# orders.signal_price / signal_context / params_snapshot 에 남기는 내용의 상한.
+# 비밀값(앱키·시크릿키·토큰·비밀번호)과 계좌번호는 **어떤 경로로도 넣지 않는다**.
+DRY_RUN_EVENT_MSG = "관찰모드 신호만"
+MAX_REASON_CHARS = 2000                    # 신호 사유 전문 상한
+MAX_JSON_CHARS = 8000                      # signal_context / params_snapshot 전체 상한
+MAX_VALUE_CHARS = 200                      # meta/파라미터 값 1개 상한
+MAX_META_ITEMS = 30                        # meta 항목 수 상한
+CLAUDE_ADVISOR_CODE = "claude_advisor"     # (import 체인을 늘리지 않으려고 문자열로 둔다)
+
+# 이 단어가 들어간 키는 스냅샷에서 통째로 제외한다(비밀·계좌 식별자 차단)
+SECRET_KEY_WORDS = ("key", "secret", "token", "password", "passwd", "pwd",
+                    "credential", "authorization", "account", "acct", "계좌", "비밀")
+
+
+def _is_secret_key(key) -> bool:
+    low = str(key).lower()
+    return any(word in low for word in SECRET_KEY_WORDS)
+
+
+def _clip(value, limit: int = MAX_VALUE_CHARS):
+    """JSON 에 넣을 값 1개를 마스킹 + 길이 제한한다."""
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return mask_text(str(value))[:limit]
+
+
+def _safe_params(params) -> dict:
+    """알고리즘 파라미터 dict 에서 비밀성 키를 빼고 값 길이를 제한한다."""
+    out: dict = {}
+    for k, v in dict(params or {}).items():
+        if _is_secret_key(k):
+            continue
+        out[str(k)[:50]] = _clip(v)
+    return out
+
+
+def _dump_json(payload) -> str | None:
+    try:
+        text = json.dumps(payload, ensure_ascii=False, default=str)
+    except Exception:  # noqa: BLE001 - 기록용 부가정보다. 실패하면 생략한다.
+        log.debug("주문 맥락 JSON 직렬화 실패", exc_info=True)
+        return None
+    return mask_text(text)[:MAX_JSON_CHARS]
+
+
+def build_signal_context(signal: Signal) -> str | None:
+    """`orders.signal_context` 용 JSON — 신호 종류·점수·출처 알고리즘·사유 전문·meta."""
+    meta: dict = {}
+    for k, v in list(dict(signal.meta or {}).items())[:MAX_META_ITEMS]:
+        if _is_secret_key(k):
+            continue
+        meta[str(k)[:50]] = _clip(v)
+    payload = {
+        "kind": signal.kind,
+        "side": signal.side,
+        "algo_code": signal.algo_code,
+        "score": float(signal.score) if signal.score is not None else None,
+        "qty": int(signal.qty or 0),
+        "price": int(signal.price) if signal.price else None,
+        "trde_tp": signal.trde_tp,
+        "est_amount": signal.est_amount,
+        "exchange": signal.exchange,
+        "reason": mask_text(signal.reason or "")[:MAX_REASON_CHARS],
+        "meta": meta,
+    }
+    return _dump_json(payload)
+
+
+def build_params_snapshot(algo_rows: list[dict] | None, algo_code: str | None) -> str | None:
+    """`orders.params_snapshot` 용 JSON — 주문 시점의 risk_guard·출처 알고리즘·Claude 설정.
+
+    '그때 어떤 설정으로 냈는가'를 나중에 그대로 재현할 수 있게 값만 담는다.
+    비밀·키·계좌번호는 담지 않는다(`SECRET_KEY_WORDS` 로 차단 + 마스킹).
+    """
+    by_code = {str(a.get("code")): a for a in (algo_rows or []) if a.get("code")}
+    guard = by_code.get("risk_guard") or {}
+    source = by_code.get(str(algo_code)) if algo_code else None
+    advisor = by_code.get(CLAUDE_ADVISOR_CODE) or {}
+    advisor_params = _safe_params(advisor.get("params"))
+    payload = {
+        "risk_guard": _safe_params(guard.get("params")),
+        "source_algo": {
+            "code": algo_code,
+            "enabled": bool(source.get("is_enabled")) if source else None,
+            "params": _safe_params((source or {}).get("params")),
+        },
+        "claude_advisor": {
+            "enabled": bool(advisor.get("is_enabled")) if advisor else False,
+            "model": advisor_params.get("model"),
+            "min_confidence": advisor_params.get("min_confidence"),
+        },
+    }
+    return _dump_json(payload)
+
+
+def signal_base_price(ctx: EngineContext, signal: Signal) -> int | None:
+    """`orders.signal_price` — 신호 평가 시점의 기준가(슬리피지 계산 기준).
+
+    지정가 신호는 그 가격, 아니면 신호가 들고 온 현재가, 그것도 없으면 컨텍스트의
+    현재가를 쓴다. **시세 REST 재조회는 하지 않는다**(주문 전송 지연 방지).
+    """
+    if signal.price:
+        try:
+            return int(signal.price)
+        except (TypeError, ValueError):
+            pass
+    for key in ("cur_prc", "price", "signal_price"):
+        raw = (signal.meta or {}).get(key)
+        if raw:
+            try:
+                return int(raw)
+            except (TypeError, ValueError):
+                continue
+    try:
+        return ctx.current_price(signal.stk_cd, fallback_quote=False)
+    except Exception:  # noqa: BLE001
+        log.debug("신호 기준가 확인 실패 %s", signal.stk_cd, exc_info=True)
+        return None
 
 
 @dataclass
@@ -162,6 +284,8 @@ class Executor:
         result.status = "SENT" if can_send else "SIGNAL_ONLY"
         result.blocked_reason = block
 
+        # 사후 분석용 맥락(신호 기준가·신호 전문·당시 파라미터). 관찰모드 행에도 같이 남긴다.
+        ctx_cols = self._order_context(ctx, signal)
         order_id = self.db.insert_order(
             account_id=self.account_id,
             run_id=ctx.run_id or self.run_id,
@@ -183,8 +307,14 @@ class Executor:
             return_code=None,
             return_msg=(result.blocked_reason or None),
             is_dry_run=0 if can_send else 1,
+            **ctx_cols,
         )
         result.order_id = order_id
+        self._order_event(
+            order_id, "CREATED", status=result.status, filled_qty=0,
+            remain_qty=int(signal.qty), price=ctx_cols.get("signal_price"),
+            message=(f"{DRY_RUN_EVENT_MSG}: {result.blocked_reason}" if not can_send
+                     else (signal.reason or None)))
         result.signal_id = self._log_signal(
             ctx, signal, signal.side, signal.reason, order_id=order_id)
 
@@ -204,6 +334,10 @@ class Executor:
             result.status = "SENT"
             self.db.update_order(order_id, ord_no=ord_no, status="SENT",
                                  return_code=rc, return_msg=(rmsg or "")[:255] or None)
+            self._order_event(order_id, "SENT", ord_no=ord_no, status="SENT", filled_qty=0,
+                              remain_qty=int(signal.qty),
+                              price=int(signal.price) if signal.price else None,
+                              return_code=rc, message=(rmsg or None))
             log.warning("주문 전송: %s ord_no=%s", signal, ord_no)
         except Exception as exc:  # noqa: BLE001 - 주문은 절대 재시도하지 않는다
             rc = getattr(exc, "return_code", None)
@@ -212,7 +346,17 @@ class Executor:
             result.unknown_state = _is_unknown_state(exc)
             msg = (f"{UNKNOWN_PREFIX} {result.error}" if result.unknown_state
                    else result.error)[:255]
-            self.db.update_order(order_id, status="FAILED", return_code=rc, return_msg=msg)
+            # 거래소/서버가 명시적으로 거부한 경우(return_code != 0)만 거부사유로 남긴다.
+            reject = None
+            if not result.unknown_state and rc is not None:
+                reject = (str(getattr(exc, "return_msg", "") or "").strip()
+                          or result.error)[:255]
+            upd = {"status": "FAILED", "return_code": rc, "return_msg": msg}
+            if reject:
+                upd["reject_reason"] = reject
+            self.db.update_order(order_id, **upd)
+            self._order_event(order_id, "FAILED", status="FAILED", return_code=rc,
+                              reject_reason=reject, message=msg)
             self._record_failure(ctx, signal)
             if result.unknown_state:
                 # 응답 유실: 접수 여부를 알 수 없다 → 재전송 금지, **증거**로 확정할 때까지 차단
@@ -233,6 +377,34 @@ class Executor:
             ctx.halt(f"position_state 갱신 실패({signal.stk_cd}) - 한도 계산 신뢰 불가")
             self._raise_alarm(f"position_state 갱신 실패: {signal.stk_cd}")
         return result
+
+    # ------------------------------------------------------------------ #
+    # 사후 분석용 기록 (orders 맥락 컬럼 / order_event)
+    # ------------------------------------------------------------------ #
+    def _order_context(self, ctx: EngineContext, signal: Signal) -> dict:
+        """`orders` 에 함께 남길 맥락 3종. 산출 실패가 주문을 막지 않는다."""
+        out: dict = {"signal_price": None, "signal_context": None, "params_snapshot": None}
+        try:
+            out["signal_price"] = signal_base_price(ctx, signal)
+        except Exception:  # noqa: BLE001
+            log.debug("signal_price 산출 실패", exc_info=True)
+        try:
+            out["signal_context"] = build_signal_context(signal)
+        except Exception:  # noqa: BLE001
+            log.debug("signal_context 생성 실패", exc_info=True)
+        try:
+            out["params_snapshot"] = build_params_snapshot(ctx.algorithm_rows(), signal.algo_code)
+        except Exception:  # noqa: BLE001
+            log.debug("params_snapshot 생성 실패", exc_info=True)
+        return out
+
+    def _order_event(self, order_id: int | None, event_type: str, **f) -> None:
+        """`order_event` 1건 기록. **기록 실패가 주문 처리를 깨뜨리지 않는다**(로그만)."""
+        try:
+            self.db.insert_order_event(order_id=order_id, account_id=self.account_id,
+                                       event_type=event_type, source="EXECUTOR", **f)
+        except Exception:  # noqa: BLE001
+            log.debug("order_event 기록 실패 (%s)", event_type, exc_info=True)
 
     # ------------------------------------------------------------------ #
     def _send_order(self, signal: Signal) -> tuple[str | None, int | None, str]:
@@ -339,6 +511,8 @@ class Executor:
         self.pending_unknown[signal.stk_cd] = PendingUnknown(
             stk_cd=signal.stk_cd, side=signal.side, qty=int(signal.qty), since=ctx.now,
             order_id=order_id, baseline_qty=qty, baseline_cash=ctx.cash_available())
+        self._order_event(order_id, "UNKNOWN", status="FAILED", remain_qty=int(signal.qty),
+                          message=f"{UNKNOWN_PREFIX} 증거 확인 전까지 {signal.stk_cd} 신규 주문 차단")
 
     def resolve_pending_unknown(self, holdings: dict[str, dict] | None, cash: int | None,
                                 now: _dt.datetime) -> dict:
@@ -461,6 +635,7 @@ class Executor:
         result.status = "SENT" if can_send else "SIGNAL_ONLY"
         result.blocked_reason = block
 
+        ctx_cols = self._order_context(ctx, sig)
         order_id = self.db.insert_order(
             account_id=self.account_id, run_id=ctx.run_id or self.run_id,
             algo_code="manual_cancel", ord_no=None, orig_ord_no=ord_no,
@@ -469,8 +644,13 @@ class Executor:
             ord_uv=None, status=result.status, filled_qty=0, avg_fill_pric=None,
             reason=reason[:255], return_code=None,
             return_msg=(result.blocked_reason or None), is_dry_run=0 if can_send else 1,
+            **ctx_cols,
         )
         result.order_id = order_id
+        self._order_event(
+            order_id, "CREATED", ord_no=ord_no, status=result.status, remain_qty=int(qty),
+            message=(f"{DRY_RUN_EVENT_MSG}: {result.blocked_reason}" if not can_send
+                     else reason))
         if not can_send:
             log.info("[관찰모드] 취소 신호만 기록: ord_no=%s | %s", ord_no, result.blocked_reason)
             return result
@@ -483,11 +663,16 @@ class Executor:
             result.ord_no = new_no
             result.sent = True
             self.db.update_order(order_id, ord_no=new_no, status="SENT")
+            self._order_event(order_id, "SENT", ord_no=new_no, status="SENT",
+                              remain_qty=int(qty), message=f"미체결 취소 전송(원주문 {ord_no})")
             log.warning("미체결 취소 전송: orig=%s %s %s주 → ord_no=%s", ord_no, stk_cd, qty, new_no)
         except Exception as exc:  # noqa: BLE001 - 취소도 재시도하지 않는다
+            rc = getattr(exc, "return_code", None)
             result.error = f"{type(exc).__name__}: {exc}"
             result.status = "FAILED"
             self.db.update_order(order_id, status="FAILED", return_msg=result.error[:255])
+            self._order_event(order_id, "FAILED", ord_no=ord_no, status="FAILED",
+                              return_code=rc, message=result.error[:255])
             log.error("미체결 취소 실패: orig=%s | %s", ord_no, exc)
         return result
 

@@ -34,6 +34,10 @@ if ((Test-Path $RunDir) -and (Get-ChildItem $RunDir -Force | Measure-Object).Cou
   throw "RunDir is not empty and does not look like a stock_svr run folder: $RunDir"
 }
 
+$ver = (python -c "import stock_svr; print(stock_svr.__version__)").Trim()
+if ($ver -notmatch '^\d+\.\d+\.\d+$') { throw "cannot read server version (got '$ver')" }
+Write-Host "stock_svr version: v$ver  (bump with: python tools\bump_version.py server patch|minor|major)"
+
 if (-not $SkipTests) {
   Write-Host '[1/5] pytest ...'
   python -m pytest -q
@@ -79,7 +83,12 @@ Write-Host '[5/5] verify ...'
 $exe = Join-Path $RunDir 'stock_svr.exe'
 if (-not (Test-Path $exe)) { throw 'missing stock_svr.exe in run folder' }
 '{0}  {1:N1} MB  ({2})' -f 'stock_svr.exe', ((Get-Item $exe).Length / 1MB), (Get-Item $exe).LastWriteTime
-Write-Host "Deploy OK -> $RunDir"
+# record what is deployed (version, build time, git commit if available)
+$commit = 'n/a'
+try { $c = (git -C $root rev-parse --short HEAD 2>$null); if ($LASTEXITCODE -eq 0 -and $c) { $commit = $c.Trim() } } catch { }
+$global:LASTEXITCODE = 0
+@("stock_svr v$ver", "built  $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')", "commit $commit") | Set-Content -Path (Join-Path $RunDir 'VERSION.txt') -Encoding ASCII
+Write-Host "Deploy OK -> $RunDir   (stock_svr v$ver, commit $commit)"
 if ($Launch) {
   Start-Process -FilePath $exe -WorkingDirectory $RunDir | Out-Null
   Write-Host "Launched $exe"

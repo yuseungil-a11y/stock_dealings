@@ -39,9 +39,14 @@ class FakeDb:
         self.events: list[tuple[str, str, str]] = []
         self.bars: dict[str, list[dict]] = {}
         self.stock_states: dict[str, str] = {}
+        # universe_filter 용 종목마스터 대역
+        self.stock_master_rows: list[dict] = []
+        self.stock_master_updated_at: _dt.datetime | None = None
         self.executions: list[dict] = []
         self.order_algos: dict[str, str] = {}
         self.expired_unknown = 0
+        self.order_events: list[dict] = []
+        self.purged: list[tuple[str, int]] = []      # (대상, 보관일수)
         self._oid = 0
         self._sid = 0
         self._lid = 0
@@ -114,6 +119,36 @@ class FakeDb:
                 return 1
         return 0
 
+    def find_order_by_ordno(self, account_id: int, ord_no: str):
+        self._maybe_fail("find_order_by_ordno")
+        for row in reversed(self.orders):
+            if str(row.get("ord_no") or "") == str(ord_no):
+                return dict(row)
+        return None
+
+    def upsert_order_by_ordno(self, account_id: int, ord_no: str, **f):
+        """실제 Database 와 같은 동작(있으면 갱신, 없으면 새 행)."""
+        existing = self.find_order_by_ordno(account_id, ord_no)
+        if existing:
+            self.update_order(existing["id"], **f)
+            return existing["id"]
+        payload = dict(f)
+        payload.setdefault("side", "BUY")
+        payload.setdefault("status", "ACCEPTED")
+        payload["account_id"] = account_id
+        payload["ord_no"] = ord_no
+        return self.insert_order(**payload)
+
+    def insert_order_event(self, **f):
+        self._maybe_fail("insert_order_event")
+        row = dict(f)
+        row["id"] = len(self.order_events) + 1
+        self.order_events.append(row)
+        return row["id"]
+
+    def order_events_of(self, order_id: int) -> list[dict]:
+        return [e for e in self.order_events if e.get("order_id") == order_id]
+
     def has_open_order(self, account_id: int, stk_cd: str, side: str | None = None) -> bool:
         self._maybe_fail("has_open_order")
         if side and (stk_cd, side) in self.open_order_codes:
@@ -131,6 +166,32 @@ class FakeDb:
                 n += 1
         self.expired_unknown += n
         return n
+
+    def upsert_execution(self, account_id, ord_no, cntr_no, stk_cd, stk_nm, side,
+                         cntr_qty, cntr_pric, executed_at, cmsn=None, tax=None,
+                         source="WS", only_if_absent=False):
+        self._maybe_fail("upsert_execution")
+        key = (str(ord_no), str(cntr_no))
+        for e in self.executions:
+            if (str(e.get("ord_no")), str(e.get("cntr_no"))) == key:
+                if only_if_absent:
+                    return
+                e.update({"cntr_qty": cntr_qty, "cntr_pric": cntr_pric,
+                          "executed_at": executed_at})
+                return
+        if only_if_absent and any(e.get("ord_no") == ord_no and e.get("cntr_qty") == cntr_qty
+                                  and e.get("cntr_pric") == cntr_pric for e in self.executions):
+            return
+        self.executions.append({
+            "account_id": account_id, "ord_no": ord_no, "cntr_no": cntr_no, "stk_cd": stk_cd,
+            "stk_nm": stk_nm, "side": side, "cntr_qty": cntr_qty, "cntr_pric": cntr_pric,
+            "executed_at": executed_at, "cmsn": cmsn, "tax": tax, "source": source})
+
+    def reduce_position_invest(self, account_id, stk_cd, amount):
+        self._maybe_fail("reduce_position_invest")
+        st = self.position_states.get((account_id, stk_cd))
+        if st:
+            st["total_invested"] = max(0, int(st.get("total_invested") or 0) - int(amount))
 
     def count_executions_since(self, account_id: int, stk_cd: str, since) -> int:
         self._maybe_fail("count_executions_since")
@@ -208,6 +269,18 @@ class FakeDb:
     def recent_bars(self, stk_cd: str, limit: int = 30):
         return list(self.bars.get(stk_cd, []))[-limit:]
 
+    # -- 종목마스터 (universe_filter) ----------------------------------- #
+    def stock_master_stats(self) -> dict:
+        self._maybe_fail("stock_master_stats")
+        return {"count": len(self.stock_master_rows),
+                "updated_at": self.stock_master_updated_at}
+
+    def stock_master_universe(self, market_codes=("0", "10")) -> list[dict]:
+        self._maybe_fail("stock_master_universe")
+        wanted = {str(c) for c in market_codes}
+        return [dict(r) for r in self.stock_master_rows
+                if str(r.get("market_code")) in wanted]
+
     # -- 기타 ---------------------------------------------------------- #
     def scalar(self, sql: str, args=None, default=None):
         if "stop_loss_pct" in sql:
@@ -220,6 +293,28 @@ class FakeDb:
     def log_event(self, level, category, message):
         self.events.append((level, category, message))
         return len(self.events)
+
+    # -- 보관 정책 ------------------------------------------------------ #
+    def purge_old(self, retention_days: int = 7) -> dict:
+        self._maybe_fail("purge_old")
+        days = max(1, int(retention_days))
+        self.purged += [("event_log", days), ("api_call_log", days),
+                        ("screening_result", days * 4)]
+        return {"event_log": 0, "api_call_log": 0, "screening_result": 0}
+
+    def purge_archives(self, days=None) -> dict:
+        self._maybe_fail("purge_archives")
+        from stock_svr.db import ARCHIVE_RETENTION_DEFAULT, ARCHIVE_RETENTION_MIN
+
+        if days is None:
+            try:
+                days = int(self.settings.get("archive_retention_days",
+                                             ARCHIVE_RETENTION_DEFAULT))
+            except (TypeError, ValueError):
+                days = ARCHIVE_RETENTION_DEFAULT
+        days = max(ARCHIVE_RETENTION_MIN, int(days))
+        self.purged += [("event_archive", days), ("api_error_log", days)]
+        return {"event_archive": 0, "api_error_log": 0}
 
     # -- 검사 헬퍼 ------------------------------------------------------ #
     @property
@@ -266,6 +361,16 @@ def _reset_untradable_log():
     reset_untradable_log_state()
     yield
     reset_untradable_log_state()
+
+
+@pytest.fixture(autouse=True)
+def _reset_universe_cache():
+    """universe_filter 의 시총 순위 캐시가 테스트 간에 새지 않게 한다."""
+    from stock_svr.algo.universe_filter import clear_universe_cache
+
+    clear_universe_cache()
+    yield
+    clear_universe_cache()
 
 
 @pytest.fixture

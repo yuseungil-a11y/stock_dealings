@@ -3,9 +3,12 @@ from __future__ import annotations
 
 import datetime as _dt
 import logging
+import sys
 import tkinter as tk
+from pathlib import Path
 from tkinter import messagebox, ttk
 
+from .. import __released__, __version__
 from ..config import AppConfig
 from ..db import Database
 from ..engine.runner import Engine
@@ -20,6 +23,32 @@ log = logging.getLogger(__name__)
 
 UI_TICK_MS = 500
 DASH_REFRESH_MS = 5000
+
+
+def _asset_path(name: str) -> Path:
+    """아이콘 등 리소스 경로: exe(PyInstaller)면 _MEIPASS\assets, 개발 실행이면 server\assets."""
+    base = getattr(sys, "_MEIPASS", None)
+    if base:
+        return Path(base) / "assets" / name
+    return Path(__file__).resolve().parents[2] / "assets" / name
+
+
+def apply_window_icon(win: tk.Misc) -> bool:
+    """창(및 이후 열리는 대화상자) 아이콘을 주식 상승 아이콘으로 설정한다. 실패해도 프로그램은 계속 동작."""
+    try:
+        ico = _asset_path("stock_svr.ico")
+        if ico.exists():
+            win.iconbitmap(default=str(ico))
+            return True
+        png = _asset_path("stock_svr.png")
+        if png.exists():
+            img = tk.PhotoImage(file=str(png))
+            win.iconphoto(True, img)
+            win._icon_ref = img  # type: ignore[attr-defined]  # 참조 유지(GC 방지)
+            return True
+    except Exception:  # noqa: BLE001
+        log.debug("창 아이콘 설정 실패", exc_info=True)
+    return False
 
 
 def smoke_auto_approval(gate_open: bool) -> tuple[bool, str]:
@@ -46,7 +75,8 @@ class App(tk.Tk):
         self._dash_tick = 0
         self._auto_confirm = False   # 스모크에서만 True (확인창 자동 승인)
 
-        self.title("stock_svr — 키움 자동매매 서버")
+        self.title(f"stock_svr v{__version__} — 키움 자동매매 서버")
+        apply_window_icon(self)
         self.geometry("1180x760")
         self.minsize(960, 640)
         try:
@@ -81,6 +111,11 @@ class App(tk.Tk):
             light = StatusLight(bar, label)
             light.pack(side="left", padx=(0, 16))
             self.lights[key] = light
+        # 우측 상단: 버전 (가장 오른쪽) — 버전은 stock_svr/__init__.py 한 곳에서만 정의한다
+        self.version_label = ttk.Label(bar, text=f"v{__version__}", foreground="#1565c0",
+                                       font=("맑은 고딕", 9, "bold"))
+        self.version_label.pack(side="right", padx=(12, 0))
+        Tooltip(self.version_label, f"stock_svr v{__version__} ({__released__})")
         self.account_var = tk.StringVar(value="계좌: (미확인)")
         ttk.Label(bar, textvariable=self.account_var).pack(side="right")
         ttk.Separator(self, orient="horizontal").pack(fill="x")
@@ -179,7 +214,7 @@ class App(tk.Tk):
                 parent=self)
             return
         try:
-            info = collect_start_info(self.db)
+            info = collect_start_info(self.db, self.account_id())
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("자동거래 시작 불가", f"상태 조회 실패: {exc}", parent=self)
             return

@@ -37,7 +37,7 @@ $serverTime = date('Y-m-d H:i:s');
 
 switch ($r) {
     case 'ping':
-        json_out(['ok' => true, 'server_time' => $serverTime, 'user' => $user['username']]);
+        json_out(['ok' => true, 'server_time' => $serverTime, 'user' => $user['username'], 'web_version' => STOCK_WEB_VERSION]);
 
     case 'status':
         $rows = [];
@@ -89,6 +89,7 @@ switch ($r) {
                 'pl_amt' => $d['today_pl'],
                 'orders' => $d['today_orders'],
                 'signals' => $d['today_signals'],
+                'fail_24h' => $d['fail_24h'],
             ],
             'llm' => $d['llm'],
             'components' => $status,

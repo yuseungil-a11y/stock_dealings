@@ -9,7 +9,8 @@ daily_loss_limit_pct, max_orders_per_day, trade_start_time, trade_end_time, exch
 from __future__ import annotations
 
 import logging
-from decimal import Decimal
+from dataclasses import dataclass
+from decimal import ROUND_CEILING, Decimal
 
 from ..util import today_kst
 from .base import KIND_STOP_LOSS, SLIPPAGE_BUFFER, Algorithm, Signal, amount_with_buffer
@@ -17,7 +18,7 @@ from .registry import register
 
 log = logging.getLogger(__name__)
 
-__all__ = ["RiskGuard", "SLIPPAGE_BUFFER", "effective_limit"]
+__all__ = ["RiskGuard", "SLIPPAGE_BUFFER", "effective_limit", "LimitPreview", "limit_preview"]
 
 
 def effective_limit(abs_won: int, pct: Decimal, total_asset: int,
@@ -38,6 +39,87 @@ def _fmt_pct(pct: Decimal) -> str:
     if "." in s:
         s = s.rstrip("0").rstrip(".")
     return s or "0"
+
+
+# ---------------------------------------------------------------------- #
+# UI 미리보기(알고리즘 탭·자동거래 확인창)용 순수 계산
+# ---------------------------------------------------------------------- #
+ASSET_UNKNOWN_TEXT = "확인 불가"
+
+
+@dataclass
+class LimitPreview:
+    """폼에 입력된 값 기준 **유효 한도** 요약. DB·API 를 쓰지 않는 순수 계산 결과."""
+
+    asset: int | None
+    asset_text: str
+    per_limit: int
+    per_desc: str
+    total_limit: int
+    total_desc: str
+    min_price: int = 0
+    warning: str = ""
+    required_pct: Decimal | None = None
+
+    @property
+    def has_warning(self) -> bool:
+        return bool(self.warning)
+
+
+def _ceil2(value: Decimal) -> Decimal:
+    return Decimal(value).quantize(Decimal("0.01"), rounding=ROUND_CEILING)
+
+
+def limit_preview(asset, max_total_abs: int, max_total_pct, max_per_abs: int, max_per_pct,
+                  min_price: int = 0) -> LimitPreview:
+    """총자산·한도 파라미터·최소 주가로 유효 한도와 경고 문구를 만든다.
+
+    `asset` 이 None/0 이면 비중 한도를 계산할 수 없으므로 **절대 한도만** 적용해서 보여준다
+    (실제 주문은 총자산을 모르면 risk_guard 가 차단한다 - S-07/R-16).
+    """
+    try:
+        asset_val = int(asset or 0)
+    except (TypeError, ValueError):
+        asset_val = 0
+    max_total_abs = max(0, int(max_total_abs or 0))
+    max_per_abs = max(0, int(max_per_abs or 0))
+    min_price = max(0, int(min_price or 0))
+
+    if asset_val > 0:
+        total_limit, total_desc = effective_limit(max_total_abs, Decimal(str(max_total_pct)),
+                                                  asset_val)
+        per_limit, per_desc = effective_limit(max_per_abs, Decimal(str(max_per_pct)), asset_val)
+        asset_text = f"{asset_val:,}원"
+    else:
+        asset_val = 0
+        suffix = " — 총자산 확인 불가로 비중 한도 미적용"
+        total_limit, total_desc = max_total_abs, f"절대 한도({max_total_abs:,}원){suffix}"
+        per_limit, per_desc = max_per_abs, f"절대 한도({max_per_abs:,}원){suffix}"
+        asset_text = ASSET_UNKNOWN_TEXT
+
+    warning = ""
+    required_pct: Decimal | None = None
+    if min_price > 0 and per_limit < min_price:
+        if max_per_abs < min_price:
+            hint = f"종목당 최대 투입금(절대 한도)을 {min_price:,}원 이상으로 올리세요"
+        elif asset_val > 0:
+            required_pct = _ceil2(Decimal(min_price) * 100 / Decimal(asset_val))
+            if required_pct <= 100:
+                hint = (f"종목당 비중을 {_fmt_pct(required_pct)}% 이상으로 올리거나 "
+                        f"예수금을 늘리세요")
+            else:
+                hint = (f"비중을 100% 로 해도 1주 값에 못 미칩니다 — "
+                        f"예수금(총자산 {asset_val:,}원)을 늘리세요")
+        else:
+            hint = "총자산을 확인할 수 없습니다 — 계좌 동기화 후 다시 확인하세요"
+        warning = (f"현재 종목당 한도 {per_limit:,}원으로는 1주 {min_price:,}원 종목을 "
+                   f"매수할 수 없습니다 — {hint}")
+
+    return LimitPreview(
+        asset=asset_val or None, asset_text=asset_text,
+        per_limit=per_limit, per_desc=per_desc,
+        total_limit=total_limit, total_desc=total_desc,
+        min_price=min_price, warning=warning, required_pct=required_pct)
 
 
 @register

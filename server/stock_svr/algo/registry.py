@@ -58,13 +58,24 @@ def build(meta: dict, on_error: BuildErrorHook | None = None) -> Algorithm | Non
         _notify(on_error, code, "구현(클래스)이 없습니다", is_critical(meta))
         return None
     params = ParamSet(meta.get("param_defs") or [], meta.get("params") or {})
-    if params.invalid:
-        # S-16: 저장된 파라미터가 정의(타입·min/max)를 벗어나면 알고리즘을 비활성화한다.
-        detail = "; ".join(params.invalid[:5])
+    invalid = list(params.invalid) + cross_errors(cls, params)
+    if invalid:
+        # S-16: 저장된 파라미터가 정의(타입·min/max)나 파라미터 간 제약을 벗어나면
+        #       해당 알고리즘을 비활성화한다.
+        detail = "; ".join(invalid[:5])
         log.error("알고리즘 %s 파라미터 오류로 비활성화: %s", code, detail)
         _notify(on_error, code, f"파라미터 오류: {detail}", is_critical(meta))
         return None
     return cls(meta=meta, params=params)
+
+
+def cross_errors(cls: type[Algorithm], params: ParamSet) -> list[str]:
+    """알고리즘이 선언한 파라미터 간 제약 검증 결과(검증 자체가 실패하면 무시)."""
+    try:
+        return [str(e) for e in (cls.validate_params(params) or [])]
+    except Exception:  # noqa: BLE001 - 검증 오류가 빌드 경로를 죽이지 않게
+        log.debug("%s.validate_params 실패", cls.__name__, exc_info=True)
+        return []
 
 
 def _notify(hook: BuildErrorHook | None, code: str, detail: str, critical: bool) -> None:
@@ -105,5 +116,6 @@ def _ensure_loaded() -> None:
         ma_cross_filter,
         momentum_screen,
         risk_guard,
+        universe_filter,
         volatility_breakout,
     )

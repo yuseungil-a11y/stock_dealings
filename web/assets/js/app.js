@@ -199,6 +199,8 @@
           setText('today_pl', fmtSigned(data.today.pl_amt), signClass(data.today.pl_amt));
           setText('today_orders', fmtInt(data.today.orders));
           setText('today_signals', fmtInt(data.today.signals));
+          // 최근 24시간 주문 실패·거부 요약(해당 요소가 이미 있을 때만 갱신)
+          if (data.today.fail_24h !== undefined) { setText('fail_24h', fmtInt(data.today.fail_24h)); }
         }
         renderStatusList(data.components);
         renderEvents(data.events);

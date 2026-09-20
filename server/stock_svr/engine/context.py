@@ -126,6 +126,8 @@ class EngineContext:
     risk_halt: str = ""
     # 거래불가 판정 캐시 {stk_cd: 사유(""=거래가능)}
     _untradable: dict[str, str] = field(default_factory=dict, repr=False)
+    # 주문 기록용 알고리즘/파라미터 스냅샷 캐시 (사이클당 1회만 조회)
+    _algo_rows: list[dict] | None = field(default=None, repr=False)
 
     # ------------------------------------------------------------------ #
     @classmethod
@@ -218,6 +220,21 @@ class EngineContext:
             self.db.log_event("INFO", "algo", reason)
         except Exception:  # noqa: BLE001
             log.debug("거래불가 종목 기록 실패", exc_info=True)
+
+    # -- 주문 기록용 파라미터 스냅샷 ------------------------------------ #
+    def algorithm_rows(self) -> list[dict]:
+        """알고리즘 + 파라미터 현재값 목록(`orders.params_snapshot` 작성용).
+
+        주문 1건마다 DB 를 다시 읽지 않도록 이번 사이클 동안 캐시한다.
+        조회에 실패해도 빈 목록을 돌려주고 주문 흐름을 막지 않는다.
+        """
+        if self._algo_rows is None:
+            try:
+                self._algo_rows = [dict(a) for a in (self.db.load_algorithms() or [])]
+            except Exception:  # noqa: BLE001 - 기록용 부가정보일 뿐이다
+                log.debug("알고리즘 파라미터 조회 실패(주문 기록용)", exc_info=True)
+                self._algo_rows = []
+        return self._algo_rows
 
     def balance_age_sec(self) -> float | None:
         """잔고 스냅샷이 얼마나 오래됐는지(초). 알 수 없으면 None."""

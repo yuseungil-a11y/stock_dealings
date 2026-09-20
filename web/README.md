@@ -28,7 +28,7 @@ web/
   assets/
     css/app.css        자체 호스팅 스타일 (반응형)
     js/app.js          바닐라 JS (인라인 스크립트 없음 — CSP 준수)
-    img/favicon.svg
+    img/favicon.ico, favicon-32.png, apple-touch-icon.png   (tools/make_icon.py 로 생성 — 서버 프로그램과 같은 주식 상승 아이콘)
   lib/                 (.htaccess Require all denied + STOCK_APP 상수 가드)
     bootstrap.php      상수·초기화
     config.php         설정 파일 탐색 (웹루트 밖 우선)
@@ -36,7 +36,8 @@ web/
     db.php             PDO (prepared statement, 에뮬레이션 OFF)
     auth.php           로그인 / 잠금 / IP 제한 / 세션 수명 / 비밀번호 변경
     repo.php           조회 전용 SQL
-    view.php           페이지네이션 · 필터 · 배지 조각
+    view.php           페이지네이션 · 필터 · 배지 · 타임라인 · JSON 조각
+    export.php         분석용 CSV/JSON 내보내기 (GET 전용, 인증 필수)
     routes.php         메뉴/라우트 화이트리스트
   views/               화면 템플릿 (.htaccess Require all denied)
   config/              개발용 설정 위치 (배포 시 웹루트로 복사하지 않음)
@@ -55,12 +56,14 @@ web/
 | 거래 | 주문내역 | `trade.orders` | 신호만 기록된 건(`is_dry_run`/`SIGNAL_ONLY`) 배지 구분 |
 | 거래 | 거래내역 | `trade.ledger` | 위탁종합거래내역(kt00015) 정본 |
 | 거래 | 매매일지 | `trade.daily` | 일별·종목별 손익 + 기간 합계 + 손익 추이 차트 |
+| 거래 | **거래 분석** | `trade.analysis` | `v_trade_analysis`(신호→주문→체결→Claude 판단), 요약 카드·행 펼침 상세·주문 상태 타임라인, **CSV/JSON 내보내기** |
 | 전략 | 알고리즘 현황 | `strategy.algorithms` | 선택 여부·우선순위(읽기 전용) |
 | 전략 | 파라미터·변경이력 | `strategy.params` | 현재값/기본값/범위, 변경 이력 |
 | 전략 | 신호 기록 | `strategy.signals` | BUY/SELL/HOLD/BLOCK, 알고리즘 필터 |
 | 전략 | Claude 판단 | `strategy.claude` | Claude 거부권 필터(`llm_decision_log`) 판단 기록 — 오늘 요약 카드, 기간·종목·결과 필터 |
 | 시스템 | 서버 상태 | `system.status` | `server_status` 하트비트(지연 경고), 런타임 설정, 실행 이력, API 호출 통계 |
-| 시스템 | 이벤트 로그 | `system.events` | 레벨·분류·기간·메시지 필터 |
+| 시스템 | 이벤트 로그 | `system.events` | 레벨·분류·기간·메시지 필터 (7일 보관) |
+| 시스템 | **이벤트 · API 오류 보관** | `system.archive` | `event_archive` / `api_error_log` 탭 조회 (장기 보관본) |
 | 시스템 | 내 정보 | `system.profile` | 내 정보, 비밀번호 변경, 내 로그인 기록 |
 | 시스템 | 사용자 목록 | `system.users` | **admin 전용**, 사용자/로그인 시도 이력 |
 
@@ -94,12 +97,35 @@ web/
 `holdings.totals` / `dashboard.holding_totals` 에는 상장폐지 종목을 뺀 합계가 추가됩니다:
 `delisted_cnt`, `pur_amt_ex`, `evlt_amt_ex`, `evltv_prft_ex`, `prft_rt_ex`(분모 0 이면 `null`).
 
+`dashboard.today.fail_24h` 는 선택 계좌의 **최근 24시간 주문 실패·거부 건수**입니다.
+대시보드 "최근 이벤트" 위에 한 줄로 표시하며 0건이면 표시하지 않습니다.
+
 `dashboard.llm` 은 오늘 Claude 판단 요약(`calls`/`blocks`/`errors`/`cache_hits`/`input_tokens`/`output_tokens`/`total`)이며,
 `llm_decision_log` 를 읽을 수 없으면 `null` 입니다.
 
 > 키움은 상장폐지 종목의 `prft_rt` 를 `0.00%` 로 내려줍니다. 화면(보유종목·대시보드)에서는
 > 종목명 옆 **상장폐지** 배지와 함께 `real_profit_rate` 를 소수 1자리로 표시하고,
 > 합계·계좌 요약에는 **"상장폐지 종목 제외 시 X%"** 보조 표기를 덧붙입니다(제외 후 매입금액이 0 이면 생략).
+
+## 3.2 분석용 내보내기 (Claude 분석 입력)
+
+`GET /stock/index.php?p=trade.analysis&export=csv|json`
+
+화면의 **필터(기간·종목·결과 유형) 조건을 그대로** 사용해 `v_trade_analysis` 를 내려받습니다.
+
+| 항목 | 내용 |
+|---|---|
+| 인증 | 세션 로그인 필수 (미인증은 로그인으로 303) |
+| 메서드 | **GET 전용** — 그 외 메서드는 **405** (`Allow: GET`) |
+| 상한 | 최대 **5,000행**(최신순). 초과하면 화면에 경고를 띄우고 JSON `meta.truncated=true` + 응답 헤더 `X-Export-Truncated: 1` 로 알립니다 |
+| 응답 헤더 | `Content-Disposition: attachment`, `Cache-Control: no-store`, `X-Content-Type-Options: nosniff` |
+| CSV | UTF-8 **BOM**(엑셀), 한글 헤더, 모든 셀 큰따옴표로 감쌈, 줄바꿈·탭은 공백으로 정리 |
+| CSV 인젝션 | 셀이 `=` `+` `-` `@` `TAB` `CR` 로 시작하면 앞에 `'` 를 붙여 수식 해석을 막습니다. **순수 숫자 리터럴**(`-1.234` 등)은 수식이 될 수 없어 예외로 두어 분석용 수치를 보존합니다 |
+| JSON | `JSON_UNESCAPED_UNICODE`, `meta`(생성시각·필터·건수·상한·truncated) + `rows[]`, 각 행에 `order_events[]`(주문 상태 타임라인) 포함 |
+| 개인정보 | 계좌번호는 뷰에 없으며 내보내기에도 포함하지 않습니다 |
+
+화면의 "Claude 분석 안내" 박스에 실패 원인 · 슬리피지 · 차단 적정성 분석용 **예시 프롬프트 3개**가 있습니다
+(복사용 `<pre>` 텍스트).
 
 ## 4. 보안 설계 요약
 
@@ -143,7 +169,7 @@ powershell -ExecutionPolicy Bypass -File D:\claude_stock_dealings\tools\deploy_w
 
 ```powershell
 # 적재 (DEMO-0000 / env=mock 로 격리)
-$env:STOCK_DEMO_PW='<임시계정 비밀번호>'    # 로그인 잠금 검증용 임시계정(demo_lock_test) 생성 시에만 필요
+$env:STOCK_TEST_PW='<임시계정 비밀번호>'    # 로그인 검증용 임시계정(demo_lock_test) 생성 시에만 필요
 python D:\claude_stock_dealings\tools\demo_data.py load
 
 # 잔존 확인
@@ -159,8 +185,12 @@ python D:\claude_stock_dealings\tools\demo_data.py clear
   `stk_cd` 접두 **`DEMO`** 로 격리합니다.
 * 보유종목에는 상장폐지 데모 1건(`(폐)데모폐지`, 현재가 0, `prft_rt=0`)이 포함되어
   실제 수익률 `-100.0%` 표시와 "상장폐지 종목 제외 시" 보조 표기를 검증할 수 있습니다.
+* **거래 분석 검증용 시나리오**(종목코드 접두 `DEMOA`)로 신호 → 주문 → 체결 →
+  `order_event` 타임라인이 **성공 / 부분체결 / 거부(+사유) / 실패 / 차단(BLOCK) / 관찰만** 6가지로 적재됩니다.
+  `event_archive`·`api_error_log` 데모 행은 메시지 `[DEMO]` 마커로 격리합니다.
+  마지막 시나리오에는 화면 이스케이프(`h()`)와 **CSV 인젝션 방지**를 확인할 수 있는 payload 가 들어 있습니다.
 * 전역 표(`system_setting`, `server_status`, `algorithm_selection`)는 건드리지 않습니다.
-* 비밀번호는 환경변수 `STOCK_DEMO_PW` 로만 받고 소스/로그에 남기지 않습니다.
+* 비밀번호는 환경변수 `STOCK_TEST_PW`(하위 호환 `STOCK_DEMO_PW`)로만 받고 소스/로그에 남기지 않습니다.
 
 ## 7. 품질 점검
 

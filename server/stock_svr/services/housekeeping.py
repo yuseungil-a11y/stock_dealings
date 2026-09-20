@@ -142,12 +142,22 @@ class HousekeepingService:
             return False
 
     def run_purge(self, retention_days: int, log_dir=None, force: bool = False) -> dict:
-        """보관기간 초과 로그 삭제 (기동 시 1회 + 매일 1회)."""
+        """보관기간 초과 로그 삭제 (기동 시 1회 + 매일 1회).
+
+        * 단기 로그(`event_log`/`api_call_log`/`screening_result`) → `purge_old` (기본 7일)
+        * 영구 보관본(`event_archive`/`api_error_log`) → `purge_archives` (기본 365일)
+
+        주문·체결·신호·주문이벤트 등 **거래 원장은 어느 쪽에서도 지우지 않는다.**
+        """
         today = today_kst()
         if not force and self._last_purge_date == today:
             return {}
         self._last_purge_date = today
         result = self.db.purge_old(retention_days)
+        try:
+            result.update(self.db.purge_archives())
+        except Exception:  # noqa: BLE001 - 정리 실패가 하우스키핑 전체를 멈추지 않는다
+            log.warning("아카이브(event_archive/api_error_log) 정리 실패", exc_info=True)
         if log_dir is not None:
             result["log_files"] = purge_old_logs(log_dir, retention_days)
         log.info("보관기간(%d일) 초과 로그 정리: %s", retention_days, result)
