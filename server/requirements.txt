@@ -1,0 +1,11 @@
+# stock_svr 실행에 필요한 최소 패키지 (Python 3.13)
+# GUI 는 표준 라이브러리 tkinter 를 사용하므로 별도 UI 의존성이 없다.
+# S-18: 실거래 서버이므로 현재 검증된 버전으로 고정한다(올릴 때는 pytest + --check 재검증).
+pymysql==1.2.3
+httpx==0.28.1
+websockets==17.1
+# Claude 거부권 필터(claude_advisor) - 선택 알고리즘이지만 exe 에 함께 포함한다
+anthropic==1.7.0
+
+# 테스트
+pytest==9.1.1

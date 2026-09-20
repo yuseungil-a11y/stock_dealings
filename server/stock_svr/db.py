@@ -1,0 +1,772 @@
+"""DB 접근 계층 (MariaDB / pymysql).
+
+* 계정은 config.local.ini 의 `stock_svr` 만 사용한다(root 금지 - config 에서 검증).
+* 스레드마다 별도 커넥션을 쓰고, 끊기면 자동 재연결한다.
+* 컬럼명은 db/schema.sql 을 그대로 따른다.
+"""
+from __future__ import annotations
+
+import datetime as _dt
+import logging
+import threading
+from decimal import Decimal
+from typing import Any, Iterable, Sequence
+
+import pymysql
+from pymysql.cursors import DictCursor
+
+from .config import DbConfig
+from .util import mask_text, now_kst
+
+log = logging.getLogger(__name__)
+
+STATUS_COMPONENTS = ("server", "db", "kiwoom_rest", "kiwoom_ws", "market")
+
+# ---------------------------------------------------------------------- #
+# 주문 게이트 3키 (R-10)
+# ---------------------------------------------------------------------- #
+# 이 키들은 일반 `set_setting()` 으로 바꿀 수 없다. 전용 `set_gate()` 만 허용하고,
+# 호출자는 'UI 설정 탭의 REAL 확인을 통과했다'는 증거로 확인 토큰을 넘겨야 한다.
+# (다른 모듈·스크립트가 실수로 실계좌 주문을 켜는 것을 막기 위한 장치)
+GATE_KEYS = ("order_enabled", "real_trading_confirm", "trading_mode")
+
+# 확인 토큰. UI 설정 탭의 확인 경로(ConfirmRealDialog 통과) 와 테스트만 사용한다.
+GATE_CONFIRM_TOKEN = "stock_svr:gate-confirmed-by-ui"  # noqa: S105 - 비밀값 아님(오조작 방지용)
+
+# 게이트를 '더 여는' 값 (event_log 레벨을 ERROR 로 올린다)
+_GATE_OPENING_VALUES = {"order_enabled": "1", "real_trading_confirm": "1", "trading_mode": "real"}
+
+
+class GateChangeError(PermissionError):
+    """주문 게이트 3키를 허용되지 않은 경로로 바꾸려 할 때."""
+
+
+class Database:
+    """스레드 안전 커넥션 풀(스레드 로컬) + 도메인 헬퍼."""
+
+    def __init__(self, cfg: DbConfig):
+        self.cfg = cfg
+        self._local = threading.local()
+        self._all_conns: list[Any] = []
+        self._conn_lock = threading.Lock()
+        self.last_error: str | None = None
+
+    # -- 커넥션 -------------------------------------------------------- #
+    def _connect(self):
+        return pymysql.connect(
+            host=self.cfg.host,
+            port=self.cfg.port,
+            user=self.cfg.user,
+            password=self.cfg.password,
+            database=self.cfg.name,
+            charset="utf8mb4",
+            autocommit=True,
+            cursorclass=DictCursor,
+            connect_timeout=5,
+            read_timeout=30,
+            write_timeout=30,
+        )
+
+    def conn(self):
+        c = getattr(self._local, "conn", None)
+        if c is None:
+            c = self._connect()
+            self._local.conn = c
+            with self._conn_lock:
+                self._all_conns.append(c)
+            return c
+        try:
+            c.ping(reconnect=True)
+        except Exception:  # noqa: BLE001 - 완전히 새로 연결
+            try:
+                c.close()
+            except Exception:  # noqa: BLE001
+                pass
+            c = self._connect()
+            self._local.conn = c
+            with self._conn_lock:
+                self._all_conns.append(c)
+        return c
+
+    def close(self) -> None:
+        with self._conn_lock:
+            conns, self._all_conns = self._all_conns, []
+        for c in conns:
+            try:
+                c.close()
+            except Exception:  # noqa: BLE001
+                pass
+        self._local = threading.local()
+
+    def ping(self) -> bool:
+        try:
+            self.query_one("SELECT 1 AS ok")
+            self.last_error = None
+            return True
+        except Exception as exc:  # noqa: BLE001
+            self.last_error = f"{type(exc).__name__}: {exc}"[:200]
+            return False
+
+    # -- 기본 질의 ----------------------------------------------------- #
+    def query(self, sql: str, args: Sequence | None = None) -> list[dict]:
+        with self.conn().cursor() as cur:
+            cur.execute(sql, args or ())
+            return list(cur.fetchall())
+
+    def query_one(self, sql: str, args: Sequence | None = None) -> dict | None:
+        with self.conn().cursor() as cur:
+            cur.execute(sql, args or ())
+            return cur.fetchone()
+
+    def scalar(self, sql: str, args: Sequence | None = None, default=None):
+        row = self.query_one(sql, args)
+        if not row:
+            return default
+        return next(iter(row.values()), default)
+
+    def execute(self, sql: str, args: Sequence | None = None) -> int:
+        with self.conn().cursor() as cur:
+            return cur.execute(sql, args or ())
+
+    def execute_many(self, sql: str, seq: Iterable[Sequence]) -> int:
+        rows = list(seq)
+        if not rows:
+            return 0
+        with self.conn().cursor() as cur:
+            return cur.executemany(sql, rows)
+
+    def insert(self, sql: str, args: Sequence | None = None) -> int:
+        """INSERT 후 lastrowid 반환."""
+        conn = self.conn()
+        with conn.cursor() as cur:
+            cur.execute(sql, args or ())
+            return cur.lastrowid
+
+    # ================================================================== #
+    # system_setting
+    # ================================================================== #
+    def get_settings(self) -> dict[str, str]:
+        return {r["setting_key"]: r["value"] for r in self.query("SELECT setting_key, value FROM system_setting")}
+
+    def get_setting(self, key: str, default: str | None = None) -> str | None:
+        row = self.query_one("SELECT value FROM system_setting WHERE setting_key=%s", (key,))
+        return row["value"] if row else default
+
+    def set_setting(self, key: str, value: str, updated_by: str = "server") -> None:
+        """일반 설정 저장. **주문 게이트 3키는 거부**한다(R-10 - `set_gate` 사용)."""
+        if key in GATE_KEYS:
+            raise GateChangeError(
+                f"'{key}' 는 주문 게이트 키입니다. Database.set_gate() 로만 변경할 수 있습니다.")
+        self._write_setting(key, value, updated_by)
+
+    def _write_setting(self, key: str, value: str, updated_by: str) -> None:
+        self.execute(
+            "INSERT INTO system_setting (setting_key, value, updated_by) VALUES (%s,%s,%s) "
+            "ON DUPLICATE KEY UPDATE value=VALUES(value), updated_by=VALUES(updated_by)",
+            (key, str(value), updated_by),
+        )
+
+    def set_gate(self, key: str, value: str, *, confirm_token: str,
+                 updated_by: str = "ui") -> bool:
+        """주문 게이트 3키 전용 저장 (R-10).
+
+        * `key` 는 GATE_KEYS 중 하나여야 한다.
+        * `confirm_token` 은 UI 설정 탭이 REAL 확인 절차를 통과했다는 증거다.
+        * 값이 실제로 바뀌면 `event_log` 에 기록한다(게이트를 더 여는 변경은 ERROR).
+
+        반환: 값이 바뀌었으면 True.
+        """
+        if key not in GATE_KEYS:
+            raise GateChangeError(f"'{key}' 는 주문 게이트 키가 아닙니다. set_setting() 을 쓰세요.")
+        if confirm_token != GATE_CONFIRM_TOKEN:
+            raise GateChangeError(f"게이트 변경 확인 토큰이 올바르지 않습니다 ({key})")
+        new = str(value)
+        old = self.get_setting(key)
+        if old is not None and str(old) == new:
+            return False
+        self._write_setting(key, new, updated_by)
+        level = "ERROR" if _GATE_OPENING_VALUES.get(key) == new else "WARN"
+        try:
+            self.log_event(level, "system",
+                           f"주문 게이트 변경: {key} {old!r} → {new!r} (요청: {updated_by})")
+        except Exception:  # noqa: BLE001 - 기록 실패가 저장을 되돌리지는 않는다
+            log.warning("게이트 변경 event_log 기록 실패: %s", key, exc_info=True)
+        return True
+
+    # ================================================================== #
+    # 계좌 / 잔고 / 보유
+    # ================================================================== #
+    def upsert_account(self, account_no: str, env: str, alias: str | None = None) -> int:
+        self.execute(
+            "INSERT INTO account (account_no, env, alias) VALUES (%s,%s,%s) "
+            "ON DUPLICATE KEY UPDATE alias=COALESCE(VALUES(alias), alias), is_active=1",
+            (account_no, env, alias),
+        )
+        return int(self.scalar(
+            "SELECT id FROM account WHERE account_no=%s AND env=%s", (account_no, env)))
+
+    def get_account(self, account_id: int) -> dict | None:
+        return self.query_one("SELECT * FROM account WHERE id=%s", (account_id,))
+
+    def insert_balance(self, account_id: int, snapshot_at: _dt.datetime, data: dict) -> int:
+        cols = ["entr", "d1_entra", "d2_entra", "ord_alow_amt", "pymn_alow_amt",
+                "tot_pur_amt", "tot_evlt_amt", "tot_evlt_pl", "tot_prft_rt", "prsm_dpst_aset_amt"]
+        sql = ("INSERT INTO account_balance (account_id, snapshot_at, " + ", ".join(cols) + ") "
+               "VALUES (%s,%s," + ",".join(["%s"] * len(cols)) + ")")
+        return self.insert(sql, [account_id, snapshot_at] + [data.get(c) for c in cols])
+
+    def latest_balance(self, account_id: int) -> dict | None:
+        return self.query_one(
+            "SELECT * FROM account_balance WHERE account_id=%s ORDER BY snapshot_at DESC, id DESC LIMIT 1",
+            (account_id,),
+        )
+
+    def replace_holdings(self, account_id: int, holdings: list[dict],
+                         delete_missing: bool = True) -> int:
+        """보유종목 전체 동기화.
+
+        `delete_missing=False` 면 목록에 없는 종목을 지우지 않는다. 연속조회 상한(max_pages)
+        때문에 일부 페이지만 받은 경우에 쓴다 (R-14 - 보유종목이 통째로 사라지는 사고 방지).
+        """
+        keep: list[str] = []
+        sql = (
+            "INSERT INTO holding (account_id, stk_cd, stk_nm, rmnd_qty, trde_able_qty, pur_pric, cur_prc, "
+            "pur_amt, evlt_amt, evltv_prft, prft_rt, poss_rt) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+            "ON DUPLICATE KEY UPDATE stk_nm=VALUES(stk_nm), rmnd_qty=VALUES(rmnd_qty), "
+            "trde_able_qty=VALUES(trde_able_qty), pur_pric=VALUES(pur_pric), cur_prc=VALUES(cur_prc), "
+            "pur_amt=VALUES(pur_amt), evlt_amt=VALUES(evlt_amt), evltv_prft=VALUES(evltv_prft), "
+            "prft_rt=VALUES(prft_rt), poss_rt=VALUES(poss_rt)"
+        )
+        params = []
+        for h in holdings:
+            stk_cd = h.get("stk_cd")
+            if not stk_cd:
+                continue
+            keep.append(stk_cd)
+            params.append((
+                account_id, stk_cd, h.get("stk_nm") or "", h.get("rmnd_qty") or 0, h.get("trde_able_qty"),
+                h.get("pur_pric"), h.get("cur_prc"), h.get("pur_amt"), h.get("evlt_amt"),
+                h.get("evltv_prft"), h.get("prft_rt"), h.get("poss_rt"),
+            ))
+        self.execute_many(sql, params)
+        if not delete_missing:
+            return len(params)
+        if keep:
+            ph = ",".join(["%s"] * len(keep))
+            self.execute(f"DELETE FROM holding WHERE account_id=%s AND stk_cd NOT IN ({ph})",
+                         [account_id] + keep)
+        else:
+            self.execute("DELETE FROM holding WHERE account_id=%s", (account_id,))
+        return len(params)
+
+    def get_holdings(self, account_id: int) -> list[dict]:
+        return self.query("SELECT * FROM holding WHERE account_id=%s ORDER BY stk_cd", (account_id,))
+
+    def snapshot_holdings(self, account_id: int, snap_date: _dt.date) -> int:
+        return self.execute(
+            "INSERT INTO holding_snapshot (account_id, snap_date, stk_cd, stk_nm, rmnd_qty, pur_pric, "
+            "cur_prc, evlt_amt, evltv_prft, prft_rt) "
+            "SELECT account_id, %s, stk_cd, stk_nm, rmnd_qty, pur_pric, cur_prc, evlt_amt, evltv_prft, prft_rt "
+            "FROM holding WHERE account_id=%s "
+            "ON DUPLICATE KEY UPDATE rmnd_qty=VALUES(rmnd_qty), pur_pric=VALUES(pur_pric), "
+            "cur_prc=VALUES(cur_prc), evlt_amt=VALUES(evlt_amt), evltv_prft=VALUES(evltv_prft), "
+            "prft_rt=VALUES(prft_rt)",
+            (snap_date, account_id),
+        )
+
+    # -- position_state ------------------------------------------------ #
+    def get_position_state(self, account_id: int, stk_cd: str) -> dict | None:
+        return self.query_one(
+            "SELECT * FROM position_state WHERE account_id=%s AND stk_cd=%s", (account_id, stk_cd))
+
+    def get_position_states(self, account_id: int) -> dict[str, dict]:
+        return {r["stk_cd"]: r for r in
+                self.query("SELECT * FROM position_state WHERE account_id=%s", (account_id,))}
+
+    def upsert_position_state(self, account_id: int, stk_cd: str, **fields) -> None:
+        allowed = ("entry_algo", "first_buy_at", "last_buy_price", "avg_down_count", "total_invested", "stopped")
+        sets = {k: v for k, v in fields.items() if k in allowed}
+        cols = ["account_id", "stk_cd"] + list(sets)
+        vals = [account_id, stk_cd] + list(sets.values())
+        upd = ", ".join(f"{k}=VALUES({k})" for k in sets) or "updated_at=CURRENT_TIMESTAMP"
+        self.execute(
+            f"INSERT INTO position_state ({', '.join(cols)}) VALUES ({', '.join(['%s'] * len(cols))}) "
+            f"ON DUPLICATE KEY UPDATE {upd}",
+            vals,
+        )
+
+    def reset_stale_positions(self, account_id: int, held_codes: list[str], today: _dt.date) -> int:
+        """보유목록에 없는 종목의 투입금/물타기 회차를 초기화한다 (B4/S-13).
+
+        `stopped`(손절 후 재진입 금지)는 **당일에만** 유지하고 익일 자동 해제한다.
+        """
+        n = 0
+        if held_codes:
+            ph = ",".join(["%s"] * len(held_codes))
+            n = self.execute(
+                f"UPDATE position_state SET total_invested=0, avg_down_count=0, last_buy_price=NULL "
+                f"WHERE account_id=%s AND stk_cd NOT IN ({ph}) "
+                f"AND (total_invested<>0 OR avg_down_count<>0)",
+                [account_id] + list(held_codes))
+        else:
+            n = self.execute(
+                "UPDATE position_state SET total_invested=0, avg_down_count=0, last_buy_price=NULL "
+                "WHERE account_id=%s AND (total_invested<>0 OR avg_down_count<>0)", (account_id,))
+        # 손절 표시는 하루가 지나면 해제
+        self.execute(
+            "UPDATE position_state SET stopped=0 "
+            "WHERE account_id=%s AND stopped=1 AND DATE(updated_at) < %s", (account_id, today))
+        return n
+
+    def reduce_position_invest(self, account_id: int, stk_cd: str, amount: int) -> None:
+        """매도 체결분만큼 누적 투입금을 차감한다(0 미만으로 내려가지 않음) (B4)."""
+        self.execute(
+            "UPDATE position_state SET total_invested=GREATEST(0, total_invested-%s) "
+            "WHERE account_id=%s AND stk_cd=%s", (max(0, int(amount)), account_id, stk_cd))
+
+    def bump_position_invest(self, account_id: int, stk_cd: str, amount: int,
+                             algo_code: str | None, price: int | None, avg_down: bool) -> None:
+        self.execute(
+            "INSERT INTO position_state (account_id, stk_cd, entry_algo, first_buy_at, last_buy_price, "
+            "avg_down_count, total_invested) VALUES (%s,%s,%s,%s,%s,%s,%s) "
+            "ON DUPLICATE KEY UPDATE last_buy_price=VALUES(last_buy_price), "
+            "total_invested=total_invested+VALUES(total_invested), "
+            "avg_down_count=avg_down_count+%s, entry_algo=COALESCE(entry_algo, VALUES(entry_algo))",
+            (account_id, stk_cd, algo_code, now_kst(), price, 1 if avg_down else 0, int(amount),
+             1 if avg_down else 0),
+        )
+
+    # ================================================================== #
+    # 종목 / 시세
+    # ================================================================== #
+    def upsert_stock_master(self, rows: list[dict]) -> int:
+        sql = (
+            "INSERT INTO stock_master (stk_cd, stk_nm, market_code, market_name, up_name, list_count, "
+            "last_price, state, order_warning, nxt_enable, reg_day) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+            "ON DUPLICATE KEY UPDATE stk_nm=VALUES(stk_nm), market_code=VALUES(market_code), "
+            "market_name=VALUES(market_name), up_name=VALUES(up_name), list_count=VALUES(list_count), "
+            "last_price=VALUES(last_price), state=VALUES(state), order_warning=VALUES(order_warning), "
+            "nxt_enable=VALUES(nxt_enable), reg_day=VALUES(reg_day)"
+        )
+        params = [
+            (r.get("stk_cd"), (r.get("stk_nm") or "")[:60], r.get("market_code"), r.get("market_name"),
+             r.get("up_name"), r.get("list_count"), r.get("last_price"), (r.get("state") or None),
+             r.get("order_warning"), r.get("nxt_enable"), r.get("reg_day"))
+            for r in rows if r.get("stk_cd")
+        ]
+        return self.execute_many(sql, params)
+
+    def stock_name(self, stk_cd: str) -> str | None:
+        return self.scalar("SELECT stk_nm FROM stock_master WHERE stk_cd=%s", (stk_cd,))
+
+    def stock_state(self, stk_cd: str) -> str | None:
+        """stock_master.state (거래정지/정리매매/상장폐지 등 표기). 없으면 None."""
+        return self.scalar("SELECT state FROM stock_master WHERE stk_cd=%s", (stk_cd,))
+
+    def stock_master_count(self) -> int:
+        return int(self.scalar("SELECT COUNT(*) FROM stock_master", default=0) or 0)
+
+    def stock_master_updated_today(self, today: _dt.date) -> bool:
+        cnt = self.scalar("SELECT COUNT(*) FROM stock_master WHERE DATE(updated_at)=%s", (today,), default=0)
+        return bool(cnt)
+
+    def upsert_price_daily(self, stk_cd: str, bars: list[dict]) -> int:
+        sql = (
+            "INSERT INTO price_daily (stk_cd, dt, open_pric, high_pric, low_pric, cur_prc, trde_qty, trde_prica) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s) "
+            "ON DUPLICATE KEY UPDATE open_pric=VALUES(open_pric), high_pric=VALUES(high_pric), "
+            "low_pric=VALUES(low_pric), cur_prc=VALUES(cur_prc), trde_qty=VALUES(trde_qty), "
+            "trde_prica=VALUES(trde_prica)"
+        )
+        params = [
+            (stk_cd, b["dt"], b.get("open_pric"), b.get("high_pric"), b.get("low_pric"),
+             b.get("cur_prc"), b.get("trde_qty"), b.get("trde_prica"))
+            for b in bars if b.get("dt")
+        ]
+        return self.execute_many(sql, params)
+
+    def recent_bars(self, stk_cd: str, limit: int = 30) -> list[dict]:
+        """최신순 → 과거순으로 정렬해서 반환."""
+        rows = self.query(
+            "SELECT * FROM price_daily WHERE stk_cd=%s ORDER BY dt DESC LIMIT %s", (stk_cd, int(limit)))
+        return list(reversed(rows))
+
+    def insert_screening(self, captured_at: _dt.datetime, source_api: str, rows: list[dict]) -> int:
+        sql = (
+            "INSERT INTO screening_result (captured_at, source_api, rank_no, stk_cd, stk_nm, cur_prc, "
+            "flu_rt, now_trde_qty, sdnin_rt) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)"
+        )
+        params = [
+            (captured_at, source_api, r.get("rank_no"), r.get("stk_cd"), (r.get("stk_nm") or "")[:60],
+             r.get("cur_prc"), r.get("flu_rt"), r.get("now_trde_qty"), r.get("sdnin_rt"))
+            for r in rows if r.get("stk_cd")
+        ]
+        return self.execute_many(sql, params)
+
+    # ================================================================== #
+    # 알고리즘 / 파라미터
+    # ================================================================== #
+    def load_algorithms(self) -> list[dict]:
+        algos = self.query(
+            "SELECT a.*, COALESCE(s.is_enabled,0) AS is_enabled, COALESCE(s.priority, a.sort_order) AS priority "
+            "FROM algorithm a LEFT JOIN algorithm_selection s ON s.algorithm_id=a.id "
+            "ORDER BY COALESCE(s.priority, a.sort_order), a.id"
+        )
+        defs = self.query("SELECT * FROM algorithm_param_def ORDER BY algorithm_id, sort_order, id")
+        vals = {(r["algorithm_id"], r["param_key"]): r["value"]
+                for r in self.query("SELECT * FROM algorithm_param_value")}
+        by_algo: dict[int, list[dict]] = {}
+        for d in defs:
+            d = dict(d)
+            d["value"] = vals.get((d["algorithm_id"], d["param_key"]), d["default_value"])
+            by_algo.setdefault(d["algorithm_id"], []).append(d)
+        for a in algos:
+            a["param_defs"] = by_algo.get(a["id"], [])
+            a["params"] = {d["param_key"]: d["value"] for d in a["param_defs"]}
+        return algos
+
+    def save_param(self, algorithm_id: int, param_key: str, value: str, updated_by: str = "ui") -> bool:
+        old = self.scalar(
+            "SELECT value FROM algorithm_param_value WHERE algorithm_id=%s AND param_key=%s",
+            (algorithm_id, param_key))
+        if old is not None and str(old) == str(value):
+            return False
+        self.execute(
+            "INSERT INTO algorithm_param_value (algorithm_id, param_key, value, updated_by) VALUES (%s,%s,%s,%s) "
+            "ON DUPLICATE KEY UPDATE value=VALUES(value), updated_by=VALUES(updated_by)",
+            (algorithm_id, param_key, str(value), updated_by),
+        )
+        self.execute(
+            "INSERT INTO algorithm_param_history (algorithm_id, param_key, old_value, new_value, changed_by) "
+            "VALUES (%s,%s,%s,%s,%s)",
+            (algorithm_id, param_key, old, str(value), updated_by),
+        )
+        return True
+
+    def save_selection(self, algorithm_id: int, is_enabled: bool, priority: int, updated_by: str = "ui") -> None:
+        self.execute(
+            "INSERT INTO algorithm_selection (algorithm_id, is_enabled, priority, updated_by) "
+            "VALUES (%s,%s,%s,%s) ON DUPLICATE KEY UPDATE is_enabled=VALUES(is_enabled), "
+            "priority=VALUES(priority), updated_by=VALUES(updated_by)",
+            (algorithm_id, 1 if is_enabled else 0, int(priority), updated_by),
+        )
+
+    def insert_signal(self, run_id: int | None, algo_code: str, stk_cd: str, stk_nm: str | None,
+                      signal_type: str, score=None, detail: str | None = None,
+                      order_id: int | None = None) -> int:
+        return self.insert(
+            "INSERT INTO signal_log (run_id, algo_code, stk_cd, stk_nm, signal_type, score, detail, order_id) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+            (run_id, algo_code, stk_cd, (stk_nm or None), signal_type,
+             score if score is None else Decimal(str(score)), (detail or "")[:500] or None, order_id),
+        )
+
+    # ================================================================== #
+    # Claude 거부권 필터 판단 기록 (llm_decision_log)
+    # ================================================================== #
+    _LLM_COLS = ("run_id", "stk_cd", "stk_nm", "source_algo", "side", "model", "decision",
+                 "final_action", "confidence", "reasons", "risk_flags", "input_summary",
+                 "from_cache", "latency_ms", "input_tokens", "output_tokens", "error_msg",
+                 "order_id")
+
+    def insert_llm_decision(self, **f) -> int:
+        """Claude 검토 1건 기록. 입력 요약에도 계좌·키 정보는 들어가지 않는다."""
+        vals = []
+        for c in self._LLM_COLS:
+            v = f.get(c)
+            if isinstance(v, str) and c in ("reasons", "risk_flags", "error_msg", "stk_nm",
+                                            "source_algo", "model"):
+                v = mask_text(v)
+            vals.append(v)
+        sql = (f"INSERT INTO llm_decision_log ({', '.join(self._LLM_COLS)}) "
+               f"VALUES ({', '.join(['%s'] * len(self._LLM_COLS))})")
+        return self.insert(sql, vals)
+
+    def llm_usage_today(self) -> dict[str, int]:
+        """당일 Claude 실제 호출 수와 토큰 사용량(캐시 적중분 제외)."""
+        row = self.query_one(
+            "SELECT COUNT(*) AS calls, COALESCE(SUM(input_tokens),0) AS in_tok, "
+            "COALESCE(SUM(output_tokens),0) AS out_tok FROM llm_decision_log "
+            "WHERE from_cache=0 AND DATE(created_at)=CURDATE()")
+        if not row:
+            return {"calls": 0, "input_tokens": 0, "output_tokens": 0}
+        return {"calls": int(row.get("calls") or 0),
+                "input_tokens": int(row.get("in_tok") or 0),
+                "output_tokens": int(row.get("out_tok") or 0)}
+
+    # ================================================================== #
+    # 주문 / 체결 / 거래내역
+    # ================================================================== #
+    def start_run(self, env: str, order_enabled: bool, note: str | None = None) -> int:
+        return self.insert(
+            "INSERT INTO algo_run (started_at, env, order_enabled, note) VALUES (%s,%s,%s,%s)",
+            (now_kst(), env, 1 if order_enabled else 0, (note or "")[:255] or None),
+        )
+
+    def end_run(self, run_id: int, note: str | None = None) -> None:
+        if note:
+            self.execute("UPDATE algo_run SET ended_at=%s, note=CONCAT(COALESCE(note,''),%s) WHERE id=%s",
+                         (now_kst(), (" | " + note)[:200], run_id))
+        else:
+            self.execute("UPDATE algo_run SET ended_at=%s WHERE id=%s", (now_kst(), run_id))
+
+    # NOT NULL 컬럼 기본값 (외부 관측 주문도 안전하게 적재)
+    _ORDER_DEFAULTS = {
+        "order_kind": "NEW", "dmst_stex_tp": "KRX", "trde_tp": "0", "ord_qty": 0,
+        "side": "BUY", "status": "SENT", "filled_qty": 0, "is_dry_run": 0, "stk_cd": "",
+    }
+
+    def insert_order(self, **f) -> int:
+        cols = ("account_id", "run_id", "algo_code", "ord_no", "orig_ord_no", "side", "order_kind",
+                "stk_cd", "stk_nm", "dmst_stex_tp", "trde_tp", "ord_qty", "ord_uv", "status",
+                "filled_qty", "avg_fill_pric", "reason", "return_code", "return_msg", "is_dry_run")
+        vals = []
+        for c in cols:
+            v = f.get(c)
+            if v is None and c in self._ORDER_DEFAULTS:
+                v = self._ORDER_DEFAULTS[c]
+            vals.append(v)
+        sql = (f"INSERT INTO orders ({', '.join(cols)}) VALUES ({', '.join(['%s'] * len(cols))})")
+        return self.insert(sql, vals)
+
+    def update_order(self, order_id: int, **f) -> int:
+        allowed = ("ord_no", "status", "filled_qty", "avg_fill_pric", "return_code", "return_msg", "is_dry_run")
+        sets = {k: v for k, v in f.items() if k in allowed}
+        if not sets:
+            return 0
+        sql = "UPDATE orders SET " + ", ".join(f"{k}=%s" for k in sets) + " WHERE id=%s"
+        return self.execute(sql, list(sets.values()) + [order_id])
+
+    def find_order_by_ordno(self, account_id: int, ord_no: str) -> dict | None:
+        return self.query_one(
+            "SELECT * FROM orders WHERE account_id=%s AND ord_no=%s ORDER BY id DESC LIMIT 1",
+            (account_id, ord_no))
+
+    def upsert_order_by_ordno(self, account_id: int, ord_no: str, **f) -> int:
+        """외부(REST/WS)에서 관측한 주문을 반영. 없으면 새로 만든다."""
+        existing = self.find_order_by_ordno(account_id, ord_no)
+        if existing:
+            self.update_order(existing["id"], **f)
+            return existing["id"]
+        payload = dict(f)
+        payload.setdefault("side", "BUY")
+        payload.setdefault("trde_tp", "0")
+        payload.setdefault("ord_qty", 0)
+        payload.setdefault("status", "ACCEPTED")
+        payload["account_id"] = account_id
+        payload["ord_no"] = ord_no
+        return self.insert_order(**payload)
+
+    def count_orders_today(self, account_id: int, only_sent: bool = True) -> int:
+        """당일 주문 건수.
+
+        `only_sent=True` 는 **우리 알고리즘이 실제로 낸 신규 주문만** 센다 (R-15).
+        수동(HTS) 주문이나 동기화로 들어온 외부 주문(algo_code IS NULL)·정정/취소는
+        일 주문 횟수 한도를 소진하지 않는다.
+        """
+        sql = ("SELECT COUNT(*) FROM orders WHERE account_id=%s AND DATE(created_at)=CURDATE()")
+        if only_sent:
+            sql += " AND is_dry_run=0 AND algo_code IS NOT NULL AND order_kind='NEW'"
+        return int(self.scalar(sql, (account_id,), default=0) or 0)
+
+    def count_new_entries_today(self, account_id: int, algo_code: str | None = None,
+                                only_sent: bool = True) -> int:
+        """당일 신규 진입 종목 수. 기본적으로 **실제 전송된 주문만** 센다(B3)."""
+        sql = ("SELECT COUNT(DISTINCT stk_cd) FROM orders WHERE account_id=%s AND side='BUY' "
+               "AND DATE(created_at)=CURDATE()")
+        if only_sent:
+            sql += " AND is_dry_run=0"
+        args: list = [account_id]
+        if algo_code:
+            sql += " AND algo_code=%s"
+            args.append(algo_code)
+        return int(self.scalar(sql, args, default=0) or 0)
+
+    def last_order_at(self, account_id: int, stk_cd: str, side: str | None = None) -> _dt.datetime | None:
+        sql = "SELECT MAX(created_at) FROM orders WHERE account_id=%s AND stk_cd=%s"
+        args: list = [account_id, stk_cd]
+        if side:
+            sql += " AND side=%s"
+            args.append(side)
+        return self.scalar(sql, args)
+
+    def count_open_orders(self, account_id: int) -> int:
+        """미체결(전송됨/접수/부분체결) 주문 건수. 자동거래 중지 안내에 사용."""
+        return int(self.scalar(
+            "SELECT COUNT(*) FROM orders WHERE account_id=%s AND is_dry_run=0 "
+            "AND status IN ('SENT','ACCEPTED','PARTIAL')", (account_id,), default=0) or 0)
+
+    def has_open_order(self, account_id: int, stk_cd: str, side: str | None = None) -> bool:
+        """동일 종목 미체결 주문 존재 여부.
+
+        `side` 를 주면 **같은 방향**만 본다 (R-07). 매수 미체결이 손절 매도를 막지 않게 한다.
+        """
+        sql = ("SELECT COUNT(*) FROM orders WHERE account_id=%s AND stk_cd=%s "
+               "AND status IN ('SENT','ACCEPTED','PARTIAL')")
+        args: list = [account_id, stk_cd]
+        if side:
+            sql += " AND side=%s"
+            args.append(side)
+        return bool(self.scalar(sql, args, default=0))
+
+    def expire_unknown_sent_orders(self, account_id: int, minutes: int = 10) -> int:
+        """주문번호를 못 받은 채 SENT 로 남은 주문을 FAILED 로 정리한다 (R-07).
+
+        접수 여부가 끝내 확정되지 않은 주문이 영원히 '미체결'로 남아 해당 종목을
+        영구 차단하는 것을 막는다.
+        """
+        return self.execute(
+            "UPDATE orders SET status='FAILED', return_msg='UNKNOWN 확정 불가' "
+            "WHERE account_id=%s AND ord_no IS NULL AND status='SENT' AND is_dry_run=0 "
+            "AND created_at < (NOW() - INTERVAL %s MINUTE)",
+            (account_id, max(1, int(minutes))))
+
+    def count_executions_since(self, account_id: int, stk_cd: str, since: _dt.datetime) -> int:
+        """특정 시각 이후 해당 종목의 체결 건수 (접수여부 불명 주문의 증거 확인용 - R-03)."""
+        return int(self.scalar(
+            "SELECT COUNT(*) FROM executions WHERE account_id=%s AND stk_cd=%s "
+            "AND executed_at >= %s", (account_id, stk_cd, since), default=0) or 0)
+
+    def order_algo_code(self, account_id: int, ord_no: str) -> str | None:
+        """주문번호가 우리 알고리즘 주문인지 확인 (R-04). 외부/수동 주문이면 None."""
+        return self.scalar(
+            "SELECT algo_code FROM orders WHERE account_id=%s AND ord_no=%s "
+            "ORDER BY id DESC LIMIT 1", (account_id, ord_no))
+
+    def upsert_execution(self, account_id: int, ord_no: str, cntr_no: str, stk_cd: str, stk_nm: str | None,
+                         side: str, cntr_qty: int, cntr_pric: int, executed_at: _dt.datetime,
+                         cmsn: int | None = None, tax: int | None = None, source: str = "WS",
+                         only_if_absent: bool = False) -> None:
+        """체결 upsert. `only_if_absent=True` 면 같은 주문의 동일 체결이 이미 있으면 건너뛴다.
+
+        WS(체결번호 909)가 정본이고 REST(ka10076)는 보정이므로, REST 는 이미 저장된
+        같은 (주문번호, 가격, 수량) 체결을 덮어쓰지 않는다 (B2).
+        """
+        if only_if_absent:
+            dup = self.scalar(
+                "SELECT COUNT(*) FROM executions WHERE account_id=%s AND ord_no=%s "
+                "AND cntr_qty=%s AND cntr_pric=%s",
+                (account_id, ord_no, cntr_qty, cntr_pric), default=0)
+            if dup:
+                return
+        self.execute(
+            "INSERT INTO executions (account_id, ord_no, cntr_no, stk_cd, stk_nm, side, cntr_qty, cntr_pric, "
+            "cmsn, tax, executed_at, source) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+            "ON DUPLICATE KEY UPDATE cntr_qty=VALUES(cntr_qty), cntr_pric=VALUES(cntr_pric), "
+            "cmsn=VALUES(cmsn), tax=VALUES(tax), executed_at=VALUES(executed_at)",
+            (account_id, ord_no, cntr_no or "", stk_cd, (stk_nm or None), side, cntr_qty, cntr_pric,
+             cmsn, tax, executed_at, source),
+        )
+
+    def upsert_trade_ledger(self, account_id: int, rows: list[dict]) -> int:
+        sql = (
+            "INSERT INTO trade_ledger (account_id, trde_dt, trde_no, trde_kind_nm, rmrk_nm, stk_cd, stk_nm, "
+            "trde_qty, trde_unit, trde_amt, cmsn, tax, exct_amt, entra_remn, proc_tm) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+            "ON DUPLICATE KEY UPDATE trde_kind_nm=VALUES(trde_kind_nm), rmrk_nm=VALUES(rmrk_nm), "
+            "stk_cd=VALUES(stk_cd), stk_nm=VALUES(stk_nm), trde_qty=VALUES(trde_qty), "
+            "trde_unit=VALUES(trde_unit), trde_amt=VALUES(trde_amt), cmsn=VALUES(cmsn), tax=VALUES(tax), "
+            "exct_amt=VALUES(exct_amt), entra_remn=VALUES(entra_remn), proc_tm=VALUES(proc_tm)"
+        )
+        params = [
+            (account_id, r.get("trde_dt"), r.get("trde_no"), r.get("trde_kind_nm"), r.get("rmrk_nm"),
+             r.get("stk_cd"), r.get("stk_nm"), r.get("trde_qty"), r.get("trde_unit"), r.get("trde_amt"),
+             r.get("cmsn"), r.get("tax"), r.get("exct_amt"), r.get("entra_remn"), r.get("proc_tm"))
+            for r in rows if r.get("trde_dt") and r.get("trde_no")
+        ]
+        return self.execute_many(sql, params)
+
+    def upsert_daily_summary(self, account_id: int, base_dt: _dt.date, rows: list[dict]) -> int:
+        sql = (
+            "INSERT INTO daily_trade_summary (account_id, base_dt, stk_cd, stk_nm, buy_qty, buy_avg_pric, "
+            "buy_amt, sell_qty, sell_avg_pric, sell_amt, cmsn_tax, pl_amt, prft_rt) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+            "ON DUPLICATE KEY UPDATE stk_nm=VALUES(stk_nm), buy_qty=VALUES(buy_qty), "
+            "buy_avg_pric=VALUES(buy_avg_pric), buy_amt=VALUES(buy_amt), sell_qty=VALUES(sell_qty), "
+            "sell_avg_pric=VALUES(sell_avg_pric), sell_amt=VALUES(sell_amt), cmsn_tax=VALUES(cmsn_tax), "
+            "pl_amt=VALUES(pl_amt), prft_rt=VALUES(prft_rt)"
+        )
+        params = [
+            (account_id, base_dt, r.get("stk_cd"), r.get("stk_nm"), r.get("buy_qty"), r.get("buy_avg_pric"),
+             r.get("buy_amt"), r.get("sell_qty"), r.get("sell_avg_pric"), r.get("sell_amt"),
+             r.get("cmsn_tax"), r.get("pl_amt"), r.get("prft_rt"))
+            for r in rows if r.get("stk_cd")
+        ]
+        return self.execute_many(sql, params)
+
+    def today_realized_pl(self, account_id: int, base_dt: _dt.date) -> int:
+        return int(self.scalar(
+            "SELECT COALESCE(SUM(pl_amt),0) FROM daily_trade_summary WHERE account_id=%s AND base_dt=%s",
+            (account_id, base_dt), default=0) or 0)
+
+    def today_realized_pl_from_executions(self, account_id: int, base_dt: _dt.date) -> int:
+        """장중 추정 손익 (B6): 당일 체결의 (매도금액 - 매수금액 - 수수료/세금).
+
+        매매일지(ka10170)가 장마감 후에만 채워지므로 장중에는 이 추정치를 함께 본다.
+        """
+        row = self.query_one(
+            "SELECT "
+            " COALESCE(SUM(CASE WHEN side='SELL' THEN cntr_qty*cntr_pric ELSE 0 END),0) AS sell_amt,"
+            " COALESCE(SUM(CASE WHEN side='BUY'  THEN cntr_qty*cntr_pric ELSE 0 END),0) AS buy_amt,"
+            " COALESCE(SUM(COALESCE(cmsn,0)+COALESCE(tax,0)),0) AS fees "
+            "FROM executions WHERE account_id=%s AND DATE(executed_at)=%s",
+            (account_id, base_dt))
+        if not row:
+            return 0
+        sell = int(row.get("sell_amt") or 0)
+        buy = int(row.get("buy_amt") or 0)
+        fees = int(row.get("fees") or 0)
+        if sell <= 0:
+            return 0          # 매도가 없으면 실현손익 없음(매수는 평가손익)
+        return sell - buy - fees
+
+    # ================================================================== #
+    # 시스템 / 관제 / 로그
+    # ================================================================== #
+    def set_status(self, component: str, status: str, message: str | None = None) -> None:
+        self.execute(
+            "INSERT INTO server_status (component, status, message) VALUES (%s,%s,%s) "
+            "ON DUPLICATE KEY UPDATE status=VALUES(status), message=VALUES(message), "
+            "updated_at=CURRENT_TIMESTAMP",
+            (component, status, mask_text(message or "")[:255] or None),
+        )
+
+    def log_event(self, level: str, category: str, message: str) -> int:
+        return self.insert(
+            "INSERT INTO event_log (level, category, message) VALUES (%s,%s,%s)",
+            (level.upper(), category[:30], mask_text(message)[:500]),
+        )
+
+    def recent_events(self, limit: int = 200, min_level: str | None = None) -> list[dict]:
+        order = ("DEBUG", "INFO", "WARN", "ERROR")
+        sql = "SELECT * FROM event_log"
+        args: list = []
+        if min_level and min_level.upper() in order:
+            keep = order[order.index(min_level.upper()):]
+            sql += " WHERE level IN (" + ",".join(["%s"] * len(keep)) + ")"
+            args += list(keep)
+        sql += " ORDER BY id DESC LIMIT %s"
+        args.append(int(limit))
+        return list(reversed(self.query(sql, args)))
+
+    def log_api_call(self, api_id: str, http_status: int | None, return_code: int | None,
+                     return_msg: str, elapsed_ms: int) -> None:
+        self.execute(
+            "INSERT INTO api_call_log (api_id, http_status, return_code, return_msg, elapsed_ms) "
+            "VALUES (%s,%s,%s,%s,%s)",
+            (api_id[:10], http_status, return_code, (return_msg or "")[:255] or None, elapsed_ms),
+        )
+
+    def purge_old(self, retention_days: int = 7) -> dict[str, int]:
+        """보관기간 초과 로그 삭제."""
+        days = max(1, int(retention_days))
+        out = {}
+        out["event_log"] = self.execute(
+            "DELETE FROM event_log WHERE created_at < (NOW() - INTERVAL %s DAY)", (days,))
+        out["api_call_log"] = self.execute(
+            "DELETE FROM api_call_log WHERE created_at < (NOW() - INTERVAL %s DAY)", (days,))
+        out["screening_result"] = self.execute(
+            "DELETE FROM screening_result WHERE captured_at < (NOW() - INTERVAL %s DAY)", (days * 4,))
+        return out

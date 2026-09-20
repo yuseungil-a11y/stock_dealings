@@ -1,0 +1,507 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600;700&family=IBM+Plex+Sans+KR:wght@400;600;700&family=Noto+Serif+KR:wght@700&display=swap">
+<title>키움 자동매매 조사보고</title>
+<style>
+  :root{
+    --bg:#f6f5f1;
+    --surface:#ffffff;
+    --surface-2:#efeee8;
+    --text:#1b1e1c;
+    --muted:#63685f;
+    --border:#dedcd3;
+    --accent:#1f7a5c;
+    --accent-soft:#e4efe9;
+    --warn:#a8601c;
+    --warn-soft:#f5e9dc;
+    --link:#1f7a5c;
+    --mono-bg:#efeee8;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --bg:#13161a;
+      --surface:#1b1f24;
+      --surface-2:#20252b;
+      --text:#e8e9e4;
+      --muted:#9aa19a;
+      --border:#2c3138;
+      --accent:#4fd8a8;
+      --accent-soft:#1c2f28;
+      --warn:#e2a165;
+      --warn-soft:#332619;
+      --link:#4fd8a8;
+      --mono-bg:#20252b;
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#13161a;
+    --surface:#1b1f24;
+    --surface-2:#20252b;
+    --text:#e8e9e4;
+    --muted:#9aa19a;
+    --border:#2c3138;
+    --accent:#4fd8a8;
+    --accent-soft:#1c2f28;
+    --warn:#e2a165;
+    --warn-soft:#332619;
+    --link:#4fd8a8;
+    --mono-bg:#20252b;
+  }
+
+  *{box-sizing:border-box;}
+  body{
+    background:var(--bg);
+    color:var(--text);
+    font-family:"IBM Plex Sans KR","Noto Sans KR",-apple-system,sans-serif;
+    line-height:1.7;
+    padding:0 16px;
+    padding-block:48px;
+  }
+  .page{max-width:760px;margin:0 auto;}
+
+  h1,h2,h3{
+    font-family:"Noto Serif KR",serif;
+    font-weight:700;
+    line-height:1.35;
+    text-wrap:balance;
+    color:var(--text);
+  }
+
+  header.hero{
+    border-bottom:2px solid var(--text);
+    padding-bottom:28px;
+    margin-bottom:36px;
+  }
+  .kicker{
+    font-family:"IBM Plex Mono",monospace;
+    font-size:12.5px;
+    letter-spacing:0.12em;
+    color:var(--accent);
+    text-transform:uppercase;
+    margin-bottom:14px;
+  }
+  h1.title{font-size:clamp(26px,4.5vw,34px);margin:0 0 14px;}
+  .lede{font-size:16px;color:var(--muted);max-width:60ch;margin:0 0 20px;}
+  .meta{
+    display:flex;flex-wrap:wrap;gap:8px 22px;
+    font-family:"IBM Plex Mono",monospace;
+    font-size:12.5px;color:var(--muted);
+  }
+  .meta b{color:var(--text);font-weight:600;}
+
+  section.block{margin-bottom:52px;}
+  .sec-head{
+    display:flex;align-items:baseline;gap:16px;
+    margin-bottom:6px;
+  }
+  .sec-num{
+    font-family:"Noto Serif KR",serif;
+    font-size:15px;
+    color:var(--accent);
+    border:1px solid var(--accent);
+    border-radius:50%;
+    width:28px;height:28px;
+    display:flex;align-items:center;justify-content:center;
+    flex:none;
+  }
+  h2.sec-title{font-size:21px;margin:0;}
+  .sec-sub{
+    color:var(--muted);font-size:14px;
+    margin:0 0 22px 44px;
+  }
+  .sec-body{margin-left:44px;}
+  @media (max-width:520px){
+    .sec-body,.sec-sub{margin-left:0;}
+  }
+
+  .table-wrap{
+    overflow-x:auto;
+    border:1px solid var(--border);
+    border-radius:10px;
+    margin:18px 0;
+    background:var(--surface);
+  }
+  table{border-collapse:collapse;width:100%;font-size:13.5px;min-width:520px;}
+  th,td{
+    text-align:left;padding:10px 14px;
+    border-bottom:1px solid var(--border);
+    vertical-align:top;
+  }
+  thead th{
+    background:var(--surface-2);
+    font-family:"IBM Plex Mono",monospace;
+    font-size:12px;letter-spacing:0.02em;
+    color:var(--muted);
+    text-transform:uppercase;
+    white-space:nowrap;
+  }
+  tbody tr:last-child td{border-bottom:none;}
+  td:first-child,th:first-child{font-weight:600;white-space:nowrap;}
+  td code, td .m{
+    font-family:"IBM Plex Mono",monospace;
+    font-size:12.5px;
+    background:var(--mono-bg);
+    padding:1px 5px;border-radius:4px;
+  }
+
+  .callout{
+    border-left:3px solid var(--accent);
+    background:var(--accent-soft);
+    border-radius:0 10px 10px 0;
+    padding:14px 18px;
+    margin:18px 0;
+    font-size:14.5px;
+  }
+  .callout .label{
+    font-family:"IBM Plex Mono",monospace;
+    font-size:11.5px;letter-spacing:0.08em;
+    color:var(--accent);text-transform:uppercase;
+    display:block;margin-bottom:6px;
+  }
+  .callout.warn{border-left-color:var(--warn);background:var(--warn-soft);}
+  .callout.warn .label{color:var(--warn);}
+
+  .chips{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0;}
+  .chip{
+    font-family:"IBM Plex Mono",monospace;
+    font-size:12px;
+    background:var(--surface-2);
+    border:1px solid var(--border);
+    border-radius:999px;
+    padding:5px 12px;
+    color:var(--text);
+  }
+
+  ol.steps{margin:16px 0;padding-left:0;list-style:none;counter-reset:step;}
+  ol.steps li{
+    counter-increment:step;
+    position:relative;
+    padding:8px 0 8px 40px;
+    border-bottom:1px dashed var(--border);
+    font-size:14.5px;
+  }
+  ol.steps li:last-child{border-bottom:none;}
+  ol.steps li::before{
+    content:counter(step);
+    position:absolute;left:0;top:7px;
+    font-family:"IBM Plex Mono",monospace;
+    font-weight:600;color:var(--accent);
+    border:1px solid var(--accent);
+    width:22px;height:22px;border-radius:6px;
+    display:flex;align-items:center;justify-content:center;
+    font-size:12px;
+  }
+
+  ul.plain{margin:12px 0;padding-left:20px;}
+  ul.plain li{margin-bottom:6px;font-size:14.5px;}
+
+  .diagram{
+    display:flex;align-items:stretch;gap:0;
+    flex-wrap:wrap;
+    margin:20px 0;
+    font-size:13px;
+  }
+  .dbox{
+    background:var(--surface);
+    border:1px solid var(--border);
+    border-radius:10px;
+    padding:12px 14px;
+    flex:1 1 150px;
+    min-width:150px;
+  }
+  .dbox .t{font-weight:700;margin-bottom:4px;}
+  .dbox .d{color:var(--muted);font-size:12px;line-height:1.5;}
+  .darrow{
+    display:flex;align-items:center;justify-content:center;
+    flex:0 0 44px;color:var(--accent);
+    font-family:"IBM Plex Mono",monospace;font-size:16px;
+  }
+  @media (max-width:600px){
+    .diagram{flex-direction:column;}
+    .darrow{flex-direction:row;transform:rotate(90deg);flex:0 0 30px;}
+  }
+  .dbox.db{background:var(--accent-soft);border-color:var(--accent);}
+
+  .sources{
+    margin-top:16px;
+    padding-top:12px;
+    border-top:1px solid var(--border);
+  }
+  .sources .label{
+    font-family:"IBM Plex Mono",monospace;
+    font-size:11px;letter-spacing:0.1em;
+    color:var(--muted);text-transform:uppercase;
+    margin-bottom:8px;display:block;
+  }
+  .sources ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:5px;}
+  .sources a{
+    color:var(--link);font-size:12.5px;text-decoration:none;
+    border-bottom:1px solid transparent;
+  }
+  .sources a:hover{border-bottom-color:var(--link);}
+
+  .checklist{
+    background:var(--surface);
+    border:1px solid var(--border);
+    border-radius:12px;
+    padding:6px 18px;
+  }
+  .checklist li{
+    list-style:none;
+    display:flex;gap:12px;
+    padding:12px 0;
+    border-bottom:1px solid var(--border);
+    font-size:14.5px;
+  }
+  .checklist li:last-child{border-bottom:none;}
+  .checklist .q{
+    flex:none;
+    font-family:"IBM Plex Mono",monospace;
+    font-weight:700;color:var(--warn);
+    border:1px solid var(--warn);
+    width:22px;height:22px;border-radius:50%;
+    display:flex;align-items:center;justify-content:center;
+    font-size:12px;
+  }
+
+  footer{
+    margin-top:56px;
+    padding-top:20px;
+    border-top:2px solid var(--text);
+    font-size:12.5px;color:var(--muted);
+    display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;
+  }
+</style>
+</head>
+<body>
+
+<div class="page">
+
+  <header class="hero">
+    <div class="kicker">개인 프로젝트 · 사전 조사 보고</div>
+    <h1 class="title">키움증권 Open API 기반<br>주식 자동매매 프로그램 개발방향</h1>
+    <p class="lede">API 스펙, 매매 알고리즘, 웹 조회 방식, 전체 아키텍처 — 착수 전 확인해야 할 네 가지를 정리했다. (2026-09-19 개정: React 유지, 서버모듈은 DB 직접 기록 · 웹은 얇은 읽기 전용 API 경유)</p>
+    <div class="meta">
+      <span>조사기준일 <b>2026-09-19</b></span>
+      <span>총괄 <b>제우스</b></span>
+      <span>자료조사 <b>Darwin (researcher)</b></span>
+      <span>방식 <b>웹 조사</b> (사내 RAG 대상자료 없음)</span>
+    </div>
+  </header>
+
+  <section class="block">
+    <div class="sec-head"><span class="sec-num">1</span><h2 class="sec-title">키움증권 Open API 스펙 비교</h2></div>
+    <p class="sec-sub">두 계열의 API가 동시에 운영 중이다 — 어느 쪽으로 서버모듈을 붙일지가 첫 갈림길.</p>
+    <div class="sec-body">
+
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>구분</th><th>Open API+ (레거시)</th><th>REST API (신규, 2025-06)</th></tr></thead>
+          <tbody>
+            <tr><td>방식</td><td>OCX/COM 컨트롤</td><td>HTTP REST + WebSocket</td></tr>
+            <tr><td>운영체제</td><td>Windows 전용</td><td>OS 무관</td></tr>
+            <tr><td>Python</td><td><span class="m">32bit 필수</span></td><td>64bit 가능</td></tr>
+            <tr><td>인증</td><td>영웅문 HTS 자동 로그인</td><td>App Key/Secret → OAuth 토큰</td></tr>
+            <tr><td>통신 모델</td><td>이벤트 콜백(비동기)</td><td>동기 요청응답 + WS 구독</td></tr>
+            <tr><td>Rate limit</td><td>명확한 수치 미확인</td><td>공식 <span class="m">5회/초</span> vs 커뮤니티 실측 상충</td></tr>
+            <tr><td>모의투자</td><td>지원</td><td>지원 (TR당 1회/초로 더 빡빡)</td></tr>
+            <tr><td>신청</td><td>다운로드 페이지 사용등록</td><td>REST API 전용 페이지 별도 신청</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="callout">
+        <span class="label">판단</span>
+        상시 실행 윈도우 서버라는 요구사항엔 <strong>REST API</strong>가 더 적합 — 64bit 그대로 쓰고 영웅문 자동로그인 세션 불안정성에서 자유롭다. 다만 2025-06 출시로 사례·서드파티 라이브러리가 아직 얕고 Rate limit 실측치가 공식 수치와 어긋난다는 보고가 있어, PoC에서 REST API를 우선 검증하고 안정성 이슈가 발목을 잡으면 Open API+를 병행 검토하는 투트랙을 권장한다.
+      </div>
+
+      <p>파이썬 연동: Open API+는 <code>pykiwoom</code>, <code>breadum/kiwoom</code> 등 32bit 래퍼가 다수. REST API는 공식 GitHub에 Python 3.13 클라이언트·OAuth/REST/WS 런타임·CLI(<code>kwcli</code>)가 제공되며 337개 API 스펙 + Postman Collection이 포함돼 있다.</p>
+
+      <div class="sources">
+        <span class="label">출처</span>
+        <ul>
+          <li><a href="https://openapi.kiwoom.com/intro?dummyVal=0" target="_blank" rel="noopener">키움 REST API 공식 소개</a></li>
+          <li><a href="https://openapi.kiwoom.com/guide/index?dummyVal=0" target="_blank" rel="noopener">키움 REST API 가이드</a></li>
+          <li><a href="https://www.kiwoom.com/m/customer/download/VOpenApiInfoView" target="_blank" rel="noopener">키움 Open API+ 소개</a></li>
+          <li><a href="https://download.kiwoom.com/web/openapi/kiwoom_openapi_plus_devguide_ver_1.1.pdf" target="_blank" rel="noopener">Open API+ 개발가이드 PDF</a></li>
+          <li><a href="https://github.com/Kiwoom-Securities/Kiwoom-REST-API" target="_blank" rel="noopener">Kiwoom-Securities 공식 REST API GitHub</a></li>
+          <li><a href="https://github.com/breadum/kiwoom" target="_blank" rel="noopener">breadum/kiwoom (Open API+ 파이썬)</a></li>
+          <li><a href="https://wikidocs.net/book/1173" target="_blank" rel="noopener">퀀트투자를 위한 키움증권 API — WikiDocs</a></li>
+          <li><a href="https://core.asiae.co.kr/article/2025062309044872083" target="_blank" rel="noopener">REST API 출시 기사, 아시아경제 2025-06-23</a></li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section class="block">
+    <div class="sec-head"><span class="sec-num">2</span><h2 class="sec-title">자동매매 알고리즘</h2></div>
+    <p class="sec-sub">"상승 종목 매매" + "10% 하락 시 물타기" 요구사항에 대한 5개 알고리즘 궁합 비교.</p>
+    <div class="sec-body">
+
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>알고리즘</th><th>개요</th><th>장점</th><th>단점</th><th>튜닝 파라미터</th></tr></thead>
+          <tbody>
+            <tr><td>이동평균 크로스</td><td>단기MA가 장기MA 상향 돌파</td><td>추세장 강함, 구현 단순</td><td>후행지표, 횡보장 저조</td><td>MA 기간 (5/20, 20/60)</td></tr>
+            <tr><td>모멘텀 스크리닝</td><td>상승률·거래량 급증 종목 발굴</td><td>요구사항과 직접 일치</td><td>추격매수 고점 리스크</td><td>상승률/거래량 임계값</td></tr>
+            <tr><td>RSI 평균회귀</td><td>30↓매수, 70↑매도</td><td>박스권에서 유효</td><td>강추세엔 역행 손실</td><td>RSI 기간, 30/70 임계값</td></tr>
+            <tr><td>변동성 돌파</td><td>전일 변동폭×K 돌파 시 매수</td><td>단기 트레이딩 검증 사례多</td><td>휩쏘(되돌림) 손실</td><td>K값(통상 0.5), 관찰기간</td></tr>
+            <tr><td>분할매수(물타기)</td><td>하락 시 추가매수로 평단 인하</td><td>요구사항 자체와 일치</td><td>하락 지속 시 손실 누적</td><td>하락률, 1회 비중, 최대횟수</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="callout">
+        <span class="label">추천 조합</span>
+        <strong>모멘텀 스크리닝 + 변동성 돌파</strong>를 진입 로직 메인 축으로, <strong>물타기 규칙</strong>을 리스크 관리 계층으로 결합. 이동평균 크로스는 시장 국면 판별용 보조 필터로 병행. 단, 사용자 요구사항에 손절 조건이 없어 최대 추가매수 횟수·총 투입한도·최종 손절선은 반드시 별도 확인해야 무한 물타기를 막는다.
+      </div>
+
+      <p style="font-size:13.5px;color:var(--muted);margin-bottom:6px;">UI에 노출할 튜닝 파라미터</p>
+      <div class="chips">
+        <span class="chip">조회 주기(초)</span>
+        <span class="chip">상승률 임계값</span>
+        <span class="chip">거래량 배수</span>
+        <span class="chip">변동성 K값</span>
+        <span class="chip">물타기 하락률(%)</span>
+        <span class="chip">1회/누적 매수비중</span>
+        <span class="chip">최대 물타기 횟수</span>
+        <span class="chip">종목당 최대 투입금</span>
+        <span class="chip">손절 라인(%)</span>
+      </div>
+
+      <div class="sources">
+        <span class="label">출처</span>
+        <ul>
+          <li><a href="https://ko.wikipedia.org/wiki/%EC%95%8C%EA%B3%A0%EB%A6%AC%EC%A6%98_%ED%8A%B8%EB%A0%88%EC%9D%B4%EB%94%A9" target="_blank" rel="noopener">알고리즘 트레이딩 — 위키백과</a></li>
+          <li><a href="https://alphasquare.co.kr/home/insight/posts/303a3bf1-a9bf-4d25-a367-3e783e97f2c3" target="_blank" rel="noopener">RSI 매매전략, alphasquare</a></li>
+          <li><a href="https://brunch.co.kr/@ende/150" target="_blank" rel="noopener">BB+RSI 자동매매 알고리즘</a></li>
+          <li><a href="https://skyeong.net/278" target="_blank" rel="noopener">이동평균선+RSI 파이썬 전략</a></li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section class="block">
+    <div class="sec-head"><span class="sec-num">3</span><h2 class="sec-title">웹 조회 방식: React + 얇은 조회 API</h2></div>
+    <p class="sec-sub">React를 유지하므로 브라우저와 MySQL 사이에 최소한의 조회 API가 필요하다. 혼자 쓰는 도구라 최대한 얇게 둔다.</p>
+    <div class="sec-body">
+
+      <div class="callout">
+        <span class="label">구조</span>
+        서버모듈은 API를 거치지 않고 MySQL에 <strong>직접 기록</strong>한다. 웹은 <strong>React → 조회 전용 API → MySQL</strong>. 브라우저는 MySQL에 직접 접속할 수 없어 API 계층은 남기되, 쓰기 엔드포인트 없이 SELECT만 수행하는 얇은 서비스로 줄인다.
+      </div>
+
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>기준</th><th>Java (Spring Boot)</th><th>Python (FastAPI)</th></tr></thead>
+          <tbody>
+            <tr><td>스택 통일</td><td>서버모듈과 별도 스택</td><td>서버모듈(Python)과 통일</td></tr>
+            <tr><td>1인 유지보수</td><td>보일러플레이트 多</td><td>간결, Swagger 자동문서화</td></tr>
+            <tr><td>React 연동</td><td>REST로 문제없음</td><td>REST로 문제없음 (동등)</td></tr>
+            <tr><td>워크로드 궁합</td><td>CPU 바운드/대규모 강점</td><td>I/O 바운드(DB 조회)에 강점</td></tr>
+            <tr><td>배포</td><td>JVM, 상대적으로 무거움</td><td>가볍고 컨테이너 친화적</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="callout">
+        <span class="label">추천</span>
+        <strong>Python (FastAPI)</strong>. 서버모듈과 언어가 통일되고, 하는 일이 DB 조회 + JSON 응답뿐이라 Java의 엔터프라이즈 이점이 필요 없다. 사용자 1명이라 인증·확장 설계도 최소로 충분하다.
+      </div>
+
+      <div class="callout warn">
+        <span class="label">확인 필요</span>
+        원래 요구사항에 "API 모듈에도 UI가 있어야 한다"가 있었다. 1인 사용이면 FastAPI 내장 Swagger 화면(<code>/docs</code>)으로 API 점검이 가능한데, 이것으로 충분한지 별도 관리 화면이 필요한지 확인이 필요하다.
+      </div>
+
+      <div class="callout warn">
+        <span class="label">보안</span>
+        API용 MySQL 계정은 <strong>SELECT 전용</strong>으로 분리하고, API는 localhost/내부망에만 바인딩한다. 외부에서 접속한다면 토큰 인증 또는 VPN이 필수 — 계좌·거래 정보가 노출되면 안 된다.
+      </div>
+
+      <div class="sources">
+        <span class="label">출처</span>
+        <ul>
+          <li><a href="https://masterlablearn.com/blog/fastapi-vs-spring-boot" target="_blank" rel="noopener">FastAPI vs Spring Boot 비교</a></li>
+          <li><a href="https://medium.com/engineering-playbook/fastapi-vs-spring-boot-i-tested-both-for-6-months-in-production-96c04f7ebabe" target="_blank" rel="noopener">6개월 운영 비교, Medium</a></li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section class="block">
+    <div class="sec-head"><span class="sec-num">4</span><h2 class="sec-title">전체 아키텍처 방향</h2></div>
+    <p class="sec-sub">서버모듈 · DB · 조회 API · React 웹, 네 조각이 붙는 그림과 착수 순서.</p>
+    <div class="sec-body">
+
+      <div class="diagram">
+        <div class="dbox"><div class="t">서버모듈</div><div class="d">Windows 상시실행 · Python + UI<br>키움 API 연동 · 알고리즘 엔진</div></div>
+        <div class="darrow">→</div>
+        <div class="dbox db"><div class="t">MySQL</div><div class="d">거래·체결·로그<br>알고리즘 파라미터 이력</div></div>
+        <div class="darrow">←</div>
+        <div class="dbox"><div class="t">조회 API</div><div class="d">Python · FastAPI<br>SELECT 전용 계정 · 쓰기 없음</div></div>
+        <div class="darrow">→</div>
+        <div class="dbox"><div class="t">React 웹</div><div class="d">거래 결과 검색/조회</div></div>
+      </div>
+
+      <div class="callout">
+        <span class="label">결정됨</span>
+        서버모듈은 API를 거치지 않고 MySQL에 직접 기록한다. 웹은 React가 조회 전용 API를 통해 같은 DB를 읽는다.
+      </div>
+
+      <p style="font-size:13.5px;color:var(--muted);margin:22px 0 0;">개발 착수 순서</p>
+      <ol class="steps">
+        <li>키움 REST API 모의투자 계좌로 시세 조회/모의 주문 PoC — 인증, Rate limit 실측, WS 재연결 검증</li>
+        <li>MySQL DB 스키마 설계 (시세 이력 · 포지션 · 주문/체결 로그 · 알고리즘 파라미터)</li>
+        <li>알고리즘 모듈 개발 및 모의투자 백테스트/포워드테스트</li>
+        <li>조회 API 개발 (FastAPI, SELECT 전용 DB 계정, 조회 엔드포인트만)</li>
+        <li>React 웹 프런트 개발</li>
+        <li>모의투자 충분 검증 후 실계좌 소액 전환</li>
+      </ol>
+
+      <p style="font-size:13.5px;color:var(--muted);margin:26px 0 0;">리스크 / 주의사항</p>
+      <ul class="plain">
+        <li>실계좌 전환 전 모의투자 충분 기간 검증 필수</li>
+        <li>조회 API는 SELECT 전용 DB 계정으로만 접속하고, 접속 범위 제한(localhost/VPN)과 인증이 필수</li>
+        <li>REST API는 2025-06 출시된 신규 서비스 — Rate limit 실측치가 상충하는 보고가 있어 보수적인 요청 큐잉/재시도 로직 필요</li>
+        <li>24시간 상시 운영 시 세션/토큰 재발급 로직 필수 (OAuth 토큰은 만료 전 재발급 권장이라는 민간 자료 언급 — 공식 문서 재확인 필요)</li>
+        <li>한국거래소가 2023년부터 "고빈도 알고리즘 거래" 사전등록을 의무화, 개인투자자도 적용 대상이라는 보도 확인 — 이 프로젝트의 매매 주기가 해당 기준에 걸리는지는 별도 확인 필요</li>
+        <li>증권사 공통적으로 "자동 실행되더라도 투자 판단·실행 책임은 이용자 본인"이라 명시 — 별도 사전심의 절차 유무는 이번 조사로 확인되지 않아 키움증권 고객센터 문의 권장</li>
+      </ul>
+
+      <div class="sources">
+        <span class="label">출처</span>
+        <ul>
+          <li><a href="https://www.mt.co.kr/stock/2023/01/27/2023012715350053929" target="_blank" rel="noopener">알고리즘거래 사전등록 제도, 머니투데이 2023-01-27</a></li>
+          <li><a href="https://smallake.kr/?p=11767" target="_blank" rel="noopener">알고리즘거래 관리 제도 도입</a></li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section class="block" style="margin-bottom:12px;">
+    <div class="sec-head"><span class="sec-num" style="border-color:var(--warn);color:var(--warn);">?</span><h2 class="sec-title">착수 전 확인 필요 사항</h2></div>
+    <div class="sec-body">
+      <ul class="checklist">
+        <li><span class="q">1</span>키움 Open API+ 서비스 종료(단종) 일정 여부</li>
+        <li><span class="q">2</span>REST API 공식 Rate limit 수치 vs 커뮤니티 실측치 — 실사용 전 재검증</li>
+        <li><span class="q">3</span>이 프로젝트 매매 빈도가 거래소 "고빈도 알고리즘거래" 사전등록 대상인지 여부</li>
+        <li><span class="q">4</span>물타기 전략의 손절/최대 손실 한도 조건 (요구사항에 미명시)</li>
+        <li><span class="q">5</span>"API 모듈 UI" 요구사항 범위 — FastAPI 내장 Swagger로 충분한지</li>
+        <li><span class="q">6</span>웹 외부 접속 여부 및 인증 방식 (로그인/VPN)</li>
+      </ul>
+    </div>
+  </section>
+
+  <footer>
+    <span>다음 논의: 프로젝트 관리 방식(가벼운 저장소 vs pm-docs 정식 셋업) · 폴더 위치 결정</span>
+    <span>조사 시점 기준 — 착수 시 원문 재확인 권장</span>
+  </footer>
+
+</div>
+
+</body>
+</html>

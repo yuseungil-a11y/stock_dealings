@@ -1,0 +1,3 @@
+# exe 빌드 전용 (런타임 불필요). tools\build_server.ps1 이 설치한다.
+-r requirements.txt
+pyinstaller==6.22.3

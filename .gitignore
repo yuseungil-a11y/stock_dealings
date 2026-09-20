@@ -1,0 +1,38 @@
+# ===== 비밀값 / 인증정보 (절대 커밋 금지) =====
+*_appkey.txt
+*_secretkey.txt
+개발정보.txt
+config.local.*
+*.local.ini
+*.local.php
+.env
+.env.*
+*.pem
+*.key
+
+# ===== 대용량 원본 문서 (CLAUDE.md 방침: 원본은 git 제외, 필요시 SVN/별도 보관) =====
+*.pdf
+kiwoom-rest-api-spec.json
+
+# ===== 런타임 산출물 =====
+logs/
+*.log
+*.pid
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# ===== 임시/분석 산출물 =====
+docs/_*.txt
+
+# ===== 서버 exe 빌드 산출물 =====
+server/build/
+server/dist/
+
+# ===== API 키 파일 (Anthropic/DART/Naver 등) =====
+*apikey*.txt
+*api_key*.txt
+*_key.txt
+*client_secret*.txt

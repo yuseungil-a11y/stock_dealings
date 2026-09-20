@@ -1,0 +1,46 @@
+# =====================================================================
+# 주식 자동매매 관제 웹 — /stock 폴더 전용 .htaccess
+# 이 파일은 stock 폴더 안에서만 동작하며 Apache/PHP 전역 설정을 바꾸지 않는다.
+# (php_flag 계열 지시어는 SAPI 에 따라 500 을 유발할 수 있어 사용하지 않는다.
+#  display_errors 등은 PHP 코드(lib/security.php)에서 ini_set 으로 처리한다.)
+# =====================================================================
+
+# 디렉터리 리스팅 금지 / CGI 금지
+Options -Indexes -ExecCGI -MultiViews
+
+DirectoryIndex index.php
+
+# 기본 문자셋
+AddDefaultCharset UTF-8
+
+<IfModule mod_headers.c>
+    Header always set X-Content-Type-Options "nosniff"
+    Header always set X-Frame-Options "DENY"
+    Header always set Referrer-Policy "no-referrer"
+    Header always set X-Robots-Tag "noindex, nofollow, noarchive"
+    Header always unset X-Powered-By
+    # 정적 자원은 CSP 만 최소로 (동적 페이지는 PHP 에서 전체 헤더를 내려준다)
+    <FilesMatch "\.(css|js|svg|png|ico|woff2?)$">
+        Header always set Content-Security-Policy "default-src 'none'; style-src 'self'; img-src 'self' data:; font-src 'self'"
+        Header always set Cache-Control "private, max-age=300"
+    </FilesMatch>
+</IfModule>
+
+# 소스/설정/문서 등 직접 접근 차단
+<FilesMatch "\.(ini|log|md|ps1|py|sql|bak|old|sample|dist|yml|yaml|json|lock)$">
+    Require all denied
+</FilesMatch>
+
+# 숨김 파일(.htaccess, .git 등) 차단
+<FilesMatch "^\.">
+    Require all denied
+</FilesMatch>
+
+# 진입점(index.php / api.php)만 허용하고 그 외 PHP 파일 직접 실행 차단
+# (코드 상수 가드 STOCK_APP 와 이중 방어. 부정형 선행탐색으로 단일 섹션 처리)
+<FilesMatch "^(?!(index|api)\.php$).*\.php$">
+    Require all denied
+</FilesMatch>
+
+ErrorDocument 403 "Forbidden"
+ErrorDocument 404 "Not Found"
