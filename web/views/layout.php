@@ -109,7 +109,8 @@ foreach ($statusRows as $srow) {
     <p class="alert alert-err">요청한 페이지를 찾을 수 없어 종합현황을 표시합니다.</p>
   <?php endif; ?>
   <?php if (!empty($flash)): ?>
-    <p class="alert alert-<?= $flashType === 'ok' ? 'ok' : 'err' ?>"><?= h($flash) ?></p>
+    <?php $flashCls = in_array($flashType, ['ok', 'warn', 'err'], true) ? $flashType : 'err'; ?>
+    <p class="alert alert-<?= h($flashCls) ?>"><?= h($flash) ?></p>
   <?php endif; ?>
 
   <?= $content ?>

@@ -138,6 +138,15 @@ def main() -> int:
         cur.execute(f"GRANT INSERT ON `{DBNAME}`.`trend_scan_request` TO 'stock_web'@'{host}'")
         cur.execute(f"GRANT UPDATE (failed_count, locked_until, last_login_at, password_hash) "
                     f"ON `{DBNAME}`.`app_user` TO 'stock_web'@'{host}'")
+        # 웹의 자동거래 시작/중지 (관리자 전용 + REAL 재확인) — 엔진이 폴링해 처리
+        cur.execute(f"GRANT INSERT ON `{DBNAME}`.`auto_trading_command` TO 'stock_web'@'{host}'")
+        # 웹의 "알고리즘 관리" 화면 — 이미 seed 로 전 알고리즘 행이 있으므로 UPDATE 만 허용
+        # (새 알고리즘 코드를 웹에서 만들 수 없게 하는 의도적 제한 - INSERT 는 주지 않는다)
+        cur.execute(f"GRANT UPDATE (is_enabled, priority, updated_by, updated_at) "
+                    f"ON `{DBNAME}`.`algorithm_selection` TO 'stock_web'@'{host}'")
+        cur.execute(f"GRANT UPDATE (value, updated_by, updated_at) "
+                    f"ON `{DBNAME}`.`algorithm_param_value` TO 'stock_web'@'{host}'")
+        cur.execute(f"GRANT INSERT ON `{DBNAME}`.`algorithm_param_history` TO 'stock_web'@'{host}'")
     cur.execute("FLUSH PRIVILEGES")
     print("DB 계정 stock_svr / stock_web 생성·권한 부여 완료")
 

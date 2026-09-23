@@ -14,6 +14,7 @@
 ## [1.10.0] - 2026-09-23
 ### 변경
 - MACD 골든크로스(macd_cross) 신규 진입 알고리즘 추가 - universe_filter와 동일한 시총상위 종목 대상, 골든크로스만(제로선 필터 없음), 기본 비활성
+- 웹에서 자동거래 시작/중지 명령을 받는 큐(auto_trading_command) 폴링 추가 - 5초 주기, 기존 start_auto_trading/stop_auto_trading 안전장치 그대로 재사용
 
 ## [1.9.1] - 2026-09-23
 ### 변경

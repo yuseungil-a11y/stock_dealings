@@ -688,4 +688,25 @@ CREATE TABLE IF NOT EXISTS company_fetch_request (
   KEY ix_cfr_stk (stk_cd)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='fundamentals_filter 가 매수 직전 "재무데이터 없음/오래됨"으로 차단할 때 남기는 온디맨드 재수집 요청(종목 1개뿐). 엔진이 폴링해 그 종목만 DART 재무제표를 수집한다 - Claude 리포트는 만들지 않는다';
 
+-- =====================================================================
+-- 12. 웹의 자동거래 시작/중지 명령 큐 (관리자 전용 + REAL 재확인, 2026-09-23)
+--   * 웹은 매매 자격증명(키움/Anthropic)이 없어 직접 시작/중지할 수 없다.
+--     trend_scan_request/company_fetch_request 와 동일한 큐 패턴으로,
+--     stock_web 계정이 pending 행을 INSERT 만 하면 엔진이 폴링해 처리한다.
+--   * 게이트(order_enabled/real_trading_confirm/trading_mode)는 이 테이블과
+--     무관하다 - start_auto_trading()/stop_auto_trading() 기존 안전장치를 그대로 탄다.
+-- =====================================================================
+CREATE TABLE IF NOT EXISTS auto_trading_command (
+  id              BIGINT NOT NULL AUTO_INCREMENT,
+  command         ENUM('start','stop') NOT NULL,
+  requested_by    VARCHAR(50) NOT NULL,
+  status          ENUM('pending','processing','done','error') NOT NULL DEFAULT 'pending',
+  result_message  VARCHAR(255) NULL,
+  requested_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  claimed_at      DATETIME NULL,
+  handled_at      DATETIME NULL,
+  PRIMARY KEY (id),
+  KEY idx_status (status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='웹(관리자 전용, REAL 재확인)의 자동거래 시작/중지 요청. 엔진이 폴링해 start_auto_trading()/stop_auto_trading() 을 그대로 호출한다';
+
 SET FOREIGN_KEY_CHECKS = 1;

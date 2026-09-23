@@ -31,6 +31,10 @@ function app_routes(): array
         'system.archive' => ['view' => 'system_archive', 'title' => '이벤트 · API 오류 보관', 'group' => 'system'],
         'system.profile' => ['view' => 'system_profile', 'title' => '내 정보 · 비밀번호 변경', 'group' => 'system'],
         'system.users' => ['view' => 'system_users', 'title' => '사용자 목록', 'group' => 'system', 'admin' => true],
+        /* 관리자 전용 쓰기 화면(2026-09-23 도입) — auth_is_admin() 서버사이드 강제는 index.php 라우팅에서
+         * $route['admin'] 플래그로 이미 걸리며, 각 POST 핸들러에서도 별도로 다시 검사한다(방어적 이중 확인). */
+        'control.algorithms' => ['view' => 'control_algorithms', 'title' => '알고리즘 관리', 'group' => 'system', 'admin' => true],
+        'control.auto_trading' => ['view' => 'control_auto_trading', 'title' => '자동거래 제어', 'group' => 'system', 'admin' => true],
     ];
 }
 
@@ -67,6 +71,8 @@ function app_menu(): array
             'system.archive' => '이벤트 · API 오류 보관',
             'system.profile' => '내 정보',
             'system.users' => '사용자 목록',
+            'control.algorithms' => '알고리즘 관리',
+            'control.auto_trading' => '자동거래 제어',
         ]],
     ];
 }

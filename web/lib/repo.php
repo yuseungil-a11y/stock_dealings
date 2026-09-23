@@ -361,6 +361,11 @@ function repo_algorithm_by_code(string $code): ?array
     return db_row('SELECT * FROM algorithm WHERE code = ? LIMIT 1', [$code]);
 }
 
+function repo_algorithm_by_id(int $id): ?array
+{
+    return db_row('SELECT * FROM algorithm WHERE id = ? LIMIT 1', [$id]);
+}
+
 function repo_params(int $algorithmId): array
 {
     return db_all(
@@ -386,6 +391,330 @@ function repo_param_history(int $algorithmId, int $page): array
         $page,
         20
     );
+}
+
+/* ================================================================================
+ * 관리자 전용 쓰기: 알고리즘 사용여부 · 우선순위 · 파라미터 (2026-09-23 도입)
+ *
+ * 이 블록만이 이 웹에서 algorithm_selection / algorithm_param_value / algorithm_param_history
+ * 에 쓴다. algorithm / algorithm_param_def(정의 자체)는 절대 건드리지 않는다 — stock_web DB
+ * 계정에도 그 두 표의 쓰기 권한을 의도적으로 주지 않았다.
+ * ================================================================================ */
+
+/** 알고리즘 목록(사용여부 · 우선순위 포함) — repo_algorithms() 와 동일 조회를 관리 화면 이름으로 노출. */
+function repo_algorithms_with_selection(): array
+{
+    return repo_algorithms();
+}
+
+/** 알고리즘 파라미터 정의+현재값 — repo_params() 와 동일 조회를 관리 화면 이름으로 노출. */
+function repo_algorithm_params(int $algoId): array
+{
+    return repo_params($algoId);
+}
+
+/** 파라미터 값 검증 실패(server/stock_svr/algo/params.py 의 validate() 와 같은 규칙을 PHP로 재현). */
+class ParamValidationError extends RuntimeException
+{
+}
+
+/** 'v1:라벨1,v2:라벨2' 또는 'v1,v2' 형식의 enum_options 파싱. @return array<int,array{0:string,1:string}> */
+function param_enum_choices(string $raw): array
+{
+    $raw = trim($raw);
+    if ($raw === '') {
+        return [];
+    }
+    $out = [];
+    foreach (explode(',', $raw) as $chunk) {
+        $chunk = trim($chunk);
+        if ($chunk === '') {
+            continue;
+        }
+        if (str_contains($chunk, ':')) {
+            [$v, $lab] = explode(':', $chunk, 2);
+            $out[] = [trim($v), trim($lab)];
+        } else {
+            $out[] = [$chunk, $chunk];
+        }
+    }
+    return $out;
+}
+
+/** min_value/max_value 범위 검사(둘 다 선택적, 숫자가 아니면 무시). */
+function param_range_check(array $def, float $val, string $label): void
+{
+    $mn = $def['min_value'] ?? null;
+    $mx = $def['max_value'] ?? null;
+    if ($mn !== null && $mn !== '' && is_numeric((string)$mn) && $val < (float)$mn) {
+        throw new ParamValidationError($label . ': 최소 ' . $mn . ' 이상이어야 합니다.');
+    }
+    if ($mx !== null && $mx !== '' && is_numeric((string)$mx) && $val > (float)$mx) {
+        throw new ParamValidationError($label . ': 최대 ' . $mx . ' 이하여야 합니다.');
+    }
+}
+
+/** 소수 저장용 문자열 표기(끝의 0·소수점 정리). */
+function param_fmt_decimal(float $val): string
+{
+    $s = rtrim(rtrim(sprintf('%.10f', $val), '0'), '.');
+    if ($s === '' || $s === '-' || $s === '-0') {
+        return '0';
+    }
+    return $s;
+}
+
+/**
+ * value_type 기준 파라미터 값 검증(server/stock_svr/algo/params.py::validate() 와 동일한 규칙).
+ * 성공하면 저장용 정규화 문자열을 돌려주고, 실패하면 ParamValidationError 를 던진다.
+ */
+function param_validate(array $def, mixed $raw): string
+{
+    $label = (string)($def['label'] ?? $def['param_key'] ?? '?');
+    $vtype = strtolower((string)($def['value_type'] ?? 'string'));
+    $s = trim((string)($raw ?? ''));
+
+    if ($vtype === 'bool') {
+        $low = strtolower($s);
+        if (in_array($low, ['1', 'true', 't', 'y', 'yes', 'on'], true)) {
+            return '1';
+        }
+        if (in_array($low, ['0', 'false', 'f', 'n', 'no', 'off'], true)) {
+            return '0';
+        }
+        throw new ParamValidationError($label . ': 참/거짓 값이어야 합니다.');
+    }
+
+    if ($vtype === 'enum') {
+        $choices = array_column(param_enum_choices((string)($def['enum_options'] ?? '')), 0);
+        if ($choices !== [] && !in_array($s, $choices, true)) {
+            throw new ParamValidationError($label . ': 허용된 값이 아닙니다 (' . implode(', ', $choices) . ')');
+        }
+        return $s;
+    }
+
+    if ($vtype === 'time') {
+        if ($s === '') {
+            return ''; // 빈 값 허용(예: 청산 시각 미사용)
+        }
+        if (!preg_match('/^([01]\d|2[0-3]):([0-5]\d)$/', $s)) {
+            throw new ParamValidationError($label . ': HH:MM 형식이어야 합니다.');
+        }
+        return $s;
+    }
+
+    if ($vtype === 'int') {
+        if ($s === '' || !is_numeric($s)) {
+            throw new ParamValidationError($label . ': 정수를 입력하세요.');
+        }
+        $f = (float)$s;
+        if (!is_finite($f)) {
+            throw new ParamValidationError($label . ': 유한한 숫자를 입력하세요.');
+        }
+        $val = (int)$f;
+        param_range_check($def, (float)$val, $label);
+        return (string)$val;
+    }
+
+    if ($vtype === 'decimal') {
+        if ($s === '' || !is_numeric($s)) {
+            throw new ParamValidationError($label . ': 숫자를 입력하세요.');
+        }
+        $f = (float)$s;
+        if (!is_finite($f)) {
+            throw new ParamValidationError($label . ': 유한한 숫자를 입력하세요.');
+        }
+        param_range_check($def, $f, $label);
+        return param_fmt_decimal($f);
+    }
+
+    // string
+    if (mb_strlen($s, 'UTF-8') > 100) {
+        throw new ParamValidationError($label . ': 100자 이내로 입력하세요.');
+    }
+    return $s;
+}
+
+/**
+ * 알고리즘 사용여부 · 우선순위 저장(관리자 전용).
+ * is_locked=1(risk_guard) 인 행은 폼에서 온 enabled 값을 완전히 무시하고 항상 1로 강제한다 —
+ * 클라이언트가 disabled 속성을 우회해 unchecked 로 POST 해도 서버에서 다시 켠다.
+ * @param array<int,array{id:int,enabled:bool,priority:int}> $rows
+ * @return array{ok:bool, changed:int}
+ */
+function repo_update_algorithm_selection(array $rows, string $by): array
+{
+    $byId = [];
+    foreach (repo_algorithms() as $a) {
+        $byId[(int)$a['id']] = $a; // 정본(is_locked 포함)은 항상 DB에서 다시 읽는다 — 폼 값을 신뢰하지 않음
+    }
+    $by = mb_substr($by, 0, 50, 'UTF-8');
+    $changed = 0;
+    $ok = true;
+    foreach ($rows as $r) {
+        $id = (int)($r['id'] ?? 0);
+        if ($id <= 0 || !isset($byId[$id])) {
+            continue; // 실제 존재하는 algorithm.id 가 아니면 무시
+        }
+        $isLocked = (int)$byId[$id]['is_locked'] === 1;
+        $enabled = $isLocked ? 1 : (!empty($r['enabled']) ? 1 : 0);
+        $priority = max(1, min(999, (int)($r['priority'] ?? $byId[$id]['priority'])));
+        try {
+            // stock_web 계정은 algorithm_selection 에 UPDATE 권한만 가진다(설계상 INSERT 없음) —
+            // 시드 데이터가 모든 algorithm 에 대해 이 표에 행을 이미 갖고 있어야 한다.
+            $n = db_exec(
+                'UPDATE algorithm_selection SET is_enabled = ?, priority = ?, updated_by = ?, updated_at = NOW()
+                  WHERE algorithm_id = ?',
+                [$enabled, $priority, $by, $id]
+            );
+            if ($n < 1) {
+                @error_log('[stock-web] algo_selection_no_row :: algorithm_id=' . $id);
+                $ok = false;
+                continue;
+            }
+            $changed++;
+        } catch (Throwable $e) {
+            @error_log('[stock-web] algo_selection_save_failed :: ' . $e->getMessage());
+            $ok = false;
+        }
+    }
+    return ['ok' => $ok, 'changed' => $changed];
+}
+
+/**
+ * 파라미터 값 저장(관리자 전용). 하나라도 검증에 실패하면 아무것도 저장하지 않는다(all-or-nothing).
+ * 실제로 값이 바뀐 필드만 algorithm_param_history 에 남긴다(old_value/new_value/changed_by).
+ * 파라미터 간 교차 검증(예: 단기<장기)은 서버(Python registry.build())가 담당하므로 여기서는
+ * value_type·min/max·enum 만 검사한다.
+ * @param array<string,mixed> $values param_key => 폼에서 온 원값
+ * @return array{ok:bool, errors:array<int,string>, changed:int}
+ */
+function repo_update_algorithm_params(int $algoId, array $values, string $by): array
+{
+    $defs = repo_params($algoId);
+    if ($defs === []) {
+        return ['ok' => false, 'errors' => ['이 알고리즘에는 정의된 파라미터가 없습니다.'], 'changed' => 0];
+    }
+    $by = mb_substr($by, 0, 50, 'UTF-8');
+
+    $errors = [];
+    $normalized = [];
+    foreach ($defs as $d) {
+        $key = (string)$d['param_key'];
+        if (!array_key_exists($key, $values)) {
+            continue; // 폼에 없는 값은 건드리지 않음
+        }
+        try {
+            $new = param_validate($d, $values[$key]);
+        } catch (ParamValidationError $e) {
+            $errors[] = $e->getMessage();
+            continue;
+        }
+        $old = (string)($d['current_value'] ?? $d['default_value']);
+        $normalized[$key] = ['old' => $old, 'new' => $new];
+    }
+    if ($errors !== []) {
+        return ['ok' => false, 'errors' => $errors, 'changed' => 0];
+    }
+
+    $changed = 0;
+    $writeErrors = [];
+    $pdo = db();
+    $pdo->beginTransaction();
+    try {
+        foreach ($normalized as $key => $nv) {
+            if ($nv['old'] === $nv['new']) {
+                continue; // 실제로 바뀌지 않음 — 이력도 남기지 않는다
+            }
+            // stock_web 계정은 algorithm_param_value 에 UPDATE 권한만 가진다(설계상 INSERT 없음) —
+            // 행이 없으면(시드 누락) 저장할 수 없으므로 실패로 취급하고 전체를 롤백한다.
+            $n = db_exec(
+                'UPDATE algorithm_param_value SET value = ?, updated_by = ?, updated_at = NOW()
+                  WHERE algorithm_id = ? AND param_key = ?',
+                [$nv['new'], $by, $algoId, $key]
+            );
+            if ($n < 1) {
+                $writeErrors[] = $key . ': 저장할 값 행을 찾을 수 없습니다(관리자에게 문의).';
+                continue;
+            }
+            db_exec(
+                'INSERT INTO algorithm_param_history (algorithm_id, param_key, old_value, new_value, changed_by, changed_at)
+                 VALUES (?,?,?,?,?,NOW())',
+                [$algoId, $key, $nv['old'], $nv['new'], $by]
+            );
+            $changed++;
+        }
+        if ($writeErrors !== []) {
+            $pdo->rollBack();
+            return ['ok' => false, 'errors' => $writeErrors, 'changed' => 0];
+        }
+        $pdo->commit();
+    } catch (Throwable $e) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        @error_log('[stock-web] algo_params_save_failed :: ' . $e->getMessage());
+        return ['ok' => false, 'errors' => ['저장 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.'], 'changed' => 0];
+    }
+    return ['ok' => true, 'errors' => [], 'changed' => $changed];
+}
+
+/* ------------------------------------------------------- 자동거래 시작/중지 명령 큐 */
+
+/** 웹이 넣을 수 있는 명령 화이트리스트. */
+const AUTO_TRADING_COMMANDS = ['start', 'stop'];
+
+/**
+ * 자동거래 시작/중지 "명령"만 기록한다(관리자 전용). 이 웹은 auto_trading_command 에
+ * INSERT 권한만 가지며, 실제 시작/중지 처리는 서버쪽 폴링 에이전트가 수행한다.
+ */
+function repo_insert_auto_trading_command(string $command, string $by): bool
+{
+    if (!in_array($command, AUTO_TRADING_COMMANDS, true)) {
+        return false;
+    }
+    try {
+        db_exec(
+            "INSERT INTO auto_trading_command (command, requested_by, status, requested_at)
+             VALUES (?, ?, 'pending', NOW())",
+            [$command, mb_substr($by, 0, 50, 'UTF-8')]
+        );
+        return true;
+    } catch (Throwable $e) {
+        @error_log('[stock-web] auto_trading_command_insert_failed :: ' . $e->getMessage());
+        return false;
+    }
+}
+
+/** 최근 명령 이력(최신순) — 서버쪽 에이전트가 표를 아직 만들지 않았으면 조용히 빈 배열. */
+function repo_recent_auto_trading_commands(int $limit = 20): array
+{
+    if (!repo_can_read('auto_trading_command')) {
+        return [];
+    }
+    return db_all(
+        'SELECT id, command, requested_by, status, result_message, requested_at, claimed_at, handled_at
+           FROM auto_trading_command ORDER BY id DESC LIMIT ?',
+        [max(1, min($limit, 200))]
+    );
+}
+
+/**
+ * 자동거래 현재 상태 + 게이트 정보(읽기만, system_setting 을 쓰지는 않는다).
+ * @return array{status:?array, trading_mode:string, order_enabled:bool, real_trading_confirm:bool}
+ */
+function repo_auto_trading_status(): array
+{
+    $status = db_row(
+        "SELECT component, status, message, updated_at, TIMESTAMPDIFF(SECOND, updated_at, NOW()) AS age_sec
+           FROM server_status WHERE component = 'auto_trading' LIMIT 1"
+    );
+    return [
+        'status' => $status,
+        'trading_mode' => repo_setting('trading_mode', 'real'),
+        'order_enabled' => repo_setting('order_enabled', '0') === '1',
+        'real_trading_confirm' => repo_setting('real_trading_confirm', '0') === '1',
+    ];
 }
 
 function repo_signals(?string $from, ?string $to, string $q, string $type, string $algo, int $page): array
@@ -836,7 +1165,8 @@ function repo_can_read(string $object): bool
     static $cache = [];
     if (!in_array($object, ['v_trade_analysis', 'order_event', 'event_archive', 'api_error_log',
         'trend_scan_run', 'trend_scan_candidate', 'trend_scan_attempt',
-        'company_corp_code', 'company_financial', 'company_valuation_daily', 'company_analysis_report'], true)) {
+        'company_corp_code', 'company_financial', 'company_valuation_daily', 'company_analysis_report',
+        'auto_trading_command'], true)) {
         return false;
     }
     if (isset($cache[$object])) {

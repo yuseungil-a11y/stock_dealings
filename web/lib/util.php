@@ -272,6 +272,26 @@ function clean_enum(mixed $v, array $allowed, string $default): string
     return (is_string($v) && in_array($v, $allowed, true)) ? $v : $default;
 }
 
+/**
+ * 303 리다이렉트를 거쳐도 다음 요청에서 한 번 보여줄 플래시 메시지(세션에 잠깐 보관).
+ * trend_rescan 처럼 "admin 검사 → CSRF 검사 → 처리 → 303" 흐름을 따르는 관리자 쓰기 액션에서
+ * 구체적인 결과(성공/실패 사유)를 리다이렉트 뒤에도 전달하기 위해 쓴다.
+ */
+function flash_set(string $message, string $type = 'ok'): void
+{
+    $_SESSION['flash_msg'] = mb_substr($message, 0, 500, 'UTF-8');
+    $_SESSION['flash_type'] = in_array($type, ['ok', 'warn', 'err'], true) ? $type : 'ok';
+}
+
+/** 세션에 있으면 꺼내 쓰고 곧바로 지운다(한 번만 표시). @return array{msg:?string,type:string} */
+function flash_pop(): array
+{
+    $msg = isset($_SESSION['flash_msg']) ? (string)$_SESSION['flash_msg'] : null;
+    $type = isset($_SESSION['flash_type']) ? (string)$_SESSION['flash_type'] : 'ok';
+    unset($_SESSION['flash_msg'], $_SESSION['flash_type']);
+    return ['msg' => $msg, 'type' => $type];
+}
+
 /** 치명적 오류: 상세는 로그로, 화면에는 일반 문구만. */
 function app_fatal(string $code, string $userMessage, ?string $detail = null): never
 {

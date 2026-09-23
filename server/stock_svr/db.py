@@ -1044,6 +1044,54 @@ class Database:
             (_trim_masked(reason, 255), now_kst(), max(1, int(minutes))))
 
     # ================================================================== #
+    # 웹의 자동거래 시작/중지 명령 큐 (관리자 전용 + REAL 재확인, 2026-09-23)
+    #
+    # stock_web 계정은 `auto_trading_command` 에 pending 행을 INSERT 만 하고,
+    # 엔진이 폴링해 원자적으로 claim 한 뒤 start_auto_trading()/stop_auto_trading()
+    # 을 그대로 호출한다(게이트·기존 안전장치는 이 메서드들이 건드리지 않는다).
+    # `trend_scan_request`/`company_fetch_request` 와 동일한 claim/finish 패턴이다.
+    # ================================================================== #
+    def pending_auto_trading_command(self) -> dict | None:
+        """가장 오래된 pending 명령 1건(claim 전 조회)."""
+        return self.query_one(
+            "SELECT * FROM auto_trading_command WHERE status='pending' "
+            "ORDER BY requested_at, id LIMIT 1")
+
+    def claim_auto_trading_command(self, max_tries: int = 5) -> dict | None:
+        """pending 명령 1건을 **원자적으로** claim 한다. 못 잡으면 None.
+
+        `UPDATE ... WHERE id=%s AND status='pending'` 의 영향 행 수로 승자를 가린다
+        (0이면 남이 가져간 것 → 다음 건으로) - trend_scan_request 와 동일한 방식.
+        """
+        for _ in range(max(1, int(max_tries))):
+            row = self.pending_auto_trading_command()
+            if row is None:
+                return None
+            won = self.execute(
+                "UPDATE auto_trading_command SET status='processing', claimed_at=%s "
+                "WHERE id=%s AND status='pending'", (now_kst(), int(row["id"])))
+            if won:
+                out = dict(row)
+                out["status"] = "processing"
+                return out
+        return None
+
+    def finish_auto_trading_command(self, cmd_id: int, status: str, message: str) -> None:
+        self.execute(
+            "UPDATE auto_trading_command SET status=%s, result_message=%s, handled_at=%s "
+            "WHERE id=%s",
+            (status if status in ("pending", "processing", "done", "error") else "error",
+             _trim_masked(message, 255), now_kst(), int(cmd_id)))
+
+    def expire_stale_auto_trading_commands(self, max_minutes: int = 5) -> int:
+        """`processing` 인 채 오래 멈춰 있는 명령을 `error` 로 정리한다(서버가 처리 중 죽은 경우)."""
+        return self.execute(
+            "UPDATE auto_trading_command SET status='error', "
+            "result_message=%s, handled_at=%s "
+            "WHERE status='processing' AND requested_at < (NOW() - INTERVAL %s MINUTE)",
+            ("서버 재시작으로 중단", now_kst(), max(1, int(max_minutes))))
+
+    # ================================================================== #
     # 주문 / 체결 / 거래내역
     # ================================================================== #
     def start_run(self, env: str, order_enabled: bool, note: str | None = None) -> int:

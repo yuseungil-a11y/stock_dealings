@@ -42,6 +42,12 @@ from .executor import DEFAULT_COOLDOWN_SEC, Executor
 
 log = logging.getLogger(__name__)
 
+# 웹의 자동거래 시작/중지 명령(`auto_trading_command`) 폴링 주기(초). 트렌드스캔 재조사
+# 큐(20초)·재무데이터 재수집 큐(30초)보다 짧다 - 사용자가 웹에서 누른 즉시 반영되길
+# 기대하는 액션이라 더 빠른 주기가 맞다. auto_trading_active 여부·장 상태와 무관하게
+# 항상 폴링한다(그 상태를 바꾸는 명령이므로).
+AUTO_TRADING_CMD_POLL_SEC = 5
+
 HEARTBEAT_SEC = 10
 ACCOUNT_SYNC_OPEN_SEC = 60
 ACCOUNT_SYNC_CLOSED_SEC = 600
@@ -310,6 +316,26 @@ class Engine:
         except Exception:  # noqa: BLE001
             return 0
 
+    def _poll_auto_trading_command(self) -> None:
+        """웹의 자동거래 시작/중지 명령(`auto_trading_command`) 1건을 claim 해 처리한다.
+
+        관리자 전용 + REAL 재확인은 웹 쪽 책임이다 - 여기서는 그 결정을 그대로 받아
+        `start_auto_trading()`/`stop_auto_trading()` 기존 안전장치(R-11 게이트 검사,
+        이미 실행중이면 거부 등)를 손대지 않고 재사용만 한다.
+        """
+        row = self.db.claim_auto_trading_command()
+        if row is None:
+            return
+        by = f"웹({row['requested_by']})"
+        if row["command"] == "start":
+            ok = self.start_auto_trading(by=by)
+            msg = "자동거래 시작됨" if ok else (self.start_refused_reason or "이미 실행 중이거나 시작할 수 없음")
+            self.db.finish_auto_trading_command(row["id"], "done" if ok else "error", msg)
+        else:
+            open_cnt = self.stop_auto_trading(by=by)
+            self.db.finish_auto_trading_command(
+                row["id"], "done", f"자동거래 중지됨 (미체결 {open_cnt}건, 자동 취소 안 함)")
+
     def _publish_auto_status(self) -> None:
         active = self._auto_trading.is_set()
         if not active:
@@ -435,6 +461,10 @@ class Engine:
         # 기동 시 1회: 처리 중이던 채로 죽은 요청 정리(다음 요청이 영영 막히지 않게)
         self._safe("온디맨드 재수집 요청 정리", self.fetch_requests.cleanup_stale)
 
+        # 웹의 자동거래 시작/중지 명령 큐. 기동 시 1회: 처리 중이던 채로 죽은 명령 정리
+        # (다음 명령이 영영 막히지 않게) - 다른 워커들의 stale 정리와 같은 지점.
+        self._safe("자동거래 명령 정리", lambda: self.db.expire_stale_auto_trading_commands())
+
         self._safe("보관기간 정리", lambda: self.house.run_purge(
             self._retention_days(), self.cfg.logging.path))
         self._safe("종목마스터 갱신", self._sync_master_if_needed)
@@ -464,6 +494,7 @@ class Engine:
         last_trend_req = 0.0
         last_fundamentals = 0.0
         last_fetch_req = 0.0
+        last_cmd_poll = 0.0
         while not self._stop.is_set():
             now_mono = time.monotonic()
             open_now = self.market_open()
@@ -509,6 +540,12 @@ class Engine:
                     and now_mono - last_fetch_req >= FETCH_REQUEST_POLL_SEC:
                 last_fetch_req = now_mono
                 self._safe("온디맨드 재무데이터 재수집", self.fetch_requests.poll_once)
+
+            # 웹의 자동거래 시작/중지 명령 — **auto_trading_active 여부·장 상태와 무관하게**
+            # 항상 폴링한다(이게 바로 그 상태를 바꾸는 명령이므로).
+            if now_mono - last_cmd_poll >= AUTO_TRADING_CMD_POLL_SEC:
+                last_cmd_poll = now_mono
+                self._safe("자동거래 명령 처리", self._poll_auto_trading_command)
 
             if self._reset_eval:
                 self._reset_eval = False

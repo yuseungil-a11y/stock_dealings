@@ -421,6 +421,34 @@ details.runbox > summary:hover { color: var(--accent); }
 .attempt-raw td { border-top: 0; padding-top: 0; }
 .attempt-raw .jsum { margin: 0; }
 
+/* ----------------------------------------- 관제(알고리즘 관리 · 자동거래 제어, 관리자 전용 쓰기) */
+.numinput-sm { width: 64px; }
+.numinput-md { width: 140px; }
+.paramgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px 20px; margin-bottom: 14px; }
+.paramrow { display: flex; flex-direction: column; gap: 4px; }
+.paramrow label { font-size: 12px; font-weight: 600; color: var(--ink-2); }
+.paramrow input[type="text"],
+.paramrow input[type="number"],
+.paramrow input[type="time"],
+.paramrow select { padding: 6px 8px; font-size: 13px; }
+.autotrade-actions { display: flex; gap: 10px; flex-wrap: wrap; margin: 10px 0; }
+.autotrade-actions form { margin: 0; }
+
+/* 실전(REAL) 재확인 모달 — settings_tab.py 의 ConfirmRealDialog 를 웹에서 재현 */
+dialog.confirmdlg {
+  border: 0; border-radius: var(--radius); padding: 0; max-width: 420px; width: 92%;
+  box-shadow: var(--shadow);
+}
+dialog.confirmdlg::backdrop { background: rgba(15, 23, 34, .55); }
+.confirmdlg-body { padding: 18px 20px; }
+.confirmdlg-body h3 { margin: 0 0 10px; font-size: 15px; color: var(--err); }
+.confirmdlg-body p { margin: 0 0 8px; font-size: 13px; }
+#realConfirmInput {
+  width: 100%; padding: 9px 10px; font-family: Consolas, "Courier New", monospace; font-size: 15px;
+  letter-spacing: 1px; margin: 6px 0 4px; border: 1px solid var(--line); border-radius: 6px;
+}
+.confirmdlg-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+
 /* ------------------------------------------------------------ 반응형 */
 @media (max-width: 1100px) {
   .cards { grid-template-columns: repeat(2, 1fr); }

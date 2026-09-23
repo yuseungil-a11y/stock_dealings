@@ -446,6 +446,39 @@ function fin_report_block(mixed $raw): string
     return '<pre class="reporttext">' . h($s) . '</pre>';
 }
 
+/* ------------------------------------------------- 자동거래 제어(관리자 전용 쓰기) */
+
+/**
+ * 게이트 3키(order_enabled/trading_mode/real_trading_confirm, 읽기만) 를 사람이 읽는 한 문장으로.
+ * 이 문장은 안내용일 뿐 어떤 값도 쓰지 않는다.
+ */
+function auto_trading_gate_text(array $g): string
+{
+    if (empty($g['order_enabled'])) {
+        return '관찰 모드 — 주문 미전송(order_enabled=0)';
+    }
+    if ((string)$g['trading_mode'] === 'real') {
+        return '실계좌(REAL) · 주문 전송 ON' . (!empty($g['real_trading_confirm']) ? ' · 이중확인 ON' : ' · 이중확인 OFF');
+    }
+    return '모의투자(MOCK) · 주문 전송 ON';
+}
+
+/** auto_trading_command.status 배지. */
+function auto_trading_cmd_status_badge(string $status): string
+{
+    return badge(
+        match ($status) { 'pending' => '대기', 'processing' => '처리중', 'done' => '완료', 'error' => '오류', default => $status },
+        match ($status) { 'pending' => 'muted', 'processing' => 'info', 'done' => 'ok', 'error' => 'err', default => 'muted' }
+    );
+}
+
+/** auto_trading_command.command 배지. */
+function auto_trading_cmd_badge(string $command): string
+{
+    return badge($command === 'start' ? '시작' : ($command === 'stop' ? '중지' : $command),
+        $command === 'start' ? 'warn' : 'muted');
+}
+
 /** 탭 링크 묶음 (JS 없이 GET 링크). @param array<string,string> $tabs key => label */
 function tab_links(array $tabs, string $current, string $param = 'tab'): string
 {

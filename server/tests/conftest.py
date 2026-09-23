@@ -62,6 +62,8 @@ class FakeDb:
         self.price_daily: dict[str, list[dict]] = {}
         # 온디맨드 재무데이터 수집 요청 큐 (fundamentals_filter 전용)
         self.fetch_requests: list[dict] = []
+        # 웹의 자동거래 시작/중지 명령 큐
+        self.auto_trading_commands: list[dict] = []
         self._carid = 0
         self._taid = 0
         self._trid = 0
@@ -71,6 +73,7 @@ class FakeDb:
         self._tid = 0
         self._tcid = 0
         self._cfrid = 0
+        self._atcid = 0
 
     def _maybe_fail(self, name: str) -> None:
         if name in self.fail_on:
@@ -688,6 +691,63 @@ class FakeDb:
         for r in self.fetch_requests:
             if r["status"] == "processing" and r["requested_at"] < cutoff:
                 r.update({"status": "error", "error_msg": reason, "finished_at": cutoff})
+                n += 1
+        return n
+
+    # -- 웹의 자동거래 시작/중지 명령 큐 --------------------------------- #
+    def insert_auto_trading_command(self, command: str, requested_by: str = "admin",
+                                    requested_at=None) -> int:
+        self._atcid += 1
+        row = {"id": self._atcid, "command": command, "requested_by": requested_by,
+               "status": "pending", "result_message": None,
+               "requested_at": requested_at or self.now_for_stale
+               or _dt.datetime(2026, 9, 23, 10, 30),
+               "claimed_at": None, "handled_at": None}
+        self.auto_trading_commands.append(row)
+        return self._atcid
+
+    def pending_auto_trading_command(self):
+        self._maybe_fail("pending_auto_trading_command")
+        rows = [r for r in self.auto_trading_commands if r["status"] == "pending"]
+        rows.sort(key=lambda r: (r["requested_at"], r["id"]))
+        return dict(rows[0]) if rows else None
+
+    def claim_auto_trading_command(self, max_tries: int = 5):
+        """실제 Database 와 같은 '영향 행 수로 승자 판정' 방식."""
+        self._maybe_fail("claim_auto_trading_command")
+        for _ in range(max(1, int(max_tries))):
+            row = self.pending_auto_trading_command()
+            if row is None:
+                return None
+            won = 0
+            for r in self.auto_trading_commands:
+                if r["id"] == row["id"] and r["status"] == "pending":
+                    r["status"] = "processing"
+                    r["claimed_at"] = self.now_for_stale or _dt.datetime(2026, 9, 23, 10, 30)
+                    won = 1
+            if won:
+                out = dict(row)
+                out["status"] = "processing"
+                return out
+        return None
+
+    def finish_auto_trading_command(self, cmd_id: int, status: str, message: str) -> None:
+        self._maybe_fail("finish_auto_trading_command")
+        for r in self.auto_trading_commands:
+            if r["id"] == cmd_id:
+                r.update({"status": status, "result_message": message,
+                          "handled_at": self.now_for_stale or _dt.datetime(2026, 9, 23, 10, 35)})
+                return
+
+    def expire_stale_auto_trading_commands(self, max_minutes: int = 5) -> int:
+        self._maybe_fail("expire_stale_auto_trading_commands")
+        cutoff = (self.now_for_stale or _dt.datetime(2026, 9, 23, 10, 30)) \
+            - _dt.timedelta(minutes=max(1, int(max_minutes)))
+        n = 0
+        for r in self.auto_trading_commands:
+            if r["status"] == "processing" and r["requested_at"] < cutoff:
+                r.update({"status": "error", "result_message": "서버 재시작으로 중단",
+                          "handled_at": cutoff})
                 n += 1
         return n
 

@@ -257,4 +257,37 @@
     };
     setInterval(updateStatus, 30000);
   }
+
+  /* ------------------------------------------------ 자동거래 제어: REAL 재확인 모달
+   * 서버 GUI(stock_svr)의 ConfirmRealDialog 와 동일한 동작 — "REAL" 을 정확히(대소문자·공백까지)
+   * 입력해야만 확인 버튼이 활성화된다. 실제 서버 재검증은 index.php 의 auto_trading_start
+   * 핸들러가 confirm_word 값을 다시 검사하므로, 이 JS 는 사용성을 위한 1차 방어일 뿐이다. */
+  var CONFIRM_WORD = 'REAL';
+  var startBtn = $('#btnAutoStart');
+  var dlg = $('#realConfirmDialog');
+  if (startBtn && dlg && typeof dlg.showModal === 'function') {
+    var input = $('#realConfirmInput', dlg);
+    var okBtn = $('#realConfirmOk', dlg);
+    var cancelBtn = $('#realConfirmCancel', dlg);
+    var hiddenWord = $('#confirmWordInput');
+    var startForm = $('#startForm');
+
+    function checkInput() {
+      okBtn.disabled = (input.value !== CONFIRM_WORD);
+    }
+    startBtn.addEventListener('click', function () {
+      input.value = '';
+      checkInput();
+      dlg.showModal();
+      input.focus();
+    });
+    input.addEventListener('input', checkInput);
+    cancelBtn.addEventListener('click', function () { dlg.close(); });
+    okBtn.addEventListener('click', function () {
+      if (input.value !== CONFIRM_WORD) { return; }
+      hiddenWord.value = input.value;
+      dlg.close();
+      startForm.submit();
+    });
+  }
 })();

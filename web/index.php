@@ -35,6 +35,18 @@ $loginError = null;
 $flash = null;
 $flashType = 'ok';
 
+/* 303 리다이렉트 뒤(항상 GET)에 한 번만 보여줄 플래시 메시지를 세션에서 꺼낸다.
+ * algo_selection_save / algo_params_save / auto_trading_start / auto_trading_stop 처럼
+ * "admin 검사 → CSRF 검사 → 처리 → 303" 뒤에도 구체적인 결과 문구를 보여주기 위함
+ * (trend_rescan 은 화면 자체 쿼리 파라미터로 처리하므로 이 메커니즘을 쓰지 않는다). */
+if ($method !== 'POST') {
+    $fl = flash_pop();
+    if ($fl['msg'] !== null) {
+        $flash = $fl['msg'];
+        $flashType = $fl['type'];
+    }
+}
+
 if ($method === 'POST') {
     $action = is_string($_POST['action'] ?? null) ? $_POST['action'] : '';
     if (!csrf_valid()) {
@@ -100,6 +112,105 @@ if ($method === 'POST') {
             $_SESSION['trend_req_at'] = time();
         }
         header('Location: ' . url_page('strategy.trend', ['rq' => $ok ? 'ok' : 'err']), true, 303);
+        exit;
+    } elseif ($action === 'algo_selection_save') {
+        /* 알고리즘 사용여부 · 우선순위 저장(관리자 전용).
+         * risk_guard(is_locked=1) 는 폼 값과 무관하게 repo_update_algorithm_selection() 안에서
+         * 항상 enabled=1 로 강제된다(클라이언트 disabled 속성만 믿지 않음). */
+        if ($user === null || !auth_is_admin()) {
+            http_response_code(403);
+            render_standalone(['title' => '접근 권한 없음',
+                'message' => '알고리즘 사용여부 · 우선순위 변경은 관리자만 할 수 있습니다.']);
+            exit;
+        }
+        $rows = [];
+        foreach ((array)($_POST['sel'] ?? []) as $id => $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+            $rows[] = [
+                'id' => (int)$id,
+                'enabled' => !empty($row['enabled']),
+                'priority' => clean_int($row['priority'] ?? 1, 1, 1, 999),
+            ];
+        }
+        $res = repo_update_algorithm_selection($rows, $user['username']);
+        flash_set(
+            $res['ok']
+                ? ('알고리즘 사용여부 · 우선순위를 저장했습니다(' . $res['changed'] . '건). '
+                    . '서버가 다음 평가 주기부터 반영합니다.')
+                : '일부 또는 전체 항목을 저장하지 못했습니다. 잠시 후 다시 시도해 주세요.',
+            $res['ok'] ? 'ok' : 'err'
+        );
+        header('Location: ' . url_page('control.algorithms'), true, 303);
+        exit;
+    } elseif ($action === 'algo_params_save') {
+        /* 알고리즘 파라미터 값 저장(관리자 전용). 타입 · 범위 · enum 검증은
+         * repo_update_algorithm_params() 안에서 서버 Python validate() 와 같은 규칙으로 수행하며,
+         * 검증에 하나라도 실패하면 아무것도 저장하지 않는다(all-or-nothing). */
+        if ($user === null || !auth_is_admin()) {
+            http_response_code(403);
+            render_standalone(['title' => '접근 권한 없음',
+                'message' => '알고리즘 파라미터 변경은 관리자만 할 수 있습니다.']);
+            exit;
+        }
+        $algoId = clean_int($_POST['algo_id'] ?? 0, 0, 0);
+        $algoRow = $algoId > 0 ? repo_algorithm_by_id($algoId) : null;
+        if ($algoRow === null) {
+            $res = ['ok' => false, 'errors' => ['알고리즘을 찾을 수 없습니다.'], 'changed' => 0];
+        } else {
+            $res = repo_update_algorithm_params($algoId, (array)($_POST['params'] ?? []), $user['username']);
+        }
+        flash_set(
+            $res['ok']
+                ? ('파라미터를 저장했습니다(' . $res['changed'] . '건 변경). '
+                    . '서버가 다음 평가 주기부터 반영합니다 — 값이 서로 맞지 않으면 서버가 이 알고리즘을 '
+                    . '자동으로 비활성화하고 경보를 낼 수 있습니다.')
+                : ('파라미터를 저장하지 못했습니다: ' . implode(' · ', $res['errors'])),
+            $res['ok'] ? 'ok' : 'err'
+        );
+        header('Location: ' . url_page('control.algorithms', $algoRow !== null ? ['algo' => $algoRow['code']] : []),
+            true, 303);
+        exit;
+    } elseif ($action === 'auto_trading_start') {
+        /* 자동거래 시작(관리자 전용) — "REAL" 재확인 필수.
+         * 클라이언트 JS 로 이미 "REAL" 을 정확히 입력해야 버튼이 눌리게 막지만, curl 등으로 이
+         * 검사를 건너뛰고 곧바로 POST 할 수 있으므로 서버에서도 반드시 다시 검사한다(방어의 마지막 줄). */
+        if ($user === null || !auth_is_admin()) {
+            http_response_code(403);
+            render_standalone(['title' => '접근 권한 없음',
+                'message' => '자동거래 시작은 관리자만 할 수 있습니다.']);
+            exit;
+        }
+        $confirm = is_string($_POST['confirm_word'] ?? null) ? $_POST['confirm_word'] : '';
+        if ($confirm !== 'REAL') {
+            flash_set('확인 문구가 정확히 "REAL" 이 아니어서 시작 요청을 취소했습니다(공백·대소문자까지 정확히 일치해야 합니다).', 'err');
+            header('Location: ' . url_page('control.auto_trading'), true, 303);
+            exit;
+        }
+        $ok = repo_insert_auto_trading_command('start', $user['username']);
+        flash_set(
+            $ok ? '자동거래 시작 요청을 접수했습니다. 서버가 곧 처리합니다(아래 명령 이력에서 확인하세요).'
+                : '요청 접수에 실패했습니다. 잠시 후 다시 시도해 주세요.',
+            $ok ? 'warn' : 'err'
+        );
+        header('Location: ' . url_page('control.auto_trading'), true, 303);
+        exit;
+    } elseif ($action === 'auto_trading_stop') {
+        /* 자동거래 중지(관리자 전용) — 중지는 항상 안전한 방향이므로 REAL 재확인은 요구하지 않는다. */
+        if ($user === null || !auth_is_admin()) {
+            http_response_code(403);
+            render_standalone(['title' => '접근 권한 없음',
+                'message' => '자동거래 중지는 관리자만 할 수 있습니다.']);
+            exit;
+        }
+        $ok = repo_insert_auto_trading_command('stop', $user['username']);
+        flash_set(
+            $ok ? '자동거래 중지 요청을 접수했습니다. 서버가 곧 처리합니다(아래 명령 이력에서 확인하세요).'
+                : '요청 접수에 실패했습니다. 잠시 후 다시 시도해 주세요.',
+            $ok ? 'ok' : 'err'
+        );
+        header('Location: ' . url_page('control.auto_trading'), true, 303);
         exit;
     } else {
         http_response_code(400);
