@@ -7,6 +7,11 @@
 
 ## [Unreleased]
 
+
+## [1.8.0] - 2026-09-23
+### 변경
+- 재무 건전성 필터(fundamentals_filter) 추가 - PER/PBR/ROE/부채비율 개별 기준값 통과제, 데이터 없거나 오래되면 매수 차단(fail-closed). 기본 비활성. Claude 미호출(순수 DB 조회).
+
 ## [1.7.0] - 2026-09-23
 ### 추가
 - **기업 재무분석(DART OpenAPI + Claude, 참고용 — 매매와 완전히 무관)**: 시총 상위 종목(ETF·우선주·스팩 제외, `universe_filter` 의 순위 계산 재사용)에 대해 DART 공시 재무제표를 모으고 주가와 결합해 EPS(TTM)/BPS/PER/PBR/ROE/부채비율을 **서버(Python)가 계산**한 뒤, Claude 가 그 숫자를 **해석만** 해서 안정성/수익성/성장성/밸류에이션/현금흐름/주요 위험요인 리포트를 만든다. 장마감 후(기본 16시) 하루 1회 돌며 `company_corp_code`/`company_financial`/`company_valuation_daily`/`company_analysis_report` 에 기록한다

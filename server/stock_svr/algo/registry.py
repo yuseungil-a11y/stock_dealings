@@ -114,6 +114,7 @@ def _ensure_loaded() -> None:
         averaging_down,
         claude_advisor,
         claude_trend_scan,
+        fundamentals_filter,
         ma_cross_filter,
         momentum_screen,
         risk_guard,

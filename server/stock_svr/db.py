@@ -910,6 +910,13 @@ class Database:
             "SELECT * FROM company_valuation_daily WHERE stk_cd=%s AND dt=%s",
             (str(stk_cd), dt))
 
+    def latest_company_valuation(self, stk_cd: str) -> dict | None:
+        """이 종목의 가장 최근 평가일 행(없으면 None). `fundamentals_filter` 가 쓴다."""
+        return self.query_one(
+            "SELECT * FROM company_valuation_daily WHERE stk_cd=%s "
+            "ORDER BY dt DESC LIMIT 1",
+            (str(stk_cd),))
+
     def upsert_company_report(self, stk_cd: str, as_of_date: _dt.date, *, model: str,
                               report_text: str, stk_nm: str | None = None,
                               summary: str | None = None, input_tokens: int | None = None,

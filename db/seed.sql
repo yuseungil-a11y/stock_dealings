@@ -30,7 +30,9 @@ INSERT INTO algorithm (code, name, role, description, is_locked, sort_order) VAL
  ('claude_advisor',      'Claude 거부권 필터',       'filter',
   'risk_guard 까지 모두 통과해 곧 주문될 **매수 신호만** Claude API 로 한 번 더 검토해 위험하면 차단한다(1단계 거부권). 매도·손절·청산 신호는 검토하지 않으며, 오류·저확신·상한 초과 시 기본값은 차단(fail_mode). 종목 시세와 최근 일봉만 전송하고 계좌·잔고·키는 전송하지 않는다.', 0, 50),
  ('claude_trend_scan',   '산업 트렌드 스캔(Claude)', 'entry',
-  '하루 1회(scan_time), 국내(ka90001 테마그룹 등락률)+해외 산업 동향을 Claude 웹 검색으로 조사해 유망 테마를 뽑고, 국내 종목은 ka90002 테마구성종목 또는 종목마스터 이름 매칭으로만 확정한다(매칭 실패 종목은 매수하지 않고 후보로만 기록). 확정 종목을 매수 후보로 만들어 다른 진입 알고리즘과 동일하게 risk_guard 등 전 안전장치를 통과해야 주문된다. 후보/미매칭 내역은 웹 "전략 > 산업 트렌드"에서 조회 가능.', 0, 15)
+  '하루 1회(scan_time), 국내(ka90001 테마그룹 등락률)+해외 산업 동향을 Claude 웹 검색으로 조사해 유망 테마를 뽑고, 국내 종목은 ka90002 테마구성종목 또는 종목마스터 이름 매칭으로만 확정한다(매칭 실패 종목은 매수하지 않고 후보로만 기록). 확정 종목을 매수 후보로 만들어 다른 진입 알고리즘과 동일하게 risk_guard 등 전 안전장치를 통과해야 주문된다. 후보/미매칭 내역은 웹 "전략 > 산업 트렌드"에서 조회 가능.', 0, 15),
+ ('fundamentals_filter', '재무 건전성 필터(PER·PBR·ROE·부채비율)', 'filter',
+  '매매와 분리된 DART 재무분석 결과(company_valuation_daily)를 신규 매수 신호에 적용하는 필터. PER·PBR·ROE·부채비율 각각의 개별 기준값을 넘으면(개별 기준값 통과제) 매수를 차단한다. 재무데이터가 없거나 오래되면(stale_days) 매수를 차단한다(안전 우선, fail-closed). 매도·손절·청산에는 관여하지 않는다.', 0, 38)
 ON DUPLICATE KEY UPDATE name=VALUES(name), role=VALUES(role), description=VALUES(description),
                         is_locked=VALUES(is_locked), sort_order=VALUES(sort_order);
 
@@ -162,6 +164,24 @@ SELECT a.id, p.k, p.label, p.t, p.d, p.mn, p.mx, p.eo, p.u, p.ds, p.so FROM algo
  SELECT 'max_web_searches',   '조사 시 웹검색 상한',  'int',    '6',      '1','20',  NULL,'회','조사 1회 호출당 web_search 도구 사용 상한(비용 통제)',11 UNION ALL
  SELECT 'timeout_sec',        '응답 대기 시간',       'int',    '90',     '30','300',NULL,'초','조사(웹검색 포함)는 시간이 걸려 claude_advisor 보다 길게 잡는다',12
 ) p ON a.code='claude_trend_scan'
+ON DUPLICATE KEY UPDATE label=VALUES(label), value_type=VALUES(value_type), default_value=VALUES(default_value),
+  min_value=VALUES(min_value), max_value=VALUES(max_value), enum_options=VALUES(enum_options), unit=VALUES(unit),
+  description=VALUES(description), sort_order=VALUES(sort_order);
+
+-- ---- 파라미터 정의: fundamentals_filter -------------------------------
+INSERT INTO algorithm_param_def (algorithm_id, param_key, label, value_type, default_value, min_value, max_value, enum_options, unit, description, sort_order)
+SELECT a.id, p.k, p.label, p.t, p.d, p.mn, p.mx, p.eo, p.u, p.ds, p.so FROM algorithm a JOIN (
+ SELECT 'use_per'           k,'PER 상한 사용'        label,'bool'    t,'1'   d,NULL mn,NULL mx,       NULL eo,NULL u,'1이면 PER 상한 검사를 적용한다' ds,1 so UNION ALL
+ SELECT 'per_max',           'PER 상한',             'decimal','25',   '0','500',       NULL,'배','PER 이 이 값을 초과하면 매수 차단',2 UNION ALL
+ SELECT 'use_pbr',           'PBR 상한 사용',        'bool',   '1',    NULL,NULL,       NULL,NULL,'1이면 PBR 상한 검사를 적용한다',3 UNION ALL
+ SELECT 'pbr_max',           'PBR 상한',             'decimal','3',    '0','100',       NULL,'배','PBR 이 이 값을 초과하면 매수 차단',4 UNION ALL
+ SELECT 'use_roe',           'ROE 하한 사용',        'bool',   '1',    NULL,NULL,       NULL,NULL,'1이면 ROE 하한 검사를 적용한다',5 UNION ALL
+ SELECT 'roe_min',           'ROE 하한',             'decimal','5',    '-100','200',    NULL,'%','ROE 가 이 값에 미달하면 매수 차단',6 UNION ALL
+ SELECT 'use_debt',          '부채비율 상한 사용',   'bool',   '1',    NULL,NULL,       NULL,NULL,'1이면 부채비율 상한 검사를 적용한다',7 UNION ALL
+ SELECT 'debt_ratio_max',    '부채비율 상한',        'decimal','200',  '0','2000',      NULL,'%','부채비율이 이 값을 초과하면 매수 차단',8 UNION ALL
+ SELECT 'apply_to',          '적용 대상',            'enum',   'entry',NULL,NULL,       'entry:신규 진입 매수만,entry_and_avg:신규 진입 + 물타기',NULL,'어떤 매수 신호에 적용할지. 매도·손절·청산에는 어떤 설정에서도 관여하지 않는다',9 UNION ALL
+ SELECT 'stale_days',        '재무데이터 허용 경과일','int',   '10',   '1','90',        NULL,'일','company_valuation_daily 갱신이 이 일수보다 오래되면(또는 데이터가 없으면) 신규 매수 차단',10
+) p ON a.code='fundamentals_filter'
 ON DUPLICATE KEY UPDATE label=VALUES(label), value_type=VALUES(value_type), default_value=VALUES(default_value),
   min_value=VALUES(min_value), max_value=VALUES(max_value), enum_options=VALUES(enum_options), unit=VALUES(unit),
   description=VALUES(description), sort_order=VALUES(sort_order);

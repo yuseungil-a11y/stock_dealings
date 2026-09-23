@@ -553,6 +553,14 @@ class FakeDb:
         row = self.valuations.get((str(stk_cd), dt))
         return dict(row) if row else None
 
+    def latest_company_valuation(self, stk_cd):
+        self._maybe_fail("latest_company_valuation")
+        rows = [v for (code, _dt_), v in self.valuations.items() if code == str(stk_cd)]
+        if not rows:
+            return None
+        rows.sort(key=lambda r: r["dt"])
+        return dict(rows[-1])
+
     def upsert_company_report(self, stk_cd, as_of_date, *, model, report_text, stk_nm=None,
                               summary=None, input_tokens=None, output_tokens=None,
                               latency_ms=None, status="ok", error_msg=None) -> int:
