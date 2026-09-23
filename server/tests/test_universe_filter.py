@@ -37,9 +37,10 @@ NOW = _dt.datetime(2026, 9, 18, 10, 30)     # 금요일 장중
 DEFS = [
     {"param_key": "use_kospi", "label": "코스피 포함", "value_type": "bool", "default_value": "1"},
     {"param_key": "use_kosdaq", "label": "코스닥 포함", "value_type": "bool", "default_value": "1"},
+    {"param_key": "use_etf", "label": "ETF 포함", "value_type": "bool", "default_value": "1"},
     {"param_key": "rank_scope", "label": "순위 기준", "value_type": "enum",
      "default_value": "per_market",
-     "enum_options": "per_market:시장별 순위,combined:코스피+코스닥 합산 순위"},
+     "enum_options": "per_market:시장별 순위,combined:선택된 시장 합산 순위"},
     {"param_key": "top_n", "label": "시가총액 상위 N", "value_type": "int",
      "default_value": "100", "min_value": "1", "max_value": "2000"},
     {"param_key": "min_market_cap_eok", "label": "최소 시가총액", "value_type": "int",
@@ -69,10 +70,13 @@ def algo(**over) -> UniverseFilter:
                           params=ParamSet(DEFS, {k: str(v) for k, v in over.items()}))
 
 
+MARKET_NAME = {"0": "거래소", "10": "코스닥", "8": "ETF", "60": "ETN"}
+
+
 def master(stk_cd, stk_nm, market_code="0", list_count=10_000_000, last_price=100_000,
            state=None, order_warning="0") -> dict:
     return {"stk_cd": stk_cd, "stk_nm": stk_nm, "market_code": market_code,
-            "market_name": "거래소" if market_code == "0" else "코스닥",
+            "market_name": MARKET_NAME.get(market_code, market_code),
             "list_count": list_count, "last_price": last_price,
             "state": state, "order_warning": order_warning}
 
@@ -86,6 +90,15 @@ def rows_basic() -> list[dict]:
         master("247540", "에코프로비엠", "10", 900_000, 200_000),   # 1,800억
         master("091990", "셀트리온헬스케어", "10", 400_000, 100_000),  # 400억
         master("035760", "CJ ENM", "10", 100_000, 60_000),          # 60억
+    ]
+
+
+def rows_etf() -> list[dict]:
+    """ETF 3종목 (시총 내림차순). 이름은 실제 ETF 명명 규칙을 따른다."""
+    return [
+        master("069500", "KODEX 200", "8", 1_000_000, 40_000),        # 400억
+        master("360750", "TIGER 미국S&P500", "8", 1_000_000, 20_000),  # 200억
+        master("122630", "KODEX 레버리지", "8", 100_000, 15_000),      # 15억
     ]
 
 
@@ -134,9 +147,144 @@ def test_only_selected_markets_are_ranked():
 
 
 def test_non_target_market_rows_are_ignored():
-    rows = rows_basic() + [master("069500", "KODEX 200", "8", 1_000_000, 40_000)]
+    """ETN·금현물 등 코스피/코스닥/ETF 가 아닌 시장은 유니버스에 들어오지 않는다."""
+    rows = rows_basic() + [master("580011", "ETN상품", "60", 1_000_000, 40_000),
+                           master("411060", "금현물", "6", 1_000_000, 40_000)]
     uni = build_universe(rows, opts(min_price=0))
-    assert "069500" not in uni.entries
+    assert "580011" not in uni.entries and "411060" not in uni.entries
+
+
+# ====================================================================== #
+# 1-1. ETF (use_etf)
+# ====================================================================== #
+def test_etf_is_included_by_default():
+    uni = build_universe(rows_basic() + rows_etf(), opts(min_price=0))
+    etf = uni.entries["069500"]
+    assert etf.excluded == "" and etf.market_label == "ETF"
+    assert etf.passed is True
+
+
+def test_etf_excluded_when_use_etf_off():
+    uni = build_universe(rows_basic() + rows_etf(), opts(min_price=0, use_etf=0))
+    assert "대상 시장 아님(ETF)" in uni.entries["069500"].excluded
+    assert "069500" not in [e.stk_cd for e in uni.ranked]
+
+
+def test_etf_buy_blocked_when_use_etf_off():
+    ctx = make_ctx(db_with(rows_basic() + rows_etf()), now=NOW)
+    kept = algo(min_price=0, use_etf=0).filter_signals(ctx, [buy("069500")])
+    assert kept == [] and "대상 시장 아님(ETF)" in ctx.db.signals[-1]["detail"]
+
+
+def test_etf_buy_passes_when_use_etf_on():
+    ctx = make_ctx(db_with(rows_basic() + rows_etf()), now=NOW)
+    sig = buy("069500")
+    assert algo(min_price=0).filter_signals(ctx, [sig]) == [sig]
+    assert ctx.db.signals == []
+
+
+def test_etf_has_own_rank_in_per_market():
+    """per_market 이면 ETF 도 자기 그룹 안에서 1위부터 순위를 매긴다."""
+    uni = build_universe(rows_basic() + rows_etf(), opts(min_price=0))
+    assert uni.entries["069500"].rank == 1       # ETF 1위
+    assert uni.entries["360750"].rank == 2
+    assert uni.entries["122630"].rank == 3
+    assert uni.entries["005930"].rank == 1       # 코스피 1위는 그대로
+    assert uni.entries["247540"].rank == 1       # 코스닥 1위도 그대로
+
+
+def test_etf_top_n_is_counted_per_market():
+    """top_n=2 면 코스피 2 + 코스닥 2 + ETF 2 가 각각 통과한다."""
+    o = opts(min_price=0, top_n=2)
+    uni = build_universe(rows_basic() + rows_etf(), o)
+    assert uni.passed_by_market == {"0": 2, "10": 2, "8": 2}
+    assert uni.passed_total == 6
+
+
+def test_etf_over_top_n_message_uses_etf_label():
+    ctx = make_ctx(db_with(rows_basic() + rows_etf()), now=NOW)
+    kept = algo(min_price=0, top_n=2).filter_signals(ctx, [buy("122630")])
+    assert kept == []
+    assert "ETF 시총순위 3위 > 2" in ctx.db.signals[-1]["detail"]
+
+
+def test_etf_joins_combined_ranking():
+    """combined 면 ETF 도 코스피·코스닥과 하나의 시총 순위에 들어간다."""
+    uni = build_universe(rows_basic() + rows_etf(), opts(min_price=0, rank_scope="combined"))
+    # 1800(에코프로비엠) > 700(삼성) > 500(하이닉스) > 400(셀트리온·KODEX200) > 300 > 200 > 60 > 15
+    assert [e.stk_cd for e in uni.ranked] == [
+        "247540", "005930", "000660", "069500", "091990", "051910", "360750",
+        "035760", "122630"]
+    assert uni.entries["069500"].rank == 4
+
+
+def test_combined_label_includes_etf():
+    ctx = make_ctx(db_with(rows_basic() + rows_etf()), now=NOW)
+    algo(min_price=0, top_n=1, rank_scope="combined").filter_signals(ctx, [buy("069500")])
+    assert "코스피+코스닥+ETF 시총순위 4위 > 1" in ctx.db.signals[-1]["detail"]
+
+
+def test_etf_only_universe():
+    o = opts(min_price=0, use_kospi=0, use_kosdaq=0)
+    uni = build_universe(rows_basic() + rows_etf(), o)
+    assert {e.market_code for e in uni.ranked} == {"8"}
+    assert o.markets_text == "ETF"
+
+
+@pytest.mark.parametrize("price,passes", [(19_999, False), (20_000, True)])
+def test_min_price_applies_to_etf(price, passes):
+    rows = [master("360750", "TIGER 미국S&P500", "8", 1_000_000, price)]
+    ctx = make_ctx(db_with(rows), now=NOW)
+    assert bool(algo(min_price=20_000).filter_signals(ctx, [buy("360750")])) is passes
+
+
+def test_max_price_applies_to_etf():
+    rows = [master("069500", "KODEX 200", "8", 1_000_000, 40_000)]
+    ctx = make_ctx(db_with(rows), now=NOW)
+    kept = algo(min_price=0, max_price=30_000).filter_signals(ctx, [buy("069500")])
+    assert kept == [] and "주가 40,000원 > 최대 30,000원" in ctx.db.signals[-1]["detail"]
+
+
+def test_exclude_warning_applies_to_etf():
+    rows = rows_etf() + [master("000000", "정리중ETF", "8", 1_000_000, 30_000,
+                                state="증거금100%|거래정지")]
+    uni = build_universe(rows, opts(min_price=0))
+    assert uni.entries["000000"].excluded == "거래정지"
+
+
+def test_order_warning_applies_to_etf():
+    rows = [master("069500", "KODEX 200", "8", 1_000_000, 40_000, order_warning="3")]
+    uni = build_universe(rows, opts(min_price=0))
+    assert "투자유의" in uni.entries["069500"].excluded
+
+
+def test_etf_market_cap_is_list_count_times_last_price():
+    uni = build_universe(rows_etf(), opts(min_price=0))
+    assert uni.entries["069500"].market_cap == 1_000_000 * 40_000
+    assert uni.entries["069500"].cap_eok == 400
+
+
+def test_min_market_cap_applies_to_etf():
+    ctx = make_ctx(db_with(rows_etf()), now=NOW)
+    kept = algo(min_price=0, min_market_cap_eok=100).filter_signals(ctx, [buy("122630")])
+    assert kept == [] and "시가총액 15억원 < 최소 100억원" in ctx.db.signals[-1]["detail"]
+
+
+@pytest.mark.parametrize("name", [
+    "KODEX 200", "TIGER 미국S&P500", "KODEX 레버리지", "RISE 200", "ACE 글로벌반도체TOP4 Plus",
+    "TIGER 차이나전기차SOLACTIVE", "KODEX 은행", "PLUS 고배당주",
+])
+def test_normal_etf_names_are_not_excluded_by_name_rules(name):
+    """우선주·스팩 제외가 켜져 있어도 정상적인 ETF 이름은 걸리지 않는다(오탐 없음)."""
+    rows = rows_basic() + [master("069500", name, "8", 1_000_000, 40_000)]
+    uni = build_universe(rows, opts(min_price=0, exclude_preferred=1, exclude_spac=1))
+    assert uni.entries["069500"].excluded == ""
+
+
+def test_etf_missing_price_is_excluded():
+    rows = [master("069500", "KODEX 200", "8", 1_000_000, 0)]
+    uni = build_universe(rows, opts(min_price=0))
+    assert "시가총액 계산 불가" in uni.entries["069500"].excluded
 
 
 # ====================================================================== #
@@ -228,7 +376,8 @@ def test_top_n_blocks_lower_rank():
 
 def test_top_n_message_uses_combined_label():
     ctx = make_ctx(db_with(rows_basic()), now=NOW)
-    algo(top_n=1, min_price=0, rank_scope="combined").filter_signals(ctx, [buy("005930")])
+    algo(top_n=1, min_price=0, use_etf=0,
+         rank_scope="combined").filter_signals(ctx, [buy("005930")])
     assert "코스피+코스닥 시총순위 2위 > 1" in ctx.db.signals[-1]["detail"]
 
 
@@ -426,6 +575,13 @@ def test_cache_separated_by_options():
     assert db.universe_calls == 2
 
 
+def test_cache_separated_by_use_etf():
+    db = _counting_db()
+    load_universe(db, opts(min_price=0), NOW)
+    load_universe(db, opts(min_price=0, use_etf=0), NOW)
+    assert db.universe_calls == 2
+
+
 def test_clear_universe_cache_forces_reload():
     db = _counting_db()
     o = opts(min_price=0)
@@ -461,10 +617,19 @@ def test_max_price_zero_is_allowed():
         ParamSet(DEFS, {"min_price": "50000", "max_price": "0"})) == []
 
 
-def test_both_markets_off_is_error():
+def test_all_markets_off_is_error():
     errs = UniverseFilter.validate_params(
-        ParamSet(DEFS, {"use_kospi": "0", "use_kosdaq": "0"}))
-    assert errs and "코스피" in errs[0]
+        ParamSet(DEFS, {"use_kospi": "0", "use_kosdaq": "0", "use_etf": "0"}))
+    assert errs and "코스피" in errs[0] and "ETF" in errs[0]
+
+
+@pytest.mark.parametrize("params", [
+    {"use_kospi": "0", "use_kosdaq": "0"},            # ETF 만 켜짐
+    {"use_kospi": "0", "use_etf": "0"},               # 코스닥만 켜짐
+    {"use_kosdaq": "0", "use_etf": "0"},              # 코스피만 켜짐
+])
+def test_one_market_on_is_not_error(params):
+    assert UniverseFilter.validate_params(ParamSet(DEFS, params)) == []
 
 
 def test_registry_disables_algo_on_cross_param_error():
@@ -472,7 +637,8 @@ def test_registry_disables_algo_on_cross_param_error():
 
     seen: list[tuple] = []
     meta = {"code": "universe_filter", "name": "유니버스", "role": "filter", "is_locked": 0,
-            "param_defs": DEFS, "params": {"use_kospi": "0", "use_kosdaq": "0"}}
+            "param_defs": DEFS,
+            "params": {"use_kospi": "0", "use_kosdaq": "0", "use_etf": "0"}}
     assert registry.build(meta, on_error=lambda c, d, crit: seen.append((c, d, crit))) is None
     assert seen and "파라미터 오류" in seen[0][1]
 
@@ -485,9 +651,9 @@ def test_registry_builds_with_valid_params():
     assert isinstance(registry.build(meta), UniverseFilter)
 
 
-def test_both_markets_off_blocks_buy():
+def test_all_markets_off_blocks_buy():
     ctx = make_ctx(db_with(rows_basic()), now=NOW)
-    kept = algo(use_kospi=0, use_kosdaq=0).filter_signals(ctx, [buy()])
+    kept = algo(use_kospi=0, use_kosdaq=0, use_etf=0).filter_signals(ctx, [buy()])
     assert kept == [] and "파라미터 오류" in ctx.db.signals[-1]["detail"]
 
 
@@ -554,6 +720,26 @@ def test_preview_summary_and_rows():
     assert any("시총순위" in r[6] for r in rows_all)
 
 
+def test_preview_summary_counts_etf():
+    from stock_svr.ui.universe_preview import preview_rows, summary_lines
+
+    o = opts(min_price=0, top_n=2)
+    uni = build_universe(rows_basic() + rows_etf(), o, updated_at=NOW)
+    lines = "\n".join(summary_lines(uni, o))
+    assert "총 6종목" in lines and "ETF 2종목" in lines
+    assert "ETF 200억원" in lines          # ETF 2위(TIGER 미국S&P500) 시총이 컷오프
+    rows = preview_rows(uni, o, only_passed=True)
+    assert "ETF" in [r[3] for r in rows]
+
+
+def test_preview_summary_combined_label_with_etf():
+    from stock_svr.ui.universe_preview import summary_lines
+
+    o = opts(min_price=0, rank_scope="combined", top_n=4)
+    uni = build_universe(rows_basic() + rows_etf(), o, updated_at=NOW)
+    assert "코스피+코스닥+ETF" in "\n".join(summary_lines(uni, o))
+
+
 def test_preview_rows_search_and_limit():
     from stock_svr.ui.universe_preview import preview_rows
 
@@ -581,7 +767,7 @@ def test_dialog_summary_with_universe():
     ]
     info = collect_start_info(db, account_id=1)
     assert info["universe_on"] is True
-    assert "코스피+코스닥" in info["universe_text"]
+    assert "코스피+코스닥+ETF" in info["universe_text"]
     assert "시총 상위 100" in info["universe_text"]
     assert "최소 주가 50,000원" in info["universe_text"]
     assert info["limit_asset_text"] == "187,200원"
@@ -608,7 +794,9 @@ def test_dialog_summary_without_universe():
 def test_seed_param_defs_match_options():
     """seed.sql 정의(DEFS)로 만든 기본값이 코드 기본값과 같은지."""
     o = UniverseOptions.from_params(ParamSet(DEFS, {}))
-    assert (o.use_kospi, o.use_kosdaq, o.rank_scope, o.top_n) == (True, True, "per_market", 100)
+    assert (o.use_kospi, o.use_kosdaq, o.use_etf) == (True, True, True)
+    assert (o.rank_scope, o.top_n) == ("per_market", 100)
+    assert o.markets_text == "코스피+코스닥+ETF"
     assert (o.min_price, o.max_price, o.min_market_cap_eok) == (50_000, 0, 0)
     assert (o.exclude_preferred, o.exclude_spac, o.exclude_warning) == (True, True, True)
     assert (o.apply_to, o.stale_days) == ("entry", 5)

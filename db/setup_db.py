@@ -135,6 +135,7 @@ def main() -> int:
         for t in tables:
             cur.execute(f"GRANT SELECT ON `{DBNAME}`.`{t}` TO 'stock_web'@'{host}'")
         cur.execute(f"GRANT INSERT ON `{DBNAME}`.`app_login_log` TO 'stock_web'@'{host}'")
+        cur.execute(f"GRANT INSERT ON `{DBNAME}`.`trend_scan_request` TO 'stock_web'@'{host}'")
         cur.execute(f"GRANT UPDATE (failed_count, locked_until, last_login_at, password_hash) "
                     f"ON `{DBNAME}`.`app_user` TO 'stock_web'@'{host}'")
     cur.execute("FLUSH PRIVILEGES")

@@ -499,6 +499,332 @@ function repo_llm_summary(): ?array
     return $sum;
 }
 
+/* ------------------------------------------- 전략: 산업 트렌드 스캔 (읽기 전용) */
+
+/** 필터 화이트리스트 (값은 이 목록을 통과한 것만 바인딩된다). */
+const TREND_REGIONS = ['domestic', 'global'];
+const TREND_MATCHES = ['kiwoom_theme_member', 'name_matched', 'unmatched'];
+const TREND_SIGNAL_FILTERS = ['with', 'without'];
+/** 실행 · 시도의 구분(예약 실행 / 웹에서 요청한 수동 재조사). */
+const TREND_TRIGGERS = ['scheduled', 'manual'];
+/** 스캔은 하루 1회이므로 이력 목록은 작은 페이지로 나눈다. */
+const TREND_RUN_PAGE_SIZE = 20;
+/** 시도 이력(실패 포함)도 같은 크기로 나눈다. */
+const TREND_ATTEMPT_PAGE_SIZE = 20;
+/** 같은 브라우저 세션에서 재조사 요청을 다시 받기까지의 최소 간격(초). */
+const TREND_REQUEST_COOLDOWN_SEC = 120;
+/** 이 시간(분) 안에 수동 시도 기록이 있으면 아직 처리 중으로 보고 버튼을 잠근다. */
+const TREND_MANUAL_RECENT_MIN = 3;
+
+function trend_region_options(): array
+{
+    return ['' => '전체', 'domestic' => '국내', 'global' => '해외'];
+}
+
+function trend_trigger_options(): array
+{
+    return ['' => '전체', 'scheduled' => '예약', 'manual' => '수동'];
+}
+
+function trend_match_options(): array
+{
+    return ['' => '전체', 'kiwoom_theme_member' => '키움 테마 구성종목',
+        'name_matched' => '종목명 일치', 'unmatched' => '미매칭'];
+}
+
+function trend_signal_options(): array
+{
+    return ['' => '전체', 'with' => '신호 있음', 'without' => '신호 없음'];
+}
+
+/** 트렌드 스캔 표를 읽을 수 있는지(표가 없거나 권한이 없으면 화면을 안내문으로 대체). */
+function repo_trend_available(): bool
+{
+    return repo_can_read('trend_scan_run') && repo_can_read('trend_scan_candidate');
+}
+
+/** 모든 시도(성공·실패 포함) 이력 표를 읽을 수 있는지. */
+function repo_trend_attempt_available(): bool
+{
+    return repo_can_read('trend_scan_attempt');
+}
+
+/**
+ * 후보(trend_scan_candidate, 별칭 c) 필터 조건.
+ * 식별자·연산자는 코드에 고정되어 있고 값은 화이트리스트를 통과한 뒤 바인딩만 된다.
+ * @return array{0:string,1:array}
+ */
+function repo_trend_cand_cond(string $region, string $match, string $signal): array
+{
+    $w = '';
+    $p = [];
+    if (in_array($region, TREND_REGIONS, true)) {
+        $w .= ' AND c.region = ?';
+        $p[] = $region;
+    }
+    if (in_array($match, TREND_MATCHES, true)) {
+        $w .= ' AND c.match_status = ?';
+        $p[] = $match;
+    }
+    $w .= match ($signal) {
+        'with' => ' AND c.signal_id IS NOT NULL',
+        'without' => ' AND c.signal_id IS NULL',
+        default => '',
+    };
+    return [$w, $p];
+}
+
+/**
+ * 스캔 실행 이력(최신순). 후보 조건이 있으면 그 조건에 맞는 후보를 가진 실행만 남긴다.
+ * 구분(trigger)도 화이트리스트를 통과한 값만 바인딩된다.
+ */
+function repo_trend_runs(?string $from, ?string $to, string $region, string $match, string $signal,
+    string $trigger, int $page): array
+{
+    if (!repo_trend_available()) {
+        return ['rows' => [], 'total' => 0, 'page' => 1, 'pages' => 1, 'size' => TREND_RUN_PAGE_SIZE];
+    }
+    $w = '';
+    $p = [];
+    if ($from !== null) {
+        $w .= ' AND r.scan_date >= ?';
+        $p[] = $from;
+    }
+    if ($to !== null) {
+        $w .= ' AND r.scan_date <= ?';
+        $p[] = $to;
+    }
+    if (in_array($trigger, TREND_TRIGGERS, true)) {
+        $w .= ' AND r.trigger_type = ?';
+        $p[] = $trigger;
+    }
+    [$cw, $cp] = repo_trend_cand_cond($region, $match, $signal);
+    if ($cw !== '') {
+        $w .= ' AND EXISTS (SELECT 1 FROM trend_scan_candidate c WHERE c.run_id = r.id' . $cw . ')';
+        $p = array_merge($p, $cp);
+    }
+    $base = ' FROM trend_scan_run r WHERE 1=1' . $w;
+    return repo_paginate(
+        'SELECT r.id, r.scan_date, r.trigger_type, r.requested_by, r.started_at, r.finished_at, r.status,'
+        . ' r.region_scope, r.model,'
+        . ' r.domestic_theme_summary, r.research_summary, r.candidate_count, r.signal_count,'
+        . ' r.web_search_count, r.input_tokens, r.output_tokens, r.latency_ms, r.error_msg' . $base
+        . ' ORDER BY r.scan_date DESC, r.id DESC',
+        'SELECT COUNT(*)' . $base,
+        $p,
+        $page,
+        TREND_RUN_PAGE_SIZE
+    );
+}
+
+/**
+ * 모든 시도 이력(최신순, 성공·부분성공·실패 모두). trend_scan_run 은 하루 1건만 남지만
+ * 이 표는 실패한 시도까지 영구 보존하므로 "왜 결과가 비었는지"를 화면에서 그대로 보여준다.
+ */
+function repo_trend_attempts(?string $from, ?string $to, string $trigger, int $page): array
+{
+    if (!repo_trend_attempt_available()) {
+        return ['rows' => [], 'total' => 0, 'page' => 1, 'pages' => 1, 'size' => TREND_ATTEMPT_PAGE_SIZE];
+    }
+    $w = '';
+    $p = [];
+    if ($from !== null) {
+        $w .= ' AND scan_date >= ?';
+        $p[] = $from;
+    }
+    if ($to !== null) {
+        $w .= ' AND scan_date <= ?';
+        $p[] = $to;
+    }
+    if (in_array($trigger, TREND_TRIGGERS, true)) {
+        $w .= ' AND trigger_type = ?';
+        $p[] = $trigger;
+    }
+    $base = ' FROM trend_scan_attempt WHERE 1=1' . $w;
+    return repo_paginate(
+        'SELECT id, scan_date, trigger_type, requested_by, status, region_scope, model, candidate_count,'
+        . ' web_search_count, input_tokens, output_tokens, latency_ms, error_msg, research_summary,'
+        . ' started_at, finished_at, created_at' . $base
+        . ' ORDER BY created_at DESC, id DESC',
+        'SELECT COUNT(*)' . $base,
+        $p,
+        $page,
+        TREND_ATTEMPT_PAGE_SIZE
+    );
+}
+
+/**
+ * 최근 N분 안의 수동 재조사 시도(오늘 날짜) 1건. 있으면 아직 처리 중으로 보고 중복 요청을 막는다.
+ * (웹 계정은 trend_scan_request 를 조회할 수 없으므로 시도 이력으로 간접 판단한다.)
+ */
+function repo_trend_manual_recent(int $minutes): ?array
+{
+    if (!repo_trend_attempt_available()) {
+        return null;
+    }
+    try {
+        return db_row(
+            'SELECT id, scan_date, trigger_type, requested_by, status, started_at, finished_at, created_at
+               FROM trend_scan_attempt
+              WHERE trigger_type = ? AND scan_date = ? AND created_at > (NOW() - INTERVAL ? MINUTE)
+              ORDER BY created_at DESC, id DESC LIMIT 1',
+            ['manual', date('Y-m-d'), $minutes]
+        );
+    } catch (Throwable $e) {
+        return null;
+    }
+}
+
+/**
+ * 수동 재조사 "요청"만 기록한다. 웹이 하는 유일한 업무성 쓰기이며
+ * 주문 · 설정 · 알고리즘 파라미터 등 다른 어떤 것도 바꾸지 않는다(실제 조사는 서버 모듈이 수행).
+ * stock_web 계정은 이 표에 INSERT 권한만 있으므로 넣은 행을 다시 조회하지 않는다.
+ */
+function repo_trend_request_insert(string $username): bool
+{
+    try {
+        db_exec('INSERT INTO trend_scan_request (requested_by) VALUES (?)', [mb_substr($username, 0, 50)]);
+        return true;
+    } catch (Throwable $e) {
+        @error_log('[stock-web] trend_request_insert_failed :: ' . $e->getMessage());
+        return false;
+    }
+}
+
+/**
+ * 화면에 보이는 실행들의 후보를 한 번에 조회한다(N+1 금지).
+ * 신호로 이어진 후보는 signal_log · orders 를 좌측 조인해 신호/주문 화면으로 연결할 값을 함께 가져온다.
+ * @return array<int,array> run_id => 후보 목록
+ */
+function repo_trend_candidates(array $runIds, string $region, string $match, string $signal): array
+{
+    if (!repo_trend_available()) {
+        return [];
+    }
+    $ids = [];
+    foreach ($runIds as $id) {
+        if ($id === null || $id === '' || !is_numeric($id)) {
+            continue;
+        }
+        $ids[(int)$id] = (int)$id;
+    }
+    if ($ids === []) {
+        return [];
+    }
+    [$cw, $cp] = repo_trend_cand_cond($region, $match, $signal);
+    $out = [];
+    // 플레이스홀더 개수는 코드가 만들고 값은 모두 바인딩한다.
+    foreach (array_chunk(array_values($ids), 200) as $chunk) {
+        $ph = implode(',', array_fill(0, count($chunk), '?'));
+        $rows = db_all(
+            'SELECT c.id, c.run_id, c.region, c.theme, c.rationale, c.confidence, c.kiwoom_theme_cd,
+                    c.kiwoom_theme_nm, c.stk_cd, c.stk_nm, c.match_status, c.signal_id, c.created_at,
+                    s.signal_type, s.created_at AS signal_time, s.algo_code, s.stk_cd AS signal_stk_cd,
+                    s.order_id, o.ord_no, o.status AS order_status, o.is_dry_run, o.created_at AS order_time
+               FROM trend_scan_candidate c
+               LEFT JOIN signal_log s ON s.id = c.signal_id
+               LEFT JOIN orders o ON o.id = s.order_id
+              WHERE c.run_id IN (' . $ph . ')' . $cw
+            . ' ORDER BY c.run_id ASC, c.region ASC, c.confidence DESC, c.id ASC',
+            array_merge($chunk, $cp)
+        );
+        foreach ($rows as $r) {
+            $out[(int)$r['run_id']][] = $r;
+        }
+    }
+    return $out;
+}
+
+/** 오늘(또는 지정일) 실행 1건 + 실제 후보/신호 건수. 없으면 null. */
+function repo_trend_run_by_date(?string $date = null): ?array
+{
+    if (!repo_trend_available()) {
+        return null;
+    }
+    $date = $date ?? date('Y-m-d');
+    $row = db_row(
+        'SELECT id, scan_date, trigger_type, requested_by, status, region_scope, model, candidate_count,
+                signal_count, started_at, finished_at, error_msg
+           FROM trend_scan_run WHERE scan_date = ? LIMIT 1',
+        [$date]
+    );
+    if ($row === null) {
+        return null;
+    }
+    // 표시 건수는 실제 후보 행을 기준으로 한다(실행 행의 집계값과 어긋나도 화면은 사실을 보여준다).
+    $c = db_row(
+        'SELECT COUNT(*) AS cnt, COALESCE(SUM(CASE WHEN signal_id IS NOT NULL THEN 1 ELSE 0 END),0) AS sig
+           FROM trend_scan_candidate WHERE run_id = ?',
+        [(int)$row['id']]
+    ) ?? ['cnt' => 0, 'sig' => 0];
+    $row['candidates'] = (int)$c['cnt'];
+    $row['signals'] = (int)$c['sig'];
+    return $row;
+}
+
+/**
+ * 요약 카드 값 (최근 스캔 · 이번달 후보/매칭률/신호 · 이번달 웹검색·토큰).
+ * 표가 없으면 available=false 로만 돌려준다.
+ */
+function repo_trend_summary(): array
+{
+    $empty = ['available' => false, 'last' => null, 'today' => null, 'month_from' => date('Y-m-01'),
+        'candidates' => 0, 'matched' => 0, 'match_rate' => null, 'signals' => 0,
+        'runs' => 0, 'web_search' => 0, 'input_tokens' => 0, 'output_tokens' => 0];
+    if (!repo_trend_available()) {
+        return $empty;
+    }
+    $from = date('Y-m-01');
+    $to = date('Y-m-t');
+    $sum = $empty;
+    $sum['available'] = true;
+    $sum['last'] = db_row(
+        'SELECT id, scan_date, trigger_type, requested_by, status, model, region_scope, candidate_count,
+                signal_count, finished_at, error_msg
+           FROM trend_scan_run ORDER BY scan_date DESC, id DESC LIMIT 1'
+    );
+    $sum['today'] = repo_trend_run_by_date();
+    $cand = db_row(
+        "SELECT COUNT(*) AS cnt,
+                COALESCE(SUM(CASE WHEN c.match_status <> 'unmatched' THEN 1 ELSE 0 END),0) AS matched,
+                COALESCE(SUM(CASE WHEN c.signal_id IS NOT NULL THEN 1 ELSE 0 END),0) AS signals
+           FROM trend_scan_candidate c
+           JOIN trend_scan_run r ON r.id = c.run_id
+          WHERE r.scan_date >= ? AND r.scan_date <= ?",
+        [$from, $to]
+    ) ?? [];
+    $sum['candidates'] = (int)($cand['cnt'] ?? 0);
+    $sum['matched'] = (int)($cand['matched'] ?? 0);
+    $sum['signals'] = (int)($cand['signals'] ?? 0);
+    $sum['match_rate'] = $sum['candidates'] > 0 ? $sum['matched'] / $sum['candidates'] * 100 : null;
+    $runs = db_row(
+        'SELECT COUNT(*) AS runs, COALESCE(SUM(web_search_count),0) AS web_search,
+                COALESCE(SUM(input_tokens),0) AS input_tokens, COALESCE(SUM(output_tokens),0) AS output_tokens
+           FROM trend_scan_run WHERE scan_date >= ? AND scan_date <= ?',
+        [$from, $to]
+    ) ?? [];
+    $sum['runs'] = (int)($runs['runs'] ?? 0);
+    $sum['web_search'] = (int)($runs['web_search'] ?? 0);
+    $sum['input_tokens'] = (int)($runs['input_tokens'] ?? 0);
+    $sum['output_tokens'] = (int)($runs['output_tokens'] ?? 0);
+    return $sum;
+}
+
+/** 대시보드 한 줄 요약용 — 오늘 실행이 없으면 null. */
+function repo_trend_today(): ?array
+{
+    $row = repo_trend_run_by_date();
+    if ($row === null) {
+        return null;
+    }
+    return [
+        'scan_date' => (string)$row['scan_date'],
+        'status' => (string)$row['status'],
+        'candidates' => (int)$row['candidates'],
+        'signals' => (int)$row['signals'],
+    ];
+}
+
 /* --------------------------------------------------------- 거래 분석 (읽기 전용) */
 
 /**
@@ -508,7 +834,8 @@ function repo_llm_summary(): ?array
 function repo_can_read(string $object): bool
 {
     static $cache = [];
-    if (!in_array($object, ['v_trade_analysis', 'order_event', 'event_archive', 'api_error_log'], true)) {
+    if (!in_array($object, ['v_trade_analysis', 'order_event', 'event_archive', 'api_error_log',
+        'trend_scan_run', 'trend_scan_candidate', 'trend_scan_attempt'], true)) {
         return false;
     }
     if (isset($cache[$object])) {
@@ -935,6 +1262,7 @@ function repo_dashboard(?int $accountId): array
         'today_orders' => $todayOrders,
         'today_signals' => $todaySignals,
         'llm' => repo_llm_summary(),
+        'trend' => repo_trend_today(),
         'fail_24h' => repo_recent_order_failures($accountId, 24),
     ];
 }

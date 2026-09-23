@@ -77,6 +77,30 @@ if ($method === 'POST') {
         $flash = $res['message'];
         $flashType = $res['ok'] ? 'ok' : 'err';
         $page = 'system.profile';
+    } elseif ($action === 'trend_rescan') {
+        /* 산업 트렌드 수동 재조사 "요청"만 기록한다(관리자 전용).
+         * 이 동작은 trend_scan_request 에 행 하나를 넣는 것이 전부이며,
+         * 주문 · 설정 · 알고리즘 파라미터 등 다른 어떤 것도 바꾸지 않는다.
+         * 실제 조사는 서버 모듈이 요청을 확인한 뒤 수행한다. */
+        if ($user === null || !auth_is_admin()) {
+            http_response_code(403);
+            render_standalone(['title' => '접근 권한 없음',
+                'message' => '재조사 요청은 관리자만 할 수 있습니다.']);
+            exit;
+        }
+        $lastReq = (int)($_SESSION['trend_req_at'] ?? 0);
+        $busy = ($lastReq > 0 && (time() - $lastReq) < TREND_REQUEST_COOLDOWN_SEC)
+            || repo_trend_manual_recent(TREND_MANUAL_RECENT_MIN) !== null;
+        if ($busy) {
+            header('Location: ' . url_page('strategy.trend', ['rq' => 'busy']), true, 303);
+            exit;
+        }
+        $ok = repo_trend_request_insert($user['username']);
+        if ($ok) {
+            $_SESSION['trend_req_at'] = time();
+        }
+        header('Location: ' . url_page('strategy.trend', ['rq' => $ok ? 'ok' : 'err']), true, 303);
+        exit;
     } else {
         http_response_code(400);
         render_standalone(['title' => '잘못된 요청', 'message' => '처리할 수 없는 요청입니다.']);

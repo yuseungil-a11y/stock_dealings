@@ -25,6 +25,7 @@ run_stock_svr.bat                             REM GUI 실행 (엔진 자동 시�
 | `python -m stock_svr --eval-once [--force-market] [--all-algos]` | 엔진 루프 없이 평가 사이클 1회. **관찰 전용**(게이트를 강제로 닫아 주문을 전송하지 않음) |
 | `python -m stock_svr --eval-once --allow-orders` | 관찰 전용 해제 시도(콘솔에 `ORDER` 입력 필요). **효과 없음(이중 잠금)** — 이 경로는 자동거래 스위치를 켜지 않으므로 주문이 전송되지 않는다(R-13). **평상시 사용 금지** |
 | `python -m stock_svr --claude-check` | **Claude 거부권 필터 점검**: 합성 종목 2건(정상형/위험형)을 실제 Claude API 로 1회씩 검토해 결정·확신도·근거·토큰·지연을 출력. 키움 API 미사용·DB 미기록 |
+| `python -m stock_svr --trend-scan-check` | **산업 트렌드 스캔 점검**: 오늘 스캔을 강제로 1회 수행(스케줄·중복방지 무시). 실제 `ka90001`/`ka90002`(읽기 전용) + 실제 Claude 2회 호출. **관찰 전용**(게이트를 닫고 Executor 로 넘기지 않음), **DB 에는 기록**(감사 추적). 엔진 루프·WS 를 띄우지 않아 운영 중인 서버와 함께 실행해도 된다 |
 | `python -m pytest -q` | 단위테스트 |
 
 동시에 두 인스턴스가 뜨면 한도 계산이 어긋나므로 단일 실행을 강제한다(R-08).
@@ -61,6 +62,7 @@ run_stock_svr.bat                             REM GUI 실행 (엔진 자동 시�
   상태는 `server_status`(component=`auto_trading`)로 웹 관제에 노출된다.
 * 시작 시 확인창이 현재 모드·게이트 상태·활성 알고리즘·손절선/투입한도와 함께
   **종목 유니버스(universe_filter) 사용 여부·시장/순위/최소 주가**,
+  **산업 트렌드 스캔(claude_trend_scan) 사용 여부·조사 범위·조사 시각**,
   **총자산 기준 종목당 유효 한도와 1주 값 대비 경고**를 보여준다.
   **게이트가 열려 있고 REAL 이면** 확인창에 `START` 를 직접 입력해야 시작된다.
   진입 알고리즘이 하나도 선택되지 않았으면 경고를 띄운다.
@@ -133,17 +135,22 @@ server/
       sync_market.py   ka10099 / ka10081 / ka10027 / ka10023 / ka10001 → stock_master, price_daily, screening_result
       housekeeping.py  kt00015 → trade_ledger, ka10170 → daily_trade_summary, holding_snapshot,
                        7일 정리(purge_old) + 아카이브 정리(purge_archives)
+      trend_scan.py    **산업 트렌드 스캔(하루 1회)**: ka90001/ka90002 + Claude 2단계 호출 →
+                       trend_scan_run / trend_scan_candidate / trend_scan_attempt + 매수 신호
+                       + **수동 재조사 요청 큐 처리(TrendRequestWorker, 관찰 전용)**
     engine/
       context.py       EngineContext + **OrderGateState(게이트 판정)** + fail-closed 플래그
       executor.py      **주문 게이트 · 유일한 주문 전송 지점** (재시도 금지·환경 검증, 주문 맥락/이벤트 기록)
       runner.py        기동/주기 루프/종료, **자동거래 스위치**, 하트비트(10초), 예외 격리
     llm/
-      client.py        Anthropic Messages API 래퍼(구조화 출력·오류 분류·키 미노출)
+      client.py        Anthropic Messages API 래퍼(구조화 출력·웹 검색 도구·오류 분류·키 미노출)
       prompt.py        시스템 프롬프트/입력 JSON/출력 스키마 + 컨텍스트 제공자 훅
+      trend_prompt.py  트렌드 스캔 조사/추출 프롬프트 + 출력 스키마 + 로컬 재검증
     algo/
       base.py registry.py params.py
       risk_guard.py  momentum_screen.py  volatility_breakout.py
       averaging_down.py  ma_cross_filter.py  universe_filter.py  claude_advisor.py
+      claude_trend_scan.py
     ui/
       app.py           메인 창 + **자동거래 툴바**(시작/중지·긴급 취소)
       auto_trade_dialog.py  자동거래 시작 확인창(START 입력)
@@ -165,8 +172,9 @@ server/
 | `volatility_breakout` | entry | `ka10081` 일봉으로 목표가 = 당일시가 + 전일변동폭×K, 돌파 시 매수·지정 시각 청산 |
 | `averaging_down` | risk | 평단 대비 `-drop_pct%` 시 추가매수. `avg_down_count ≤ max_steps` 로 **무한 물타기 차단**, 손절선 도달 시 전량 매도 |
 | `ma_cross_filter` | filter | 단기 MA < 장기 MA 종목의 신규 진입 차단 |
-| `universe_filter` | filter | **종목 유니버스 필터**. 코스피/코스닥 시가총액 순위·시총 하한·1주 가격 범위를 벗어나는 **신규 매수 신호만** 차단(기본 비활성) |
+| `universe_filter` | filter | **종목 유니버스 필터**. 코스피/코스닥/ETF 시가총액 순위·시총 하한·1주 가격 범위를 벗어나는 **신규 매수 신호만** 차단(기본 비활성) |
 | `claude_advisor` | filter | **Claude 거부권 필터**. risk_guard 까지 통과해 곧 주문될 **매수 신호만** Claude 가 한 번 더 검토해 위험하면 차단(기본 비활성) |
+| `claude_trend_scan` | entry | **산업 트렌드 스캔**. 하루 1회 국내(`ka90001` 테마)+해외 산업 동향을 Claude 웹 검색으로 조사해 유망 테마를 뽑고, 종목은 키움 테마 구성종목(`ka90002`)/종목마스터 **정확 이름 매칭으로만** 확정해 매수 후보 생성(기본 비활성) |
 
 ### risk_guard 파라미터 (알고리즘 탭에서 편집)
 
@@ -210,8 +218,13 @@ filter 알고리즘(ma_cross_filter · universe_filter) → risk_guard.check →
 ### universe_filter — 종목 유니버스 필터(시가총액·주가)
 
 `stock_master`(ka10099 로 받아 둔 종목마스터)의 **상장주식수 × 전일종가**로 시가총액을 구해
-코스피/코스닥 시총 순위를 만들고, 그 밖의 종목에 대한 **신규 매수 신호만** 차단한다.
+코스피/코스닥/ETF 시총 순위를 만들고, 그 밖의 종목에 대한 **신규 매수 신호만** 차단한다.
 
+* **ETF 반영**: `use_etf`(기본 1) 를 켜면 국내 상장 ETF(`market_code='8'`)도 같은 방식
+  (상장주식수 × 전일종가)으로 시총 순위를 매겨 매수 대상에 포함한다. `per_market` 이면 ETF 가
+  **자기 그룹 안에서 별도 top_n**, `combined` 이면 켜진 시장 전체와 **합산 순위**로 들어간다.
+  주가 범위·최소 시총·관리/경고 제외는 주식과 동일하게 적용되고, ETN·금현물·리츠 등
+  다른 `market_code` 는 대상이 아니다.
 * **매도·손절·청산에는 어떤 설정에서도 관여하지 않는다**(코드·테스트로 강제).
 * 순위 산출은 **DB 조회만** 한다. 키움 API 를 추가로 호출하지 않는다.
 * 순위는 종목마스터 `updated_at` 이 바뀌기 전까지 메모리에 캐시한다(사이클마다 재계산하지 않음).
@@ -225,7 +238,8 @@ filter 알고리즘(ma_cross_filter · universe_filter) → risk_guard.check →
 |---|---|---|---|---|---|
 | `use_kospi` | 코스피 포함 | bool | **1** | — | 코스피(거래소, `market_code='0'`) 포함 |
 | `use_kosdaq` | 코스닥 포함 | bool | **1** | — | 코스닥(`market_code='10'`) 포함 |
-| `rank_scope` | 순위 기준 | enum | `per_market` | per_market / combined | 시장별 순위 vs 코스피+코스닥 합산 순위 |
+| `use_etf` | ETF 포함 | bool | **1** | — | 국내 상장 ETF(`market_code='8'`) 포함. 셋 다 끄면 파라미터 오류 |
+| `rank_scope` | 순위 기준 | enum | `per_market` | per_market / combined | 시장별 순위(코스피·코스닥·ETF 각각) vs 선택된 시장 합산 순위 |
 | `top_n` | 시가총액 상위 N | int | **100** | 1 ~ 2000 | 시총 순위 상위 N개만 거래 대상 |
 | `min_market_cap_eok` | 최소 시가총액 | int | 0 (미사용) | 0 ~ 100,000,000 억원 | 억원 단위 하한. `0` = 사용 안 함 |
 | `min_price` | 최소 주가(1주) | int | **50,000원** | 0 ~ 10,000,000원 | 1주 가격 하한. `0` = 사용 안 함 |
@@ -240,7 +254,7 @@ filter 알고리즘(ma_cross_filter · universe_filter) → risk_guard.check →
 
 합산 시총 상위 100 은 실제로 코스피 94 + 코스닥 6 수준이라, 합산(`combined`)을 고르면 코스닥이
 거의 대상에서 빠진다. 시장을 고르게 담고 싶으면 `per_market`(기본)을 쓴다
-— 코스피 상위 100 + 코스닥 상위 100 이 각각 대상이 된다.
+— 코스피 상위 100 + 코스닥 상위 100 + ETF 상위 100 이 각각 대상이 된다.
 
 **우선주 판정**은 이름 접미(`우`, `2우B`, `우(전환)` …)만으로 정하지 않고,
 ① 접미를 뗀 이름이 상장돼 있거나 ② 종목코드 끝자리를 `0` 으로 바꾼 보통주 코드가 있을 때만
@@ -312,6 +326,117 @@ OHLCV 와 MA5/MA20, 신호 출처 알고리즘/점수/사유, 물타기면 평�
 모델·파라미터는 매 사이클 DB 에서 다시 읽으므로 UI 편집이 즉시 반영된다.
 점검은 `python -m stock_svr --claude-check`.
 
+### claude_trend_scan — 산업 트렌드 스캔 (하루 1회)
+
+`scan_time`(기본 08:30) 이후 **그날 첫 평가 사이클에서 딱 한 번** 산업 트렌드를 조사해
+매수 후보를 만든다. 다른 진입 알고리즘과 활성 조건이 같다 — **자동거래 ON + 이 알고리즘 선택**
+(기본 비활성). 만들어진 매수 신호는 다른 신호와 똑같이
+필터 → risk_guard → claude_advisor → Executor(주문 게이트)를 전부 통과해야 주문된다.
+
+**조사 → 확정 흐름 (2단계 호출 + 안전장치)**
+
+| 단계 | 내용 |
+|---|---|
+| ⓪ 근거 수집 | `ka90001` 테마그룹(상위 등락률, 읽기 전용)에서 상위 `max_domestic_themes` 개를 텍스트로 요약 |
+| ① 조사 | Claude + **서버측 웹 검색 도구**(`web_search_20260209`, `max_uses=max_web_searches`)로 국내·해외 산업 동향 조사. 자유 텍스트(구조화 강제 없음). `stop_reason='pause_turn'` 이면 같은 대화를 그대로 다시 보내 이어받는다 |
+| ② 추출 | **별도 호출**(도구 없음, 구조화 출력 json_schema)로 ①의 텍스트에서 `{region, theme, rationale, confidence, kiwoom_theme_name_guess, company_names}` 만 뽑는다. 받은 JSON 은 로컬에서 타입·범위·개수를 다시 검증하고, 벗어난 항목만 버린다(→ `status='partial'`) |
+| ③ 종목 확정 | **(a)** `kiwoom_theme_name_guess` 가 오늘 `ka90001` 테마명과 **정확히 일치**(공백만 무시)하면 `ka90002` 구성종목의 등락률 상위 `max_candidates_per_theme` 개 → `kiwoom_theme_member`. **(b)** 아니면 `company_names` 를 `stock_master.stk_nm` 과 **정확히 일치**시켜 확정 → `name_matched`(코스피/코스닥, 거래불가 제외). **(c)** 못 찾으면 `unmatched` 로 **후보 행만** 남기고 매수하지 않는다 |
+| ④ 신호 | `confidence >= min_confidence` 이고 확정된 종목이며 누적 확정 수가 `max_total_candidates` 이내일 때만 BUY 신호. 확신도가 높은 테마부터 상한을 채운다 |
+
+* **Claude 가 알려준 종목코드는 쓰지 않는다 — 애초에 요청하지도 않는다.** 출력 스키마에 코드
+  필드가 없고, 코드를 끼워 넣은 응답은 스키마 위반으로 그 후보째 버려진다.
+  종목코드가 정해지는 경로는 ③(a)·(b) 두 가지뿐이다.
+* 웹 검색 결과는 신뢰 경계 밖이므로 그대로 매수에 쓰지 않는다 — ②에서 좁은 스키마로 다시 거르고,
+  ③에서 키움/종목마스터로만 확정하는 것이 방어선이다. 이미 보유 중인 종목은 제외한다.
+* **하루 1회 보장은 이중**이다: 프로세스 내 날짜 캐시 + `trend_scan_run.scan_date` UNIQUE.
+  서버를 재기동해도 같은 날 다시 조사하지 않는다. 오류로 끝난 날(`status='error'`)도 그날 행이
+  남으므로 **재조사하지 않는다**(유료 호출 폭주 방지) — 다음 날 정상 시도한다.
+  다시 조사하고 싶으면 웹의 **"지금 다시 조사"** 버튼을 쓴다(아래 *수동 재조사*).
+
+**웹 검색이 전부 실패하면 `partial` 이다 (중요)**
+
+서버측 웹 검색 도구(`web_search`)의 실패는 **예외로 오지 않는다** — HTTP 는 200 이고,
+`web_search_tool_result` 블록의 `content` 가 검색 결과 리스트 대신 오류 객체
+(`{type:'web_search_tool_result_error', error_code:'max_uses_exceeded' …}`)로 온다.
+그래서 `llm/client.py` 의 `count_web_search_outcomes()` 가 결과 블록을 **성공/실패로 세고**,
+`ClaudeResult.web_search_all_failed`(실패>0 **그리고** 성공==0)이면 2단계 추출이
+스키마상 멀쩡해도 그 스캔의 `status` 를 **`partial` 로 강제**한다(사유는 `error_msg` 에 기록).
+
+> 검색이 하나도 성공하지 않았다면 조사 본문은 **모델의 사전 지식만으로 쓴 글**이다.
+> 2026-09-23 08:30 자동 스캔이 정확히 이 상태(검색 3회 전부 한도 초과)였는데도
+> `status='ok'` 로 남아 화면에서 신뢰할 만한 결과처럼 보였다. 이제는 상태로 드러난다.
+>
+> * 검색 **일부만** 실패 → 예전과 같이 `partial`(조사는 계속)
+> * 검색을 **아예 시도하지 않음**(결과 블록 0개) → 상태에 영향 없음
+
+### 수동 재조사 — 웹의 "지금 다시 조사" 버튼
+
+웹은 Anthropic·키움 자격증명이 없어 조사를 직접 실행할 수 없다. 그래서 **요청 큐**로 넘긴다.
+
+| 단계 | 주체 | 하는 일 |
+|---|---|---|
+| ① 요청 | 웹(`stock_web`) | `trend_scan_request` 에 `pending` 행 **INSERT 만** 한다(이 테이블에 UPDATE/DELETE 권한 없음) |
+| ② claim | 서버(`stock_svr`) | 엔진 루프가 **20초**(`REQUEST_POLL_SEC`)마다 가장 오래된 `pending` 1건을 `UPDATE … SET status='processing' WHERE id=%s AND status='pending'` 로 집는다. **영향 행 수가 1일 때만** 처리한다(경쟁 시 한 곳만 이긴다) |
+| ③ 실행 | 서버 | `scan_time`·하루 1회 제한을 **무시**하고 오늘 날짜로 1회 조사. `--trend-scan-check` 와 같은 **관찰 전용** 경로(주문 게이트를 강제로 닫은 컨텍스트) |
+| ④ 기록 | 서버 | (a) `trend_scan_attempt` 에 이번 시도를 **append** → (b) 오늘 `trend_scan_run` 행 **UPSERT**(덮어쓰기, `trigger_type='manual'`, `requested_by`) + (c) 그 run 의 기존 `trend_scan_candidate` 삭제 후 재삽입 — **(b)+(c)는 한 트랜잭션**(웹이 '후보 0건' 인 중간 상태를 보지 않게) |
+| ⑤ 종료 | 서버 | `trend_scan_request` 를 `done`(+`run_id`) 또는 `error`(+`error_msg`) 로. 조사 결과가 `status='error'` 면 요청도 `error` 로 끝난다 |
+
+* 이 폴링은 **자동거래 ON/OFF·주문 게이트 상태와 무관하게** 동작한다(엔진이 돌고 있으면 된다).
+  게이트 값(`order_enabled`/`real_trading_confirm`/`trading_mode`)은 **읽기만** 한다.
+* **관찰 전용이라 매수 신호를 아예 만들지 않는다.** 후보는 `trend_scan_candidate` 에 정상
+  기록되지만 `signal_log`·`orders` 에는 **어떤 게이트/자동거래 상태에서도 0건**이다(테스트로 고정).
+* **동시에 1건만** 처리한다 — 이미 `processing` 인 요청이 있으면 새 `pending` 을 집지 않는다
+  (유료 호출 낭비 방지). 처리 도중 서버가 죽어 `processing` 으로 남은 행은 기동 시와 매 폴링마다
+  **10분**(`STALE_PROCESSING_MIN`) 경과 기준으로 `error`("서버 재시작으로 중단") 처리해 교착을 푼다.
+* 요청 처리 중 어떤 예외가 나도 엔진 루프는 죽지 않는다(요청만 `error` 로 끝난다).
+* 재조사가 끝나면 그날의 **대기 중이던 매수 신호는 버린다** — 옛 조사 결과가 더 이상 그날의
+  공식 결과가 아니기 때문이다. 이후 매매 시간에는 `--trend-scan-check` 와 똑같이
+  **새 후보 중 아직 신호가 붙지 않은 확정 종목**이 그날 1회 투입 대상이 된다.
+
+### `trend_scan_attempt` — 시도 감사로그 (append-only)
+
+`trend_scan_run` 은 `UNIQUE(scan_date)` 라 **하루 1행 = 그날의 최신 공식 결과**만 남는다.
+수동 재조사가 그 행을 덮어쓰면 실패했던 이전 시도의 내용이 사라진다. 그래서 **모든 시도**
+(자동 스케줄 + 수동, 성공·실패 불문)를 `trend_scan_attempt` 에 **새 행으로 계속 쌓는다.**
+
+* 컬럼: `scan_date, trigger_type(scheduled|manual), requested_by, status, region_scope, model,
+  candidate_count, web_search_count, input/output_tokens, latency_ms, error_msg,
+  research_summary, started_at, finished_at`
+* **이 테이블의 행을 갱신·삭제하는 코드는 없다.** `purge_old`/`purge_archives` 의 대상도 아니다.
+* `--trend-scan-check` 로 돌린 시도도 `trigger_type='scheduled'` 로 남는다(서버가 시작한 시도).
+
+**조사 시점과 신호 투입 시점은 다르다 (중요)**
+
+조사는 장 시작 전(기본 08:30)에 하지만, 그때 만든 신호를 바로 파이프라인에 넣으면
+risk_guard 의 `장 시간이 아님` / `매매시간 외`(기본 09:05~15:15)에 전부 막힌다.
+그래서 신호는 **대기열에 두었다가 장이 열리고 risk_guard 의 매매 시간에 들어섰을 때
+그날 한 번만** 투입한다(같은 신호를 매 주기 다시 내보내면 중복 주문 위험이 있다).
+
+* 조사 후 서버를 재기동하면 대기열이 비지만, 그날 `trend_scan_candidate` 중
+  **아직 신호가 붙지 않은(`signal_id IS NULL`) 확정 종목**을 되살려 1회 투입한다(재조사 없음).
+* 그날 매매 종료 시각을 넘겨 투입 기회를 못 잡으면 그 후보들은 버려진다(다음 날 새로 조사).
+
+| param_key | 라벨 | 타입 | 기본 | 범위 | 설명 |
+|---|---|---|---|---|---|
+| `region_scope` | 조사 범위 | enum | `domestic_global` | domestic_global / domestic / global | `global` 이면 `ka90001` 을 호출하지 않는다 |
+| `model` | 조사 모델 | enum | `claude-opus-5` | opus-5 / sonnet-5 | 조사 품질상 Haiku 제외 |
+| `effort` | 사고 강도 | enum | medium | low/medium/high | 조사(1단계)에만 적용 |
+| `scan_time` | 조사 시각 | time | **08:30** | — | 이 시각 이후 첫 사이클에 1회 |
+| `max_domestic_themes` | 국내 테마 참고 개수 | int | 8 | 1 ~ 20 | 프롬프트에 근거로 넣을 `ka90001` 상위 개수 |
+| `max_candidates_per_theme` | 테마당 최대 종목 | int | 3 | 1 ~ 10 | `max_total_candidates` 이하여야 함(교차 검증) |
+| `max_total_candidates` | 일 최대 후보 종목수 | int | 10 | 1 ~ 50 | 하루 전체 확정 종목 상한 |
+| `min_confidence` | 최소 확신도 | int | 60 | 0 ~ 100 | 미달이면 후보로만 기록하고 매수하지 않음 |
+| `buy_amount` | 1회 매수금액 | int | 100,000원 | 10,000 ~ 1억 | 1주 값이 이보다 크면 신호 없음 |
+| `order_type` | 주문 유형 | enum | 3(시장가) | 3/0/6 | 시장가·최유리는 슬리피지 버퍼(×1.1)가 한도 검사에 적용 |
+| `max_web_searches` | 조사 시 웹검색 상한 | int | 6 | 1 ~ 20 | 조사 1회당 `web_search` 사용 상한(비용 통제) |
+| `timeout_sec` | 응답 대기 시간 | int | 90초 | 30 ~ 300 | 조사 요청 1건의 제한시간(웹 검색 포함이라 길게 잡는다) |
+
+점검은 `python -m stock_svr --trend-scan-check` (실제 1회 실행 + DB 기록, 주문은 나가지 않는다).
+
+> ⚠ 점검 명령은 그날의 스캔을 **실제로 기록**하므로, 같은 날 서버가 이 알고리즘을 켠 채 돌고 있으면
+> 서버는 재조사하지 않고 그 결과(확정 종목)를 매매 시간에 후보로 가져간다. 점검만 하고 싶으면
+> 알고리즘을 선택하지 않은 상태에서 쓰거나, 조사 결과를 확인한 뒤 판단해 선택한다.
+
 ## 7. UI
 
 * 상단 상태바: DB / 키움 REST / 키움 WS / 시장 / 모드 / 주문허용 / **자동거래**
@@ -349,6 +474,10 @@ OHLCV 와 MA5/MA20, 신호 출처 알고리즘/점수/사유, 물타기면 평�
 | `order_event` | 주문 **상태 변화 이력**(CREATED→SENT→ACCEPTED→PARTIAL→FILLED, 또는 REJECTED/CANCELED/FAILED/UNKNOWN) | 영구 | Executor(`source=EXECUTOR`), WS `00`(`WS`), ka10075/ka10076(`REST`) |
 | `executions` | 체결 1건씩(수량·가격·수수료·세금) | 영구 | WS `00`(정본) + ka10076(보정) |
 | `llm_decision_log` | Claude 검토 판단(모델·결정·확신도·근거·토큰) | 영구 | `claude_advisor` |
+| `trend_scan_run` | 산업 트렌드 스캔 **그날의 최신 공식 결과** 1행(상태·조사 요약·웹검색수·토큰·지연 + `trigger_type`/`requested_by`) | 영구 | `claude_trend_scan` |
+| `trend_scan_candidate` | 그 스캔이 뽑은 테마/후보종목(**미매칭도 그대로 기록**) | 영구 | `claude_trend_scan` |
+| `trend_scan_attempt` | 트렌드 스캔의 **모든 시도**(자동+수동, 성공+실패) append-only 감사로그 | 영구 | `claude_trend_scan` |
+| `trend_scan_request` | 웹의 "지금 다시 조사" 요청 큐(pending→processing→done/error) | 영구 | 웹 INSERT / 서버 처리 |
 | `trade_ledger` / `daily_trade_summary` | 사후 정산(kt00015 / ka10170) | 영구 | 장마감 정리 |
 | `position_state` | 종목별 누적 투입금·물타기 회차·손절 봉인 | 영구 | Executor / 동기화 |
 | `event_archive` | 주요 이벤트 보관본(WARN·ERROR 전부 + `order`/`algo`/`engine`/`risk` 분류) | `archive_retention_days`(기본 365일, 하한 30일) | `db.log_event()` |
@@ -358,8 +487,8 @@ OHLCV 와 MA5/MA20, 신호 출처 알고리즘/점수/사유, 물타기면 평�
 * `event_archive` 는 **반복 INFO 폭주를 막는다**: 동기화·하트비트성 INFO 는 보관하지 않고,
   같은 (레벨, 분류, 메시지) 가 60초 안에 반복되면 1건만 남긴다.
 * 보관본 기록이 실패해도 원래 기록(`event_log`/`api_call_log`)과 주문 처리는 그대로 진행된다.
-* **`order_event`·`orders`·`executions`·`signal_log`·`llm_decision_log`·`position_state` 를
-  지우는 코드는 존재하지 않는다.** 정리 대상은 `purge_old`(event_log/api_call_log/screening_result)
+* **`order_event`·`orders`·`executions`·`signal_log`·`llm_decision_log`·`position_state`·
+  `trend_scan_attempt` 를 지우는 코드는 존재하지 않는다.** 정리 대상은 `purge_old`(event_log/api_call_log/screening_result)
   와 `purge_archives`(event_archive/api_error_log) 뿐이며 테스트로 고정돼 있다.
 
 ### `orders` 의 신호 맥락 (슬리피지·당시 설정 분석용)
@@ -417,16 +546,62 @@ SELECT event_time, event_type, status, filled_qty, remain_qty, price,
 FROM order_event WHERE order_id = ? ORDER BY id;
 ```
 
+### 산업 트렌드 스캔 결과 조회 (`claude_trend_scan`)
+
+하루 1회 스캔의 실행 기록은 `trend_scan_run`, 그 스캔이 뽑은 후보는 `trend_scan_candidate`에
+남는다. **매칭에 실패한 회사명(`match_status='unmatched'`, `stk_cd IS NULL`)도 그대로 남겨**
+"언급은 됐지만 국내 상장사로 확정하지 못했다"는 사실을 웹에서 확인할 수 있다
+(웹 메뉴 **전략 > 산업 트렌드**).
+
+```sql
+-- 최근 2주 스캔 요약 (상태·후보수·신호수·비용 근거)
+SELECT scan_date, status, region_scope, model, candidate_count, signal_count,
+       web_search_count, input_tokens, output_tokens, latency_ms, error_msg
+FROM trend_scan_run
+WHERE scan_date >= CURDATE() - INTERVAL 14 DAY
+ORDER BY scan_date DESC;
+
+-- 오늘 후보와 확정 경로 (매수 신호로 이어졌는지 포함)
+SELECT c.region, c.theme, c.confidence, c.match_status,
+       c.kiwoom_theme_nm, c.stk_cd, c.stk_nm, c.rationale,
+       s.signal_type, s.detail
+FROM trend_scan_candidate c
+JOIN trend_scan_run r  ON r.id = c.run_id AND r.scan_date = CURDATE()
+LEFT JOIN signal_log s ON s.id = c.signal_id
+ORDER BY c.confidence DESC, c.id;
+
+-- 트렌드 스캔이 낸 주문의 성적 (다른 알고리즘과 같은 방식으로 분석)
+SELECT stk_cd, order_status, signal_price, avg_fill_pric, slippage_pct
+FROM v_trade_analysis WHERE algo_code = 'claude_trend_scan' ORDER BY signal_time DESC;
+
+-- 그날 조사 원문(감사용, 비밀값은 마스킹되어 저장된다)
+SELECT domestic_theme_summary, research_summary FROM trend_scan_run WHERE scan_date = CURDATE();
+
+-- 그날의 **모든 시도**(실패한 자동 스캔 + 수동 재조사) — run 이 덮어써도 남는다
+SELECT id, trigger_type, requested_by, status, candidate_count, web_search_count,
+       error_msg, started_at, finished_at
+FROM trend_scan_attempt WHERE scan_date = CURDATE() ORDER BY id;
+
+-- 수동 재조사 요청 큐 상태
+SELECT id, requested_at, requested_by, status, run_id, error_msg, processed_at
+FROM trend_scan_request ORDER BY id DESC LIMIT 20;
+```
+
+* 후보가 `unmatched` 면 `signal_id` 는 항상 NULL 이다(매수 신호를 만들지 않는다).
+* `signal_id` 는 Executor 가 `signal_log` 에 남긴 행을 가리킨다. risk_guard·claude_advisor 가
+  중간에 막았으면 NULL 이고, 차단 사유는 `signal_log` 의 BLOCK 행에서 확인한다.
+
 ## 10. 개발 시 지켜야 할 것
 
 * **실주문 API(`kt10000~3`, `kt10006~9`, `kt50000~3`, `ust2*`)를 실서버로 호출하지 않는다.**
   주문 경로 테스트는 `stock_svr/kiwoom/fake.py::FakeRest` 로만 한다.
 * 읽기 전용 TR 만 개발 중 실서버 호출 허용:
   `au10001/au10002`, `ka00001`, `kt00001`, `kt00018`, `ka10075`, `ka10076`, `ka10099`,
-  `ka10027`, `ka10023`, `ka10081`, `ka10001`, `kt00015`, `ka10170`
+  `ka10027`, `ka10023`, `ka10081`, `ka10001`, `kt00015`, `ka10170`, `ka90001`, `ka90002`
 * 앱키/시크릿키/토큰/DB 비밀번호/Anthropic API 키를 출력·로그·커밋하지 않는다
   (`--check`/`--claude-check` 도 "키 파일 읽기 OK" 수준만 출력한다).
-* Anthropic API 는 `claude_advisor` 가 활성일 때의 매수 신호 검토와 `--claude-check` 에서만 호출한다.
+* Anthropic API 는 `claude_advisor` 가 활성일 때의 매수 신호 검토, `claude_trend_scan` 의
+  하루 1회 스캔(조사 1회 + 추출 1회), 그리고 `--claude-check`/`--trend-scan-check` 에서만 호출한다.
   단위테스트는 가짜 클라이언트만 쓴다(실 API 호출 없음).
 * Rate limit: 요청 간 최소 간격(`min_interval_sec_*`) 유지, `1700` 응답 시 지수 백오프.
   실측은 `api_call_log` 로 확인한다.

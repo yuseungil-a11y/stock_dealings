@@ -44,8 +44,14 @@ def collect_start_info(db, account_id: int | None = None) -> dict:
     claude = next((a for a in active if a.get("code") == "claude_advisor"), None)
     claude_model = ((claude or {}).get("params") or {}).get("model", "-")
     universe = next((a for a in active if a.get("code") == "universe_filter"), None)
+    trend = next((a for a in active if a.get("code") == "claude_trend_scan"), None)
+    trend_params = (trend or {}).get("params") or {}
     limit = _limit_preview(db, account_id, params, universe)
     return {
+        "trend_on": bool(trend),
+        "trend_text": (f"사용 ({trend_params.get('region_scope', '-')}) — "
+                       f"조사 시각 {trend_params.get('scan_time', '-')}, 하루 1회"
+                       if trend else "미사용 — 산업 트렌드 조사를 하지 않습니다"),
         "claude_on": bool(claude),
         "claude_text": (f"사용 ({claude_model}) — 매수 신호만 검토, 매도·손절은 검토 안 함"
                         if claude else "미사용 — 모든 매수 신호가 그대로 Executor 로 갑니다"),
@@ -138,6 +144,8 @@ class AutoTradeStartDialog(tk.Toplevel):
                   "#1565c0" if info.get("claude_on") else "#777777")
         self._row(box, 4, "종목 유니버스", info.get("universe_text", "미사용"),
                   "#1565c0" if info.get("universe_on") else "#777777")
+        self._row(box, 5, "산업 트렌드 스캔", info.get("trend_text", "미사용"),
+                  "#1565c0" if info.get("trend_on") else "#777777")
 
         # -- 알고리즘 ---------------------------------------------------- #
         algo_box = ttk.LabelFrame(frm, text="활성 알고리즘", padding=8)

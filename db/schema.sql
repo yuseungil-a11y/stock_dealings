@@ -514,4 +514,89 @@ LEFT JOIN llm_decision_log l ON l.id = COALESCE(
     WHERE x.stk_cd = s.stk_cd AND x.order_id IS NULL
       AND x.created_at BETWEEN s.created_at - INTERVAL 2 MINUTE AND s.created_at + INTERVAL 2 MINUTE));
 
+-- ---------------------------------------------------------------------
+-- 9. 산업 트렌드 스캔 (Claude, 하루 1회 — claude_trend_scan 알고리즘)
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS trend_scan_run (
+  id                BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  scan_date         DATE NOT NULL,
+  started_at        DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  finished_at       DATETIME NULL,
+  status            ENUM('ok','partial','error') NOT NULL DEFAULT 'ok',
+  region_scope      VARCHAR(20) NOT NULL DEFAULT 'domestic_global',
+  model             VARCHAR(50) NOT NULL,
+  domestic_theme_summary TEXT NULL COMMENT 'ka90001 상위 테마 요약(1단계 조사 프롬프트에 넣은 근거 데이터, 감사용)',
+  research_summary  TEXT NULL COMMENT '1단계(웹 조사) 응답 원문 요약(감사용, 비밀값 없음)',
+  candidate_count   INT NOT NULL DEFAULT 0,
+  signal_count      INT NOT NULL DEFAULT 0 COMMENT '실제 매수 신호로 이어진 후보 수',
+  web_search_count  INT NULL,
+  input_tokens       INT NULL,
+  output_tokens      INT NULL,
+  latency_ms         INT NULL,
+  error_msg          VARCHAR(255) NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_trend_scan_date (scan_date)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='산업 트렌드 스캔 1일 1회 실행 기록(claude_trend_scan)';
+
+CREATE TABLE IF NOT EXISTS trend_scan_candidate (
+  id              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  run_id          BIGINT UNSIGNED NOT NULL,
+  region          ENUM('domestic','global') NOT NULL,
+  theme           VARCHAR(120) NOT NULL,
+  rationale       VARCHAR(500) NULL,
+  confidence      SMALLINT NULL COMMENT '0~100',
+  kiwoom_theme_cd VARCHAR(20) NULL COMMENT '국내 테마가 ka90001 테마그룹과 매칭된 경우',
+  kiwoom_theme_nm VARCHAR(60) NULL,
+  stk_cd          VARCHAR(12) NULL COMMENT 'stock_master 매칭 성공 시에만 채움(미매칭은 NULL - 추측 금지)',
+  stk_nm          VARCHAR(60) NULL,
+  match_status    ENUM('kiwoom_theme_member','name_matched','unmatched') NOT NULL,
+  signal_id       BIGINT UNSIGNED NULL COMMENT 'signal_log.id (매수 신호로 이어졌으면)',
+  created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  KEY ix_tsc_run (run_id),
+  KEY ix_tsc_stk (stk_cd, created_at),
+  CONSTRAINT fk_tsc_run FOREIGN KEY (run_id) REFERENCES trend_scan_run (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='트렌드 스캔이 골라낸 테마/후보종목(매칭 실패도 투명하게 기록, 웹에서 조회)';
+
+-- trend_scan_run 은 scan_date UNIQUE(하루 1개 = "그날의 최신 공식 결과")를 그대로 유지한다.
+-- 웹에서 수동 재조사를 요청하면 이 행을 그대로 덮어쓴다(trigger_type='manual'). 실패했던 이전
+-- 시도의 내용은 아래 trend_scan_attempt(append-only 감사로그)에 남아 사라지지 않는다.
+ALTER TABLE trend_scan_run
+  ADD COLUMN IF NOT EXISTS trigger_type ENUM('scheduled','manual') NOT NULL DEFAULT 'scheduled' AFTER scan_date,
+  ADD COLUMN IF NOT EXISTS requested_by VARCHAR(50) NULL COMMENT '수동 재조사를 누른 웹 사용자(scheduled 는 NULL)' AFTER trigger_type;
+
+CREATE TABLE IF NOT EXISTS trend_scan_attempt (
+  id                BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  scan_date         DATE NOT NULL,
+  trigger_type      ENUM('scheduled','manual') NOT NULL,
+  requested_by      VARCHAR(50) NULL,
+  status            ENUM('ok','partial','error') NOT NULL,
+  region_scope      VARCHAR(20) NULL,
+  model             VARCHAR(50) NULL,
+  candidate_count   INT NULL,
+  web_search_count  INT NULL,
+  input_tokens      INT NULL,
+  output_tokens     INT NULL,
+  latency_ms        INT NULL,
+  error_msg         VARCHAR(255) NULL,
+  research_summary  TEXT NULL COMMENT '1단계 조사 원문 스냅샷(실패 사유 포함, 감사용)',
+  started_at        DATETIME NOT NULL,
+  finished_at       DATETIME NULL,
+  created_at        DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  KEY ix_tsa_date (scan_date, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='산업 트렌드 스캔의 모든 시도(자동+수동) 이력. trend_scan_run 은 하루 최신 결과만 남기지만, 이 테이블은 실패한 시도도 영구 보존해 투명성을 유지한다';
+
+CREATE TABLE IF NOT EXISTS trend_scan_request (
+  id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  requested_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  requested_by  VARCHAR(50) NOT NULL COMMENT '웹 로그인 사용자명(admin)',
+  status        ENUM('pending','processing','done','error') NOT NULL DEFAULT 'pending',
+  run_id        BIGINT UNSIGNED NULL COMMENT '처리 완료 시 trend_scan_run.id',
+  error_msg     VARCHAR(255) NULL,
+  processed_at  DATETIME NULL,
+  PRIMARY KEY (id),
+  KEY ix_tsr_status (status, requested_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='웹의 "지금 다시 조사" 버튼이 남기는 요청. 서버가 주기적으로 확인해 처리하고 상태를 갱신한다(웹은 Anthropic/키움 자격증명이 없어 직접 실행 불가)';
+
 SET FOREIGN_KEY_CHECKS = 1;

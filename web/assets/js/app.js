@@ -195,6 +195,11 @@
           setText('llm_summary', '호출 ' + fmtInt(data.llm.calls) + '건 · 차단 ' + fmtInt(data.llm.blocks)
             + '건 · 오류 ' + fmtInt(data.llm.errors) + '건 · 캐시 ' + fmtInt(data.llm.cache_hits) + '건');
         }
+        // 오늘 산업 트렌드 스캔 한 줄 (해당 요소가 이미 있을 때만 갱신)
+        if (data.trend) {
+          setText('trend_summary', '후보 ' + fmtInt(data.trend.candidates) + '개 (신호 '
+            + fmtInt(data.trend.signals) + '개)');
+        }
         if (data.today) {
           setText('today_pl', fmtSigned(data.today.pl_amt), signClass(data.today.pl_amt));
           setText('today_orders', fmtInt(data.today.orders));

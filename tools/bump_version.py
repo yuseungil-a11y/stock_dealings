@@ -136,7 +136,8 @@ def main() -> int:
         return 0
     if not a.how:
         ap.error("patch | minor | major | X.Y.Z 를 지정하세요.")
-    bump(a.target, a.how, a.message)
+    notes = [m for m in a.message if m.strip()]  # 빈 문자열(-m "")은 무시 - 빈 "### 변경" 절이 남는 걸 막는다
+    bump(a.target, a.how, notes)
     return 0
 
 

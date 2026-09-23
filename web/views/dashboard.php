@@ -15,6 +15,7 @@ foreach ($topHoldings as $hd) {
     if (!empty($hd['delisted'])) { $hasDelisted = true; break; }
 }
 $llm = $d['llm'];
+$trend = $d['trend'];   // 오늘 산업 트렌드 스캔 요약 (오늘 실행이 없으면 null → 줄 자체를 숨긴다)
 $mode = repo_setting('trading_mode', '-');
 $orderEnabled = repo_setting('order_enabled', '0');
 $realConfirm = repo_setting('real_trading_confirm', '0');
@@ -129,12 +130,23 @@ $canOrder = ($orderEnabled === '1') && ($mode === 'mock' || $realConfirm === '1'
         <a class="btn btn-sm" href="<?= h(u('index.php?p=trade.analysis&result=failed')) ?>">원인 보기</a>
       </p>
     <?php endif; ?>
-    <?php if ($llm !== null && (int)$llm['total'] > 0): ?>
-      <p class="llmline">
-        <span class="llmline-t">오늘 Claude 검토</span>
-        <span data-k="llm_summary">호출 <?= h(nfmt($llm['calls'])) ?>건 · 차단 <?= h(nfmt($llm['blocks'])) ?>건 · 오류 <?= h(nfmt($llm['errors'])) ?>건 · 캐시 <?= h(nfmt($llm['cache_hits'])) ?>건</span>
-        <a class="btn btn-sm" href="<?= h(u('index.php?p=strategy.claude')) ?>">판단 보기</a>
-      </p>
+    <?php if (($llm !== null && (int)$llm['total'] > 0) || $trend !== null): ?>
+      <div class="dashlines">
+        <?php if ($llm !== null && (int)$llm['total'] > 0): ?>
+          <p class="llmline">
+            <span class="llmline-t">오늘 Claude 검토</span>
+            <span data-k="llm_summary">호출 <?= h(nfmt($llm['calls'])) ?>건 · 차단 <?= h(nfmt($llm['blocks'])) ?>건 · 오류 <?= h(nfmt($llm['errors'])) ?>건 · 캐시 <?= h(nfmt($llm['cache_hits'])) ?>건</span>
+            <a class="btn btn-sm" href="<?= h(u('index.php?p=strategy.claude')) ?>">판단 보기</a>
+          </p>
+        <?php endif; ?>
+        <?php if ($trend !== null): ?>
+          <p class="llmline">
+            <span class="llmline-t">오늘 산업 트렌드</span>
+            <span data-k="trend_summary">후보 <?= h(nfmt($trend['candidates'])) ?>개 (신호 <?= h(nfmt($trend['signals'])) ?>개)</span>
+            <a class="btn btn-sm" href="<?= h(u('index.php?p=strategy.trend')) ?>">후보 보기</a>
+          </p>
+        <?php endif; ?>
+      </div>
     <?php endif; ?>
     <?php if ($events === []): ?>
       <?= empty_note('기록된 이벤트가 없습니다.') ?>

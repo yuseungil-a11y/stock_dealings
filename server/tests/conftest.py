@@ -47,9 +47,19 @@ class FakeDb:
         self.expired_unknown = 0
         self.order_events: list[dict] = []
         self.purged: list[tuple[str, int]] = []      # (대상, 보관일수)
+        # 산업 트렌드 스캔 (claude_trend_scan)
+        self.trend_runs: list[dict] = []
+        self.trend_candidates: list[dict] = []
+        self.trend_attempts: list[dict] = []      # append-only 감사로그
+        self.trend_requests: list[dict] = []      # 웹의 "지금 다시 조사" 요청 큐
+        self.now_for_stale: _dt.datetime | None = None   # 멈춘 요청 정리 기준 시각(테스트)
+        self._taid = 0
+        self._trid = 0
         self._oid = 0
         self._sid = 0
         self._lid = 0
+        self._tid = 0
+        self._tcid = 0
 
     def _maybe_fail(self, name: str) -> None:
         if name in self.fail_on:
@@ -281,6 +291,199 @@ class FakeDb:
         return [dict(r) for r in self.stock_master_rows
                 if str(r.get("market_code")) in wanted]
 
+    # -- 산업 트렌드 스캔 (claude_trend_scan) --------------------------- #
+    def find_stocks_by_name(self, stk_nm: str) -> list[dict]:
+        """실제 Database 와 같이 **공백 제거 후 정확 일치**, 코스피/코스닥만."""
+        self._maybe_fail("find_stocks_by_name")
+        name = "".join(str(stk_nm or "").split())
+        if not name:
+            return []
+        return [dict(r) for r in self.stock_master_rows
+                if "".join(str(r.get("stk_nm") or "").split()) == name
+                and str(r.get("market_code")) in ("0", "10")]
+
+    def trend_scan_run_on(self, scan_date):
+        self._maybe_fail("trend_scan_run_on")
+        for r in self.trend_runs:
+            if r["scan_date"] == scan_date:
+                return dict(r)
+        return None
+
+    def start_trend_scan_run(self, scan_date, region_scope, model):
+        self._maybe_fail("start_trend_scan_run")
+        if any(r["scan_date"] == scan_date for r in self.trend_runs):
+            # 실제 DB 의 UNIQUE(scan_date) 위반 대역
+            raise RuntimeError("Duplicate entry for key 'uq_trend_scan_date'")
+        self._tid += 1
+        self.trend_runs.append({"id": self._tid, "scan_date": scan_date, "status": "ok",
+                                "region_scope": region_scope, "model": model,
+                                "candidate_count": 0, "signal_count": 0})
+        return self._tid
+
+    def finish_trend_scan_run(self, run_id, **f):
+        self._maybe_fail("finish_trend_scan_run")
+        from stock_svr.db import TREND_TEXT_MAX, _trim_masked
+
+        for r in self.trend_runs:
+            if r["id"] == run_id:
+                row = dict(f)
+                for key, limit in (("domestic_theme_summary", TREND_TEXT_MAX),
+                                   ("research_summary", TREND_TEXT_MAX),
+                                   ("error_msg", 255)):
+                    if key in row:
+                        row[key] = _trim_masked(row[key], limit)
+                r.update(row)
+                return 1
+        return 0
+
+    def insert_trend_candidate(self, run_id, **f):
+        self._maybe_fail("insert_trend_candidate")
+        self._tcid += 1
+        row = dict(f)
+        row["id"] = self._tcid
+        row["run_id"] = run_id
+        row.setdefault("signal_id", None)
+        self.trend_candidates.append(row)
+        return self._tcid
+
+    def set_trend_candidate_signal(self, candidate_id, signal_id):
+        self._maybe_fail("set_trend_candidate_signal")
+        for r in self.trend_candidates:
+            if r["id"] == candidate_id:
+                r["signal_id"] = signal_id
+                return 1
+        return 0
+
+    def trend_scan_candidates(self, run_id):
+        return [dict(r) for r in self.trend_candidates if r.get("run_id") == run_id]
+
+    # -- 시도 감사로그 (append-only) ------------------------------------ #
+    def insert_trend_scan_attempt(self, scan_date, **f):
+        self._maybe_fail("insert_trend_scan_attempt")
+        from stock_svr.db import TREND_TEXT_MAX, _trim_masked
+
+        self._taid += 1
+        row = dict(f)
+        row["id"] = self._taid
+        row["scan_date"] = scan_date
+        # 실제 테이블에는 항상 있는 컬럼들(값이 없으면 NULL)
+        for key in ("requested_by", "region_scope", "model", "candidate_count",
+                    "web_search_count", "input_tokens", "output_tokens", "latency_ms",
+                    "error_msg", "research_summary", "started_at", "finished_at"):
+            row.setdefault(key, None)
+        for key, limit in (("research_summary", TREND_TEXT_MAX), ("error_msg", 255),
+                           ("requested_by", 50)):
+            if row.get(key) is not None:
+                row[key] = _trim_masked(row[key], limit)
+        self.trend_attempts.append(row)
+        return self._taid
+
+    def trend_scan_attempts(self, scan_date):
+        return [dict(r) for r in self.trend_attempts if r.get("scan_date") == scan_date]
+
+    # -- 수동 재조사 결과 반영 (run UPSERT + 후보 교체) ------------------ #
+    def save_manual_trend_scan(self, scan_date, *, requested_by, status, region_scope,
+                               model, candidates, domestic_theme_summary=None,
+                               research_summary=None, web_search_count=None,
+                               input_tokens=None, output_tokens=None, latency_ms=None,
+                               error_msg=None, started_at=None):
+        self._maybe_fail("save_manual_trend_scan")
+        from stock_svr.db import TREND_TEXT_MAX, _trim_masked
+
+        row = None
+        for r in self.trend_runs:
+            if r["scan_date"] == scan_date:
+                row = r
+                break
+        if row is None:
+            self._tid += 1
+            row = {"id": self._tid, "scan_date": scan_date}
+            self.trend_runs.append(row)
+        row.update({
+            "trigger_type": "manual", "requested_by": _trim_masked(requested_by, 50),
+            "started_at": started_at, "status": status, "region_scope": region_scope,
+            "model": model, "candidate_count": len(candidates), "signal_count": 0,
+            "domestic_theme_summary": _trim_masked(domestic_theme_summary, TREND_TEXT_MAX),
+            "research_summary": _trim_masked(research_summary, TREND_TEXT_MAX),
+            "web_search_count": web_search_count, "input_tokens": input_tokens,
+            "output_tokens": output_tokens, "latency_ms": latency_ms,
+            "error_msg": _trim_masked(error_msg, 255)})
+        run_id = int(row["id"])
+        # 기존 후보 삭제 후 재삽입 (실제 DB 는 한 트랜잭션)
+        self.trend_candidates = [c for c in self.trend_candidates
+                                 if c.get("run_id") != run_id]
+        for c in candidates:
+            self._tcid += 1
+            new = dict(c)
+            new["id"] = self._tcid
+            new["run_id"] = run_id
+            new["signal_id"] = None
+            self.trend_candidates.append(new)
+        return run_id
+
+    # -- 수동 재조사 요청 큐 -------------------------------------------- #
+    def add_trend_scan_request(self, requested_by="admin", requested_at=None):
+        """테스트 헬퍼 — 웹이 INSERT 하는 pending 행 흉내."""
+        self._trid += 1
+        row = {"id": self._trid, "requested_by": requested_by, "status": "pending",
+               "requested_at": requested_at or _dt.datetime(2026, 9, 18, 8, 40),
+               "run_id": None, "error_msg": None, "processed_at": None}
+        self.trend_requests.append(row)
+        return row
+
+    def pending_trend_scan_request(self):
+        self._maybe_fail("pending_trend_scan_request")
+        rows = [r for r in self.trend_requests if r["status"] == "pending"]
+        rows.sort(key=lambda r: (r["requested_at"], r["id"]))
+        return dict(rows[0]) if rows else None
+
+    def count_processing_trend_requests(self) -> int:
+        self._maybe_fail("count_processing_trend_requests")
+        return sum(1 for r in self.trend_requests if r["status"] == "processing")
+
+    def claim_trend_scan_request(self, max_tries: int = 5):
+        """실제 Database 와 같은 '영향 행 수로 승자 판정' 방식."""
+        self._maybe_fail("claim_trend_scan_request")
+        for _ in range(max(1, int(max_tries))):
+            row = self.pending_trend_scan_request()
+            if row is None:
+                return None
+            won = 0
+            for r in self.trend_requests:
+                if r["id"] == row["id"] and r["status"] == "pending":
+                    r["status"] = "processing"
+                    won = 1
+            if won:
+                out = dict(row)
+                out["status"] = "processing"
+                return out
+        return None
+
+    def finish_trend_scan_request(self, request_id, *, status, run_id=None,
+                                  error_msg=None) -> int:
+        self._maybe_fail("finish_trend_scan_request")
+        from stock_svr.db import _trim_masked
+
+        for r in self.trend_requests:
+            if r["id"] == request_id:
+                r.update({"status": status, "run_id": run_id,
+                          "error_msg": _trim_masked(error_msg, 255),
+                          "processed_at": _dt.datetime(2026, 9, 18, 9, 0)})
+                return 1
+        return 0
+
+    def expire_stale_trend_requests(self, minutes=10, reason="서버 재시작으로 중단") -> int:
+        self._maybe_fail("expire_stale_trend_requests")
+        cutoff = (self.now_for_stale or _dt.datetime(2026, 9, 18, 8, 40)) \
+            - _dt.timedelta(minutes=max(1, int(minutes)))
+        n = 0
+        for r in self.trend_requests:
+            if r["status"] == "processing" and r["requested_at"] < cutoff:
+                r.update({"status": "error", "error_msg": reason,
+                          "processed_at": cutoff})
+                n += 1
+        return n
+
     # -- 기타 ---------------------------------------------------------- #
     def scalar(self, sql: str, args=None, default=None):
         if "stop_loss_pct" in sql:
@@ -329,12 +532,17 @@ class FakeDb:
 class FakeMarket:
     """MarketService 대역."""
 
-    def __init__(self, ranks=None, surges=None, bars=None, quotes=None):
+    def __init__(self, ranks=None, surges=None, bars=None, quotes=None,
+                 themes=None, theme_members=None):
         self._ranks = ranks or []
         self._surges = surges or []
         self._bars = bars or {}
         self._quotes = quotes or {}
+        self._themes = themes or []
+        self._theme_members = theme_members or {}
         self.recorded: list[tuple[str, list]] = []
+        self.theme_calls: list[str] = []
+        self.fail_on: set[str] = set()
 
     def rank_flu_rt(self, mrkt_tp="000", stex_tp="1"):
         return list(self._ranks)
@@ -351,6 +559,19 @@ class FakeMarket:
 
     def quote(self, stk_cd):
         return self._quotes.get(stk_cd)
+
+    # -- 테마 (ka90001 / ka90002) --------------------------------------- #
+    def themes(self, flu_pl_amt_tp="3", stex_tp="1", date_tp="10"):
+        if "themes" in self.fail_on:
+            raise RuntimeError("FakeMarket 강제 오류: themes")
+        self.theme_calls.append("ka90001")
+        return list(self._themes)
+
+    def theme_members(self, thema_grp_cd, stex_tp="1", date_tp="2"):
+        if "theme_members" in self.fail_on:
+            raise RuntimeError("FakeMarket 강제 오류: theme_members")
+        self.theme_calls.append(f"ka90002:{thema_grp_cd}")
+        return list(self._theme_members.get(str(thema_grp_cd), []))
 
 
 @pytest.fixture(autouse=True)
@@ -371,6 +592,16 @@ def _reset_universe_cache():
     clear_universe_cache()
     yield
     clear_universe_cache()
+
+
+@pytest.fixture(autouse=True)
+def _reset_trend_scan():
+    """'오늘 이미 조사함' 표시가 테스트 간에 새지 않게 한다 (claude_trend_scan)."""
+    from stock_svr.services.trend_scan import reset_state
+
+    reset_state()
+    yield
+    reset_state()
 
 
 @pytest.fixture

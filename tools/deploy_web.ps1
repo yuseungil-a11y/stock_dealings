@@ -110,17 +110,25 @@ $checks = @(
     @{ Name = 'Claude 판단 미인증';     Url = "${SmokeUrl}index.php?p=strategy.claude"; Expect = @('302','303') },
     @{ Name = '보유종목 미인증';        Url = "${SmokeUrl}index.php?p=account.holdings"; Expect = @('302','303') },
     @{ Name = '거래 분석 미인증';       Url = "${SmokeUrl}index.php?p=trade.analysis"; Expect = @('302','303') },
+    @{ Name = '산업 트렌드 미인증';     Url = "${SmokeUrl}index.php?p=strategy.trend"; Expect = @('302','303') },
     @{ Name = '보관 화면 미인증';       Url = "${SmokeUrl}index.php?p=system.archive"; Expect = @('302','303') },
     @{ Name = '분석 내보내기 미인증';   Url = "${SmokeUrl}index.php?p=trade.analysis&export=csv"; Expect = @('302','303') },
     @{ Name = 'lib 직접접근 차단';      Url = "${SmokeUrl}lib/db.php";             Expect = @('403','404') },
     @{ Name = 'views 직접접근 차단';    Url = "${SmokeUrl}views/layout.php";       Expect = @('403','404') },
     @{ Name = 'config 미배포';          Url = "${SmokeUrl}config/config.local.php";Expect = @('403','404') },
-    @{ Name = '디렉터리 리스팅 차단';   Url = "${SmokeUrl}assets/";                Expect = @('403','404') }
+    @{ Name = '디렉터리 리스팅 차단';   Url = "${SmokeUrl}assets/";                Expect = @('403','404') },
+    # 재조사 요청(쓰기)은 CSRF 토큰 없는 POST 를 반드시 403 으로 막아야 한다.
+    @{ Name = '재조사 POST CSRF 누락';  Url = "${SmokeUrl}index.php";              Expect = @('403');
+       Post = 'action=trend_rescan' }
 )
 
 $fail = 0
 foreach ($c in $checks) {
-    $code = (& $curl -s -o NUL -w '%{http_code}' $c.Url) 2>$null
+    if ($c.ContainsKey('Post')) {
+        $code = (& $curl -s -o NUL -w '%{http_code}' -X POST -d $c.Post $c.Url) 2>$null
+    } else {
+        $code = (& $curl -s -o NUL -w '%{http_code}' $c.Url) 2>$null
+    }
     if ($c.Expect -contains $code) {
         Write-Ok ("{0,-24} HTTP {1}" -f $c.Name, $code)
     } else {

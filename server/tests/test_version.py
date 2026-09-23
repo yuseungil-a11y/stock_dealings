@@ -107,3 +107,39 @@ def test_app_applies_window_icon_and_resolves_paths():
     assert app_mod._asset_path("stock_svr.ico").exists()
     src = (Path(stock_svr.__file__).parent / "ui" / "app.py").read_text(encoding="utf-8")
     assert "apply_window_icon(self)" in src
+
+
+# --- 장운영구분(WS 0s 필드 215) 판단 버그 수정 회귀 ---
+# 215 는 코스피/코스닥 "본장" 상태(0/2/3/4/8/9)뿐 아니라 NXT·선물옵션·시간외
+# 알림(a/b/g/h/o/s/e/f/P~V 등)도 같은 필드로 온다. 09:00 "3"(장시작) 직후
+# NXT "R"(메인마켓 시작 알림) 이 오면 그 값으로 상태를 덮어써서, 그 뒤로는
+# market_open() 이 계속 False 를 반환해 하루 종일 신규 신호가 끊긴다
+# (2026-09-22 실서버에서 실제 관측된 장애 - 자동거래는 ON 인데 신호가 하나도 안 남).
+def test_main_market_codes_cover_open_and_close_only():
+    from stock_svr.engine.runner import MAIN_MARKET_CODES
+    assert MAIN_MARKET_CODES == {"0", "2", "3", "4", "8", "9"}
+    for code in ("a", "b", "g", "h", "o", "s", "e", "f", "P", "Q", "R", "S", "T", "U", "V"):
+        assert code not in MAIN_MARKET_CODES, code
+
+
+def test_market_open_survives_unrelated_215_codes_after_open():
+    """09:00 장시작(3) 이후 NXT/선옵 등 무관한 215 코드가 와도 market_open 이 유지되어야 한다."""
+    from unittest.mock import patch
+
+    from stock_svr.config import AppConfig
+    from stock_svr.engine.runner import Engine
+
+    from conftest import FakeDb
+
+    eng = Engine(AppConfig(), FakeDb())
+
+    with patch("stock_svr.engine.runner.is_market_open", return_value=True):
+        eng._on_real("0s", "", {"215": "3"})
+        assert eng.market_open() is True
+
+        for code in ("R", "o", "P", "Q"):    # NXT/선옵 알림 - 본장과 무관
+            eng._on_real("0s", "", {"215": code})
+            assert eng.market_open() is True, f"215={code} 로 장중 상태가 무너지면 안 된다"
+
+        eng._on_real("0s", "", {"215": "4"})  # 실제 장마감은 여전히 반영되어야 한다
+        assert eng.market_open() is False

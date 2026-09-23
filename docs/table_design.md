@@ -2,7 +2,7 @@
 
 > `tools/gen_table_doc.py` 가 실제 DB 에서 자동 생성한 문서입니다(직접 수정 금지). 원본 DDL: `db/schema.sql`, 초기 데이터: `db/seed.sql`.
 
-- DBMS: MariaDB 10.11, 문자셋 utf8mb4, 총 **29개 테이블** + 뷰 1개
+- DBMS: MariaDB 10.11, 문자셋 utf8mb4, 총 **33개 테이블** + 뷰 1개
 - 금액/수량/가격 = BIGINT, 비율(%) = DECIMAL(12,4), 시각 = DATETIME(KST)
 - 키움 API 문자열 값(부호·0패딩)은 서버모듈이 정수로 파싱해 저장
 - 권한: `stock_svr`(서버, SELECT/INSERT/UPDATE/DELETE) · `stock_web`(웹, SELECT 전용 + `app_login_log` INSERT + `app_user` 일부 컬럼 UPDATE)
@@ -490,6 +490,10 @@
 ## 기타
 
 - `llm_decision_log` — Claude 거부권 필터 판단 기록(모델·근거·토큰·결과). 1주일 이상 보관 가능
+- `trend_scan_attempt` — 산업 트렌드 스캔의 모든 시도(자동+수동) 이력. trend_scan_run 은 하루 최신 결과만 남기지만, 이 테이블은 실패한 시도도 영구 보존해 투명성을 유지한다
+- `trend_scan_candidate` — 트렌드 스캔이 골라낸 테마/후보종목(매칭 실패도 투명하게 기록, 웹에서 조회)
+- `trend_scan_request` — 웹의 "지금 다시 조사" 버튼이 남기는 요청. 서버가 주기적으로 확인해 처리하고 상태를 갱신한다(웹은 Anthropic/키움 자격증명이 없어 직접 실행 불가)
+- `trend_scan_run` — 산업 트렌드 스캔 1일 1회 실행 기록(claude_trend_scan)
 
 ## 분석용 뷰
 

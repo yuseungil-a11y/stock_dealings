@@ -13,7 +13,6 @@ from tkinter import ttk
 
 from ..algo.universe_filter import (
     COMBINED_KEY,
-    COMBINED_LABEL,
     EOK,
     MARKET_LABEL,
     SCOPE_COMBINED,
@@ -40,7 +39,7 @@ def summary_lines(uni: Universe, opts: UniverseOptions) -> list[str]:
     out.append(f"대상 종목 : 총 {uni.passed_total}종목  ({per_market})")
     if opts.rank_scope == SCOPE_COMBINED:
         cap = uni.cutoff_by_scope.get(COMBINED_KEY)
-        out.append(f"시총 컷오프 : {COMBINED_LABEL} "
+        out.append(f"시총 컷오프 : {opts.combined_label} "
                    f"{'-' if cap is None else format(cap // EOK, ',') + '억원'}")
     else:
         parts = []
@@ -50,7 +49,7 @@ def summary_lines(uni: Universe, opts: UniverseOptions) -> list[str]:
                          f"{'-' if cap is None else format(cap // EOK, ',') + '억원'}")
         out.append("시총 컷오프 : " + ("  /  ".join(parts) or "-"))
     stamp = uni.updated_at.strftime("%Y-%m-%d %H:%M") if uni.updated_at else "확인 불가"
-    out.append(f"종목마스터 최신 갱신 : {stamp}  (코스피·코스닥 {uni.source_rows:,}행)")
+    out.append(f"종목마스터 최신 갱신 : {stamp}  (코스피·코스닥·ETF {uni.source_rows:,}행)")
     return out
 
 

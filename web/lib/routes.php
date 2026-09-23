@@ -21,6 +21,7 @@ function app_routes(): array
         'strategy.params' => ['view' => 'strategy_params', 'title' => '파라미터 · 변경이력', 'group' => 'strategy'],
         'strategy.signals' => ['view' => 'strategy_signals', 'title' => '신호 기록', 'group' => 'strategy'],
         'strategy.claude' => ['view' => 'strategy_claude', 'title' => 'Claude 판단', 'group' => 'strategy'],
+        'strategy.trend' => ['view' => 'strategy_trend', 'title' => '산업 트렌드', 'group' => 'strategy'],
         'system.status' => ['view' => 'system_status', 'title' => '서버 상태', 'group' => 'system'],
         'system.events' => ['view' => 'system_events', 'title' => '이벤트 로그', 'group' => 'system'],
         'system.archive' => ['view' => 'system_archive', 'title' => '이벤트 · API 오류 보관', 'group' => 'system'],
@@ -50,6 +51,7 @@ function app_menu(): array
             'strategy.params' => '파라미터 · 변경이력',
             'strategy.signals' => '신호 기록',
             'strategy.claude' => 'Claude 판단',
+            'strategy.trend' => '산업 트렌드',
         ]],
         'system' => ['label' => '시스템', 'items' => [
             'system.status' => '서버 상태',

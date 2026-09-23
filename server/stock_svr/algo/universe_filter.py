@@ -1,12 +1,12 @@
 """universe_filter — 시가총액·주가 기준으로 **신규 매수 대상 종목(유니버스)** 을 제한하는 필터.
 
 * `stock_master`(ka10099 로 받은 종목마스터)의 상장주식수 × 전일종가로 시가총액을 구해
-  코스피/코스닥 시총 순위를 만들고, 순위·시총 하한·주가 범위를 벗어나는 **매수 신호만** 차단한다.
+  코스피/코스닥/ETF 시총 순위를 만들고, 순위·시총 하한·주가 범위를 벗어나는 **매수 신호만** 차단한다.
 * 매도·손절·청산 신호에는 **절대 관여하지 않는다**(코드·테스트로 강제).
 * 순위는 종목마스터 갱신(`updated_at`) 이 바뀌기 전까지 메모리에 캐시한다(사이클마다 재계산 금지).
 * 마스터가 비었거나 오래됐거나 조회에 실패하면 **신규 매수를 차단**한다(fail-closed).
 
-파라미터(seed.sql): use_kospi, use_kosdaq, rank_scope, top_n, min_market_cap_eok,
+파라미터(seed.sql): use_kospi, use_kosdaq, use_etf, rank_scope, top_n, min_market_cap_eok,
 min_price, max_price, exclude_preferred, exclude_spac, exclude_warning, apply_to, stale_days
 """
 from __future__ import annotations
@@ -26,13 +26,14 @@ CODE = "universe_filter"
 
 MARKET_KOSPI = "0"
 MARKET_KOSDAQ = "10"
-TARGET_MARKETS = (MARKET_KOSPI, MARKET_KOSDAQ)
-MARKET_LABEL = {MARKET_KOSPI: "코스피", MARKET_KOSDAQ: "코스닥"}
+MARKET_ETF = "8"            # 국내 상장 ETF (금현물·ETN·리츠 등 다른 코드는 대상 아님)
+TARGET_MARKETS = (MARKET_KOSPI, MARKET_KOSDAQ, MARKET_ETF)
+MARKET_LABEL = {MARKET_KOSPI: "코스피", MARKET_KOSDAQ: "코스닥", MARKET_ETF: "ETF"}
 
 SCOPE_PER_MARKET = "per_market"
 SCOPE_COMBINED = "combined"
 COMBINED_KEY = "combined"
-COMBINED_LABEL = "코스피+코스닥"
+COMBINED_LABEL = "코스피+코스닥"      # 선택 시장이 없을 때만 쓰는 표시용 기본값
 
 APPLY_ENTRY = "entry"
 APPLY_ENTRY_AND_AVG = "entry_and_avg"
@@ -63,6 +64,7 @@ class UniverseOptions:
 
     use_kospi: bool = True
     use_kosdaq: bool = True
+    use_etf: bool = True
     rank_scope: str = SCOPE_PER_MARKET
     top_n: int = 100
     min_market_cap_eok: int = 0
@@ -80,6 +82,7 @@ class UniverseOptions:
         return cls(
             use_kospi=params.bool("use_kospi", True),
             use_kosdaq=params.bool("use_kosdaq", True),
+            use_etf=params.bool("use_etf", True),
             rank_scope=params.str("rank_scope", SCOPE_PER_MARKET) or SCOPE_PER_MARKET,
             top_n=params.int("top_n", 100),
             min_market_cap_eok=params.int("min_market_cap_eok", 0),
@@ -100,12 +103,19 @@ class UniverseOptions:
             out.append(MARKET_KOSPI)
         if self.use_kosdaq:
             out.append(MARKET_KOSDAQ)
+        if self.use_etf:
+            out.append(MARKET_ETF)
         return tuple(out)
 
     @property
     def markets_text(self) -> str:
         names = [MARKET_LABEL[m] for m in self.markets]
         return "+".join(names) if names else "(없음)"
+
+    @property
+    def combined_label(self) -> str:
+        """합산 순위 스코프 라벨(선택된 시장 이름). 예: '코스피+코스닥+ETF'."""
+        return self.markets_text if self.markets else COMBINED_LABEL
 
     @property
     def min_market_cap_won(self) -> int:
@@ -117,14 +127,14 @@ class UniverseOptions:
 
     def scope_label(self, market_code: str) -> str:
         if self.rank_scope == SCOPE_COMBINED:
-            return COMBINED_LABEL
+            return self.combined_label
         return MARKET_LABEL.get(market_code, market_code)
 
     def errors(self) -> list[str]:
         """파라미터 정의(min/max)만으로는 표현할 수 없는 제약 검증."""
         out: list[str] = []
         if not self.markets:
-            out.append("코스피 포함·코스닥 포함 중 최소 하나는 켜야 합니다.")
+            out.append("코스피 포함·코스닥 포함·ETF 포함 중 최소 하나는 켜야 합니다.")
         if self.max_price > 0 and self.max_price < self.min_price:
             out.append(f"최대 주가({self.max_price:,}원)는 최소 주가"
                        f"({self.min_price:,}원) 이상이어야 합니다.")
@@ -134,7 +144,7 @@ class UniverseOptions:
 
     def signature(self) -> tuple:
         """순위 캐시 키(순위 산출에 영향을 주는 값만)."""
-        return (self.use_kospi, self.use_kosdaq, self.rank_scope, self.top_n,
+        return (self.use_kospi, self.use_kosdaq, self.use_etf, self.rank_scope, self.top_n,
                 self.min_market_cap_eok, self.min_price, self.max_price,
                 self.exclude_preferred, self.exclude_spac, self.exclude_warning)
 
@@ -386,7 +396,7 @@ def load_universe(db, opts: UniverseOptions,
         log.warning("종목마스터 조회 실패", exc_info=True)
         return None, f"종목마스터 조회 실패({type(exc).__name__}) - 신규 매수 차단"
     if not rows:
-        return None, "종목마스터에 코스피·코스닥 종목이 없음 - 신규 매수 차단"
+        return None, "종목마스터에 코스피·코스닥·ETF 종목이 없음 - 신규 매수 차단"
 
     uni = build_universe(rows, opts, updated_at=updated_at)
     if not uni.ranked:

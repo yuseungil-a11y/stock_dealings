@@ -5,6 +5,7 @@
     python -m stock_svr --smoke 20     # GUI 를 20초만 띄웠다 자동 종료(스모크)
     python -m stock_svr --eval-once    # 엔진 없이 평가 사이클 1회(관찰모드 진단, 주문 전송 없음)
     python -m stock_svr --claude-check # Claude 거부권 필터 점검(합성 데이터 2건, DB/키움 미사용)
+    python -m stock_svr --trend-scan-check  # 산업 트렌드 스캔 1회 강제 실행(관찰 전용, DB 기록)
 """
 from __future__ import annotations
 
@@ -30,6 +31,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--claude-check", action="store_true",
                    help="Claude 거부권 필터 점검: 합성 종목 2건을 실제 Claude API 로 검토"
                         " (키움 API·DB 기록 없음)")
+    p.add_argument("--trend-scan-check", action="store_true",
+                   help="산업 트렌드 스캔 점검: 실제 키움 ka90001/ka90002(읽기 전용) + 실제 Claude"
+                        " API(조사+구조화 추출)로 오늘 스캔을 1회 강제 실행. "
+                        "**관찰 전용**(주문 게이트를 닫고 Executor 로 넘기지 않음), DB 에는 기록")
     p.add_argument("--smoke", type=float, metavar="SEC",
                    help="GUI 를 SEC 초만 띄웠다가 자동 종료(스모크 테스트)")
     p.add_argument("--eval-once", action="store_true",
@@ -270,6 +275,106 @@ def cmd_claude_check(cfg) -> int:
 
 
 # ====================================================================== #
+def cmd_trend_scan_check(cfg, db: Database) -> int:
+    """산업 트렌드 스캔 점검. 오늘 스캔을 **실제로** 1회 수행하고 결과를 출력한다.
+
+    * 키움은 읽기 전용 TR(`ka00001`, `ka90001`/`ka90002`, 시세)만 호출한다.
+    * Claude 는 1단계(웹 검색 조사) + 2단계(구조화 추출) 두 번 호출한다.
+    * **관찰 전용**: 게이트를 강제로 닫은 컨텍스트로 돌리고, 만들어진 신호를 Executor 로
+      넘기지 않는다 → 주문 API 는 어떤 경로로도 호출되지 않는다.
+    * `--claude-check` 와 달리 **DB 에는 정상적으로 기록**한다(감사 추적).
+    * 엔진(루프·WebSocket)을 기동하지 않는다 — 이미 돌고 있는 서버의 실시간 세션을
+      건드리지 않기 위해서다. 같은 이유로 발급한 토큰을 폐기하지 않고 만료에 맡긴다.
+    """
+    from .algo.params import ParamSet
+    from .engine.context import EngineContext, OrderGateState
+    from .kiwoom.auth import TokenManager
+    from .kiwoom.rest import KiwoomRest
+    from .services.sync_account import AccountService
+    from .services.sync_market import MarketService
+    from .services.trend_scan import CODE, TrendScanParams, TrendScanService
+
+    print(f"\n=== stock_svr --trend-scan-check ({now_kst():%Y-%m-%d %H:%M:%S} KST) ===")
+    print(f"  설정 파일: {cfg.source_path}")
+    if not cfg.anthropic.configured:
+        print("  [FAIL] [anthropic] apikey_file 경로가 설정되지 않았습니다.")
+        return 1
+    try:
+        cfg.anthropic.read_key()
+        print("  [ OK ] API 키 파일 읽기 성공 (값 비표시)")
+    except ConfigError as exc:
+        print(f"  [FAIL] {exc}")
+        return 1
+
+    if not db.ping():
+        print(f"  [FAIL] DB 접속 실패: {db.last_error or '연결 실패'}")
+        return 1
+    attach_db_handler(db, logging.INFO)
+
+    settings = db.get_settings()
+    gate = OrderGateState.from_settings(settings)
+    env = "mock" if gate.trading_mode == "mock" else "real"
+    tokens = TokenManager(cfg.kiwoom, env, cfg.kiwoom.http_timeout_sec)
+    rest = KiwoomRest(cfg.kiwoom, env, tokens, on_call=lambda *a: _safe_api_log(db, *a))
+    try:
+        tokens.get_token()
+        account_id, account_no = AccountService(db, rest).ensure_account(env)
+        print(f"  [ OK ] 계좌 확인 {mask_account_no(account_no)} (env={env})")
+        market = MarketService(db, rest)
+        ctx = EngineContext.build(db, account_id, market=market, market_open=False,
+                                  anthropic_cfg=cfg.anthropic)
+        # S-09 와 같은 관찰 전용 처리: 게이트를 강제로 닫는다(실제 게이트 값은 읽기만 했다)
+        ctx.gate = OrderGateState(order_enabled=False, trading_mode=ctx.gate.trading_mode,
+                                  real_trading_confirm=False)
+        ctx.note("observe_only=True (관찰 전용 - 주문 전송 불가)")
+        meta = next((a for a in db.load_algorithms() if a.get("code") == CODE), None)
+        if meta is None:
+            print(f"  [FAIL] DB 에 {CODE} 알고리즘이 없습니다 (db/seed.sql 적용 필요)")
+            return 1
+        params = ParamSet(meta.get("param_defs") or [], meta.get("params") or {})
+        if params.invalid:
+            print(f"  [FAIL] 파라미터 오류: {'; '.join(params.invalid[:5])}")
+            return 1
+        p = TrendScanParams(params)
+        print(f"  선택 여부 : {'선택됨' if meta.get('is_enabled') else '미선택(점검은 강제 실행)'}")
+        print(f"  조사 설정 : 범위={p.region_scope} 모델={p.model} 사고강도={p.effort} "
+              f"조사시각={p.scan_time} 웹검색상한={p.max_web_searches}회 "
+              f"타임아웃={int(p.timeout_sec)}초")
+        print(f"  주문 게이트: {ctx.gate.describe()}  (관찰 전용 - 주문 전송 불가, "
+              f"실제 설정은 {gate.describe()})")
+        print("\n  ... 조사 중 (웹 검색 포함, 수십 초 걸릴 수 있습니다)\n")
+
+        result = TrendScanService(db, market=market).run_forced(ctx, p)
+
+        print(f"  결과 상태  : {result.status}"
+              + (f"  ({result.error_msg})" if result.error_msg else ""))
+        print(f"  참고 테마  : {len(result.themes)}개 (ka90001 상위 {p.max_domestic_themes}개 전달)")
+        print(f"  후보 행    : {len(result.candidates)}건 "
+              f"(확정 {result.matched_count} / 미매칭 {result.unmatched_count}"
+              f"{f' / 스키마 위반 제외 {result.dropped}' if result.dropped else ''})")
+        print(f"  매수 신호  : {len(result.signals)}건 (관찰 전용 - Executor 로 넘기지 않음)")
+        print(f"  웹 검색    : {result.web_search_count}회")
+        print(f"  토큰       : 입력 {result.input_tokens:,} / 출력 {result.output_tokens:,}"
+              f"   지연 {result.latency_ms:,}ms")
+        if result.run_id:
+            print(f"  DB 기록    : trend_scan_run.id={result.run_id} "
+                  f"(trend_scan_candidate {len(result.candidates)}건)")
+        for c in result.candidates:
+            mark = {"kiwoom_theme_member": "테마", "name_matched": "이름",
+                    "unmatched": "미매칭"}.get(c["match_status"], c["match_status"])
+            print(f"   - [{mark}] {c['region']:<8} {c['theme'][:24]:<24} "
+                  f"{(c['stk_cd'] or '------')} {(c['stk_nm'] or '')[:12]:<12} "
+                  f"확신도 {c['confidence']}")
+        for s in result.signals:
+            print(f"   * 신호: {s.stk_cd} {s.stk_nm} x{s.qty}주 "
+                  f"(약 {s.est_amount:,}원, {s.trde_tp})")
+        print("\n  (주문 API 는 호출하지 않았습니다. 키움은 읽기 전용 TR 만 사용했습니다)\n")
+        return 0 if result.status != "error" else 2
+    finally:
+        rest.close()
+
+
+# ====================================================================== #
 def cmd_eval_once(cfg, db: Database, force_market: bool, all_algos: bool,
                   allow_orders: bool = False) -> int:
     """엔진을 기동해 평가 1회만 수행하고 종료.
@@ -335,6 +440,10 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_claude_check(cfg)
         if args.check:
             return cmd_check(cfg, db)
+        if args.trend_scan_check:
+            # 엔진 루프·WS 를 띄우지 않는 읽기 전용 점검이므로 단일 실행 락을 잡지 않는다
+            # (`--check`/`--claude-check` 와 같다 - 운영 중인 서버를 멈추지 않아도 된다)
+            return cmd_trend_scan_check(cfg, db)
         if args.eval_once:
             with single_instance():
                 return cmd_eval_once(cfg, db, args.force_market, args.all_algos,

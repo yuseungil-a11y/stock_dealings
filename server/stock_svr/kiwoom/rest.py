@@ -52,6 +52,9 @@ API_PATHS: dict[str, str] = {
     # 순위
     "ka10023": "/api/dostk/rkinfo",
     "ka10027": "/api/dostk/rkinfo",
+    # 테마 (읽기 전용 - claude_trend_scan)
+    "ka90001": "/api/dostk/thme",
+    "ka90002": "/api/dostk/thme",
     # 주문
     "kt10000": "/api/dostk/ordr",
     "kt10001": "/api/dostk/ordr",

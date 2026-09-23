@@ -29,6 +29,9 @@ from ..services.housekeeping import HousekeepingService
 from ..services.sync_account import AccountService
 from ..services.sync_market import MarketService
 from ..services.sync_orders import OrderSyncService
+from ..services.trend_scan import REQUEST_POLL_SEC as TREND_REQUEST_POLL_SEC
+from ..services.trend_scan import TrendRequestWorker
+from ..services.trend_scan import link_signal as link_trend_signal
 from ..util import is_market_open, mask_account_no, now_kst
 from .context import EngineContext, OrderGateState, gate_widened
 from .executor import DEFAULT_COOLDOWN_SEC, Executor
@@ -43,6 +46,15 @@ ORDER_SYNC_CLOSED_SEC = 900
 TICK_SEC = 1.0
 # 종목마스터(ka10099) 신선도 점검 주기(초). 장중에도 확인해 날짜가 바뀌면 그날 1회 갱신한다.
 MASTER_CHECK_SEC = 300
+
+# WS `0s` 215(장운영구분) 중 코스피/코스닥 "본장" 상태를 나타내는 코드만.
+# 그 외(NXT/선물옵션/시간외 단일가 등: a,b,g,h,o,s,e,f,P~V)는 본장과 무관하므로
+# market_open() 판단에 반영하지 않는다(키움 스펙 0s.215 전체 목록 참고).
+MAIN_MARKET_CODES = frozenset({"0", "2", "3", "4", "8", "9"})
+MAIN_MARKET_TEXT = {
+    "0": "장시작전", "3": "장시작", "2": "장마감전", "4": "장마감",
+    "8": "정규장마감", "9": "전체장마감",
+}
 
 # 자동거래(알고리즘 평가·주문) 상태를 웹 관제에 노출하는 server_status 컴포넌트
 AUTO_COMPONENT = "auto_trading"
@@ -143,6 +155,8 @@ class Engine:
         self.orders: OrderSyncService | None = None
         self.house: HousekeepingService | None = None
         self.executor: Executor | None = None
+        # 웹의 "지금 다시 조사" 요청 큐 처리기 (관찰 전용, 자동거래와 무관)
+        self.trend_requests: TrendRequestWorker | None = None
         self.run_id: int | None = None
         self._master_synced_date = None
 
@@ -381,6 +395,14 @@ class Engine:
         self._auto_trading.clear()
         self._publish_auto_status()
 
+        # 수동 재조사 요청 처리기. 컨텍스트는 **관찰 전용**(게이트 강제로 닫힘)으로 만든다
+        # → 이 경로로 만들어진 후보는 signal_log/orders 에 절대 남지 않는다.
+        self.trend_requests = TrendRequestWorker(
+            self.db, ctx_factory=lambda: self.build_context(observe_only=True),
+            market=self.market)
+        # 기동 시 1회: 처리 중이던 채로 죽은 요청 정리(다음 요청이 영영 막히지 않게)
+        self._safe("수동 재조사 요청 정리", self.trend_requests.cleanup_stale)
+
         self._safe("보관기간 정리", lambda: self.house.run_purge(
             self._retention_days(), self.cfg.logging.path))
         self._safe("종목마스터 갱신", self._sync_master_if_needed)
@@ -407,6 +429,7 @@ class Engine:
         last_orders = 0.0
         last_eval = 0.0
         last_master = 0.0
+        last_trend_req = 0.0
         while not self._stop.is_set():
             now_mono = time.monotonic()
             open_now = self.market_open()
@@ -431,6 +454,13 @@ class Engine:
                     self._safe("접수여부 불명 확인", self._review_pending_unknown)
                 # R-07: 주문번호 없이 SENT 로 남은 주문을 정리(영구 차단 방지)
                 self._safe("미확정 주문 정리", self._expire_unknown_orders)
+
+            # 웹의 "지금 다시 조사" 요청 — **자동거래·주문 게이트와 무관하게** 항상 확인한다
+            # (엔진이 돌고 있으면 된다). 관찰 전용이라 주문/신호는 만들어지지 않는다.
+            if self.trend_requests is not None \
+                    and now_mono - last_trend_req >= TREND_REQUEST_POLL_SEC:
+                last_trend_req = now_mono
+                self._safe("수동 재조사 요청 처리", self.trend_requests.poll_once)
 
             if self._reset_eval:
                 self._reset_eval = False
@@ -602,6 +632,9 @@ class Engine:
 
             res = self.executor.submit(ctx, sig)
             results.append(res)
+            # 트렌드 스캔 후보 ↔ signal_log 연결 (웹 조회용 기록, 주문 흐름과 무관)
+            if sig.meta.get("trend_candidate_id") and res.signal_id:
+                link_trend_signal(self.db, sig.meta["trend_candidate_id"], res.signal_id)
             if res.sent:
                 sent += 1
 
@@ -783,10 +816,19 @@ class Engine:
             self.orders.on_balance(values)
         elif rtype == TYPE_MARKET_TIME:
             code = str(values.get("215", "")).strip()
-            self._market_code = code or None
-            text = {"0": "장시작전", "3": "장시작", "2": "장마감", "4": "장마감"}.get(code, f"구분 {code}")
-            self._set_status("market", "ok" if code == "3" else "warn", text)
-            log.info("장운영 상태: %s (215=%s)", text, code)
+            # WS `0s` 의 215 는 코스피/코스닥 본장 상태(0/2/3/4/8/9)뿐 아니라
+            # NXT·선물옵션·시간외 알림(a/b/g/h/o/s/e/f/P~V 등)도 같은 필드로 함께 온다.
+            # 본장과 무관한 코드로 `_market_code` 를 덮어쓰면(예: 09:00 "3" 직후 NXT "R" 수신)
+            # market_open() 이 그 이후 계속 장외로 오판해 신규 신호가 영구히 끊긴다.
+            # 본장 상태를 나타내는 코드만 반영하고, 그 외는 표시만 하고 판단에는 쓰지 않는다.
+            if code in MAIN_MARKET_CODES:
+                self._market_code = code
+                self._set_status("market", "ok" if code == "3" else "warn",
+                                 MAIN_MARKET_TEXT.get(code, f"구분 {code}"))
+            else:
+                # 참고용 로그만 남기고 _market_code/상태는 유지한다.
+                log.debug("장운영 알림(본장 외): 215=%s", code)
+            log.info("장운영 상태: %s (215=%s)", MAIN_MARKET_TEXT.get(code, f"구분 {code}"), code)
 
     def _safe(self, what: str, fn) -> bool:
         """서비스 예외 격리."""

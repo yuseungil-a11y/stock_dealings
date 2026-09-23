@@ -56,6 +56,17 @@ ARCHIVE_RETENTION_MIN = 30
 PURGEABLE_TABLES = ("event_log", "api_call_log", "screening_result",
                     "event_archive", "api_error_log")
 
+# trend_scan_run 의 TEXT 컬럼(조사 요약)에 저장할 최대 길이
+TREND_TEXT_MAX = 8000
+
+
+def _trim_masked(text: str | None, limit: int) -> str | None:
+    """DB 저장 전 마스킹 + 길이 제한. 빈 값은 NULL."""
+    if text is None:
+        return None
+    out = mask_text(str(text))[:limit].strip()
+    return out or None
+
 
 def should_archive_event(level: str, category: str, message: str) -> bool:
     """이 이벤트를 `event_archive` 에도 남길지 판단한다.
@@ -553,6 +564,243 @@ class Database:
         sql = (f"INSERT INTO llm_decision_log ({', '.join(self._LLM_COLS)}) "
                f"VALUES ({', '.join(['%s'] * len(self._LLM_COLS))})")
         return self.insert(sql, vals)
+
+    def find_stocks_by_name(self, stk_nm: str) -> list[dict]:
+        """종목명이 **정확히 일치**하는 코스피/코스닥 종목(공백만 무시).
+
+        Claude 가 알려준 회사명을 종목코드로 바꾸는 유일한 경로다(추측 매칭 금지).
+        """
+        name = "".join(str(stk_nm or "").split())
+        if not name:
+            return []
+        return self.query(
+            "SELECT stk_cd, stk_nm, market_code, market_name, last_price, state, order_warning "
+            "FROM stock_master WHERE market_code IN ('0','10') "
+            "AND REPLACE(REPLACE(stk_nm, ' ', ''), '\t', '') = %s",
+            (name,))
+
+    # ================================================================== #
+    # 산업 트렌드 스캔 (claude_trend_scan)
+    # ================================================================== #
+    def trend_scan_run_on(self, scan_date: _dt.date) -> dict | None:
+        return self.query_one("SELECT * FROM trend_scan_run WHERE scan_date=%s", (scan_date,))
+
+    def start_trend_scan_run(self, scan_date: _dt.date, region_scope: str, model: str) -> int:
+        """오늘자 스캔 행을 만든다. 같은 날짜가 이미 있으면 UNIQUE 위반으로 예외가 난다
+        (프로세스가 재기동돼도 같은 날 두 번 조사하지 않게 하는 이중 방지선)."""
+        return self.insert(
+            "INSERT INTO trend_scan_run (scan_date, started_at, status, region_scope, model) "
+            "VALUES (%s,%s,'ok',%s,%s)",
+            (scan_date, now_kst(), str(region_scope)[:20], str(model)[:50]))
+
+    def finish_trend_scan_run(self, run_id: int, *, status: str = "ok",
+                              candidate_count: int = 0, signal_count: int = 0,
+                              domestic_theme_summary: str | None = None,
+                              research_summary: str | None = None,
+                              web_search_count: int | None = None,
+                              input_tokens: int | None = None,
+                              output_tokens: int | None = None,
+                              latency_ms: int | None = None,
+                              error_msg: str | None = None) -> int:
+        """스캔 결과 기록. 요약/오류 문구에는 마스킹을 한 번 더 적용한다(비밀값 방지)."""
+        return self.execute(
+            "UPDATE trend_scan_run SET finished_at=%s, status=%s, domestic_theme_summary=%s, "
+            "research_summary=%s, candidate_count=%s, signal_count=%s, web_search_count=%s, "
+            "input_tokens=%s, output_tokens=%s, latency_ms=%s, error_msg=%s WHERE id=%s",
+            (now_kst(), status if status in ("ok", "partial", "error") else "error",
+             _trim_masked(domestic_theme_summary, TREND_TEXT_MAX),
+             _trim_masked(research_summary, TREND_TEXT_MAX),
+             int(candidate_count), int(signal_count), web_search_count,
+             input_tokens, output_tokens, latency_ms,
+             _trim_masked(error_msg, 255), int(run_id)))
+
+    def insert_trend_candidate(self, run_id: int, *, region: str, theme: str,
+                               rationale: str | None = None, confidence: int | None = None,
+                               kiwoom_theme_cd: str | None = None,
+                               kiwoom_theme_nm: str | None = None,
+                               stk_cd: str | None = None, stk_nm: str | None = None,
+                               match_status: str = "unmatched",
+                               signal_id: int | None = None) -> int:
+        return self.insert(
+            "INSERT INTO trend_scan_candidate (run_id, region, theme, rationale, confidence, "
+            "kiwoom_theme_cd, kiwoom_theme_nm, stk_cd, stk_nm, match_status, signal_id) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (int(run_id), region if region in ("domestic", "global") else "domestic",
+             _trim_masked(theme, 120) or "-", _trim_masked(rationale, 500),
+             None if confidence is None else int(confidence),
+             (kiwoom_theme_cd or None), _trim_masked(kiwoom_theme_nm, 60),
+             (stk_cd or None), _trim_masked(stk_nm, 60), match_status, signal_id))
+
+    def set_trend_candidate_signal(self, candidate_id: int, signal_id: int) -> int:
+        return self.execute("UPDATE trend_scan_candidate SET signal_id=%s WHERE id=%s",
+                            (int(signal_id), int(candidate_id)))
+
+    def trend_scan_candidates(self, run_id: int) -> list[dict]:
+        return self.query("SELECT * FROM trend_scan_candidate WHERE run_id=%s ORDER BY id",
+                          (int(run_id),))
+
+    # -- 시도 감사로그 (append-only) ------------------------------------ #
+    def insert_trend_scan_attempt(self, scan_date: _dt.date, *, trigger_type: str,
+                                  status: str, requested_by: str | None = None,
+                                  region_scope: str | None = None, model: str | None = None,
+                                  candidate_count: int | None = None,
+                                  web_search_count: int | None = None,
+                                  input_tokens: int | None = None,
+                                  output_tokens: int | None = None,
+                                  latency_ms: int | None = None,
+                                  error_msg: str | None = None,
+                                  research_summary: str | None = None,
+                                  started_at: _dt.datetime | None = None,
+                                  finished_at: _dt.datetime | None = None) -> int:
+        """시도 1건을 **새 행으로 추가**한다. 기존 행은 절대 갱신·삭제하지 않는다.
+
+        `trend_scan_run` 은 하루 1행(최신 공식 결과)만 남지만, 이 테이블에는 실패한
+        시도까지 전부 남아 "그때 무슨 일이 있었는지"를 나중에 되짚을 수 있다.
+        """
+        return self.insert(
+            "INSERT INTO trend_scan_attempt (scan_date, trigger_type, requested_by, status, "
+            "region_scope, model, candidate_count, web_search_count, input_tokens, "
+            "output_tokens, latency_ms, error_msg, research_summary, started_at, finished_at) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (scan_date,
+             trigger_type if trigger_type in ("scheduled", "manual") else "scheduled",
+             _trim_masked(requested_by, 50),
+             status if status in ("ok", "partial", "error") else "error",
+             (str(region_scope)[:20] if region_scope else None),
+             (str(model)[:50] if model else None),
+             candidate_count, web_search_count, input_tokens, output_tokens, latency_ms,
+             _trim_masked(error_msg, 255), _trim_masked(research_summary, TREND_TEXT_MAX),
+             started_at or now_kst(), finished_at or now_kst()))
+
+    def trend_scan_attempts(self, scan_date: _dt.date) -> list[dict]:
+        return self.query(
+            "SELECT * FROM trend_scan_attempt WHERE scan_date=%s ORDER BY id", (scan_date,))
+
+    # -- 수동 재조사 결과 반영 (run UPSERT + 후보 교체, 한 트랜잭션) ----- #
+    def save_manual_trend_scan(self, scan_date: _dt.date, *, requested_by: str | None,
+                               status: str, region_scope: str, model: str,
+                               candidates: list[dict],
+                               domestic_theme_summary: str | None = None,
+                               research_summary: str | None = None,
+                               web_search_count: int | None = None,
+                               input_tokens: int | None = None,
+                               output_tokens: int | None = None,
+                               latency_ms: int | None = None,
+                               error_msg: str | None = None,
+                               started_at: _dt.datetime | None = None) -> int:
+        """수동 재조사 결과로 **오늘 행을 덮어쓰고** 후보를 통째로 교체한다.
+
+        `trend_scan_run` 은 `UNIQUE(scan_date)` 이므로 오늘 행이 있으면 갱신된다.
+        후보 삭제 → 재삽입을 한 트랜잭션으로 묶어, 웹 조회가 '후보 0건' 인 중간 상태를
+        보지 않게 한다. `signal_count` 는 **항상 0**(관찰 전용 경로라 주문·신호가 없다).
+        """
+        cand_sql = ("INSERT INTO trend_scan_candidate (run_id, region, theme, rationale, "
+                    "confidence, kiwoom_theme_cd, kiwoom_theme_nm, stk_cd, stk_nm, "
+                    "match_status) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)")
+        conn = self.conn()
+        conn.begin()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO trend_scan_run (scan_date, trigger_type, requested_by, "
+                    "started_at, finished_at, status, region_scope, model, "
+                    "domestic_theme_summary, research_summary, candidate_count, signal_count, "
+                    "web_search_count, input_tokens, output_tokens, latency_ms, error_msg) "
+                    "VALUES (%s,'manual',%s,%s,%s,%s,%s,%s,%s,%s,%s,0,%s,%s,%s,%s,%s) "
+                    "ON DUPLICATE KEY UPDATE trigger_type='manual', "
+                    "requested_by=VALUES(requested_by), started_at=VALUES(started_at), "
+                    "finished_at=VALUES(finished_at), status=VALUES(status), "
+                    "region_scope=VALUES(region_scope), model=VALUES(model), "
+                    "domestic_theme_summary=VALUES(domestic_theme_summary), "
+                    "research_summary=VALUES(research_summary), "
+                    "candidate_count=VALUES(candidate_count), signal_count=0, "
+                    "web_search_count=VALUES(web_search_count), "
+                    "input_tokens=VALUES(input_tokens), output_tokens=VALUES(output_tokens), "
+                    "latency_ms=VALUES(latency_ms), error_msg=VALUES(error_msg)",
+                    (scan_date, _trim_masked(requested_by, 50), started_at or now_kst(),
+                     now_kst(), status if status in ("ok", "partial", "error") else "error",
+                     str(region_scope)[:20], str(model)[:50],
+                     _trim_masked(domestic_theme_summary, TREND_TEXT_MAX),
+                     _trim_masked(research_summary, TREND_TEXT_MAX),
+                     int(len(candidates)), web_search_count, input_tokens, output_tokens,
+                     latency_ms, _trim_masked(error_msg, 255)))
+                cur.execute("SELECT id FROM trend_scan_run WHERE scan_date=%s", (scan_date,))
+                run_id = int((cur.fetchone() or {}).get("id"))
+                cur.execute("DELETE FROM trend_scan_candidate WHERE run_id=%s", (run_id,))
+                rows = [(run_id,
+                         c.get("region") if c.get("region") in ("domestic", "global")
+                         else "domestic",
+                         _trim_masked(c.get("theme"), 120) or "-",
+                         _trim_masked(c.get("rationale"), 500),
+                         None if c.get("confidence") is None else int(c["confidence"]),
+                         c.get("kiwoom_theme_cd") or None,
+                         _trim_masked(c.get("kiwoom_theme_nm"), 60),
+                         c.get("stk_cd") or None, _trim_masked(c.get("stk_nm"), 60),
+                         c.get("match_status") or "unmatched") for c in candidates]
+                if rows:
+                    cur.executemany(cand_sql, rows)
+            conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+            raise
+        return run_id
+
+    # -- 수동 재조사 요청 큐 (웹이 INSERT, 서버만 갱신) ------------------ #
+    def pending_trend_scan_request(self) -> dict | None:
+        """가장 오래된 pending 요청 1건(claim 전 조회)."""
+        return self.query_one(
+            "SELECT * FROM trend_scan_request WHERE status='pending' "
+            "ORDER BY requested_at, id LIMIT 1")
+
+    def count_processing_trend_requests(self) -> int:
+        return int(self.scalar(
+            "SELECT COUNT(*) AS n FROM trend_scan_request WHERE status='processing'",
+            default=0) or 0)
+
+    def claim_trend_scan_request(self, max_tries: int = 5) -> dict | None:
+        """pending 요청 1건을 **원자적으로** claim 한다. 못 잡으면 None.
+
+        조회와 갱신 사이에 다른 프로세스가 먼저 집을 수 있으므로,
+        `UPDATE ... WHERE id=%s AND status='pending'` 의 **영향 행 수**로 승자를 가린다
+        (0이면 남이 가져간 것 → 다음 건으로).
+        """
+        for _ in range(max(1, int(max_tries))):
+            row = self.pending_trend_scan_request()
+            if row is None:
+                return None
+            won = self.execute(
+                "UPDATE trend_scan_request SET status='processing' "
+                "WHERE id=%s AND status='pending'", (int(row["id"]),))
+            if won:
+                out = dict(row)
+                out["status"] = "processing"
+                return out
+        return None
+
+    def finish_trend_scan_request(self, request_id: int, *, status: str,
+                                  run_id: int | None = None,
+                                  error_msg: str | None = None) -> int:
+        return self.execute(
+            "UPDATE trend_scan_request SET status=%s, run_id=%s, error_msg=%s, processed_at=%s "
+            "WHERE id=%s",
+            (status if status in ("pending", "processing", "done", "error") else "error",
+             None if run_id is None else int(run_id), _trim_masked(error_msg, 255),
+             now_kst(), int(request_id)))
+
+    def expire_stale_trend_requests(self, minutes: int = 10,
+                                    reason: str = "서버 재시작으로 중단") -> int:
+        """`processing` 인 채 오래 멈춰 있는 요청을 `error` 로 정리한다.
+
+        처리 도중 서버가 죽으면 그 행이 영원히 `processing` 으로 남아 다음 요청이
+        영영 처리되지 않는다(동시 1건 제한). 그 교착을 푸는 방어 코드다.
+        """
+        return self.execute(
+            "UPDATE trend_scan_request SET status='error', error_msg=%s, processed_at=%s "
+            "WHERE status='processing' AND requested_at < (NOW() - INTERVAL %s MINUTE)",
+            (_trim_masked(reason, 255), now_kst(), max(1, int(minutes))))
 
     def llm_usage_today(self) -> dict[str, int]:
         """당일 Claude 실제 호출 수와 토큰 사용량(캐시 적중분 제외)."""

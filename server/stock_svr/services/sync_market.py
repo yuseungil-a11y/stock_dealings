@@ -1,4 +1,5 @@
-"""시세/순위/종목마스터 조회 (ka10099, ka10081, ka10027, ka10023, ka10001) — 읽기 전용 TR."""
+"""시세/순위/종목마스터/테마 조회 (ka10099, ka10081, ka10027, ka10023, ka10001,
+ka90001, ka90002) — 읽기 전용 TR."""
 from __future__ import annotations
 
 import datetime as _dt
@@ -18,6 +19,8 @@ MARKET_KOSDAQ = "10"
 # 순위 API 응답 캐시 수명(초) - 불필요한 실서버 호출을 줄인다
 RANK_CACHE_SEC = 50
 BARS_CACHE_SEC = 600
+# 테마(ka90001/ka90002)는 하루 1회 트렌드 스캔에서만 쓰므로 길게 캐시한다
+THEME_CACHE_SEC = 600
 
 
 class MarketService:
@@ -141,6 +144,61 @@ class MarketService:
 
     def record_screening(self, source_api: str, items: list[dict]) -> int:
         return self.db.insert_screening(now_kst(), source_api, items)
+
+    # -- 테마 (claude_trend_scan 전용, 읽기 전용) ------------------------ #
+    def themes(self, flu_pl_amt_tp: str = "3", stex_tp: str = "1",
+               date_tp: str = "10") -> list[dict]:
+        """ka90001 테마그룹별요청. `flu_pl_amt_tp='3'` = 상위등락률 순.
+
+        전체검색(`qry_tp='0'`)이라 첫 페이지만 받아도 상위 테마가 모두 들어온다
+        (연속조회를 따라가지 않아 호출 1회로 끝난다).
+        """
+        key = f"ka90001:{flu_pl_amt_tp}:{stex_tp}:{date_tp}"
+        hit = self._cached(key, THEME_CACHE_SEC)
+        if hit is not None:
+            return hit  # type: ignore[return-value]
+        body = {"qry_tp": "0", "stk_cd": "", "date_tp": date_tp, "thema_nm": "",
+                "flu_pl_amt_tp": flu_pl_amt_tp, "stex_tp": stex_tp}
+        data, _ = self.rest.call("ka90001", body)
+        out = []
+        for r in rows(data, "thema_grp"):
+            code = (r.get("thema_grp_cd") or "").strip()
+            name = (r.get("thema_nm") or "").strip()
+            if not code or not name:
+                continue
+            out.append({
+                "thema_grp_cd": code[:20],
+                "thema_nm": name[:60],
+                "stk_num": to_int(r.get("stk_num")),
+                "flu_rt": to_dec(r.get("flu_rt")),
+                "dt_prft_rt": to_dec(r.get("dt_prft_rt")),
+                "rising_stk_num": to_int(r.get("rising_stk_num")),
+                "main_stk": (r.get("main_stk") or "").strip()[:200],
+            })
+        return self._store(key, out)  # type: ignore[return-value]
+
+    def theme_members(self, thema_grp_cd: str, stex_tp: str = "1",
+                      date_tp: str = "2") -> list[dict]:
+        """ka90002 테마구성종목요청."""
+        key = f"ka90002:{thema_grp_cd}:{stex_tp}:{date_tp}"
+        hit = self._cached(key, THEME_CACHE_SEC)
+        if hit is not None:
+            return hit  # type: ignore[return-value]
+        body = {"date_tp": date_tp, "thema_grp_cd": str(thema_grp_cd), "stex_tp": stex_tp}
+        data, _ = self.rest.call("ka90002", body)
+        out = []
+        for r in rows(data, "thema_comp_stk"):
+            code = norm_stk_cd(r.get("stk_cd"))
+            if not code:
+                continue
+            out.append({
+                "stk_cd": code,
+                "stk_nm": (r.get("stk_nm") or "").strip()[:60],
+                "cur_prc": abs(to_int(r.get("cur_prc"), 0) or 0),
+                "flu_rt": to_dec(r.get("flu_rt")),
+                "acc_trde_qty": to_int(r.get("acc_trde_qty")),
+            })
+        return self._store(key, out)  # type: ignore[return-value]
 
     # ------------------------------------------------------------------ #
     def quote(self, stk_cd: str) -> dict | None:

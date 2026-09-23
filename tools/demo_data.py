@@ -14,6 +14,12 @@
     llm_decision_log 는 stk_cd 접두 'DEMO' 로 격리한다.
   * 거래 분석 화면 검증용으로 신호 → 주문 → 체결 → order_event 타임라인
     (성공 / 부분체결 / 거부 / 실패 / 차단 / 관찰만) 시나리오를 함께 적재한다.
+  * 산업 트렌드 화면 검증용 trend_scan_run / trend_scan_candidate 데모는
+    research_summary · domestic_theme_summary · theme 의 '[DEMO]' 마커로 격리한다.
+    scan_date 는 UNIQUE 이므로 비어 있는 날짜만 골라 실데이터를 덮어쓰지 않는다.
+  * 스캔 시도 이력 trend_scan_attempt 데모(정상/부분성공/오류 · 예약/수동 혼합)와
+    수동 재조사 요청 trend_scan_request 데모는 error_msg · research_summary · requested_by 의
+    '[DEMO]' 마커로 격리한다(요청 행은 status='done' 으로 넣어 서버가 처리 대상으로 보지 않게 한다).
   * 보유종목에는 상장폐지 종목(현재가 0, 종목명 '(폐)' 시작) 1건을 포함해
     웹 화면의 상장폐지 표시/실제 수익률 계산을 검증할 수 있게 한다.
   * 전역 표(system_setting / server_status / algorithm_selection)는 건드리지 않는다.
@@ -83,6 +89,14 @@ def connect():
         autocommit=False,
         cursorclass=pymysql.cursors.DictCursor,
     )
+
+
+def table_exists(cur, name: str) -> bool:
+    """표 존재 여부(이름은 이 파일에 고정된 값만 넘어온다)."""
+    cur.execute(
+        "SELECT COUNT(*) c FROM information_schema.tables"
+        " WHERE table_schema = DATABASE() AND table_name = %s", (name,))
+    return int(cur.fetchone()["c"]) > 0
 
 
 def php_password_hash(plain: str) -> str:
@@ -283,6 +297,199 @@ def load_analysis(cur, acct: int, run_id: int, now: dt.datetime) -> None:
         "INSERT INTO api_error_log (created_at, api_id, http_status, return_code, return_msg, elapsed_ms)"
         " VALUES (%s,%s,%s,%s,%s,%s)", api_rows)
     print(f"api_error_log: {len(api_rows)}건")
+
+
+# ------------------------------------------------- 산업 트렌드 스캔 데모
+def demo_signal_id(cur, stk_cd: str) -> int | None:
+    """
+    DEMO 마커가 붙은 signal_log 매수 신호 1건의 id (후보 → 신호 연결 검증용).
+    주문까지 이어진 신호를 우선 고른다(웹 화면의 '주문 보기' 링크 검증).
+    """
+    cur.execute(
+        "SELECT id FROM signal_log WHERE detail LIKE %s AND stk_cd = %s AND signal_type = 'BUY'"
+        " ORDER BY (order_id IS NOT NULL) DESC, id DESC LIMIT 1", (DEMO_MARK + "%", stk_cd))
+    row = cur.fetchone()
+    return int(row["id"]) if row else None
+
+
+def free_scan_date(cur, start: dt.date, used: set) -> dt.date | None:
+    """trend_scan_run.scan_date 는 UNIQUE 이므로 비어 있는 날짜만 고른다(실데이터 보호)."""
+    for i in range(0, 40):
+        d = start - dt.timedelta(days=i)
+        if d in used:
+            continue
+        cur.execute("SELECT 1 FROM trend_scan_run WHERE scan_date = %s", (d,))
+        if cur.fetchone() is None:
+            return d
+    return None
+
+
+def load_trend(cur, now: dt.datetime) -> None:
+    """
+    웹 '전략 → 산업 트렌드' 화면 검증용 데모.
+      run 2건(정상 1 / 부분 성공 1) + 후보 8건
+      (국내 kiwoom_theme_member 3 · 해외 name_matched 2 · unmatched 3,
+       확신도 다양 + NULL 1건, 일부는 signal_log 연결)
+    격리: research_summary/domestic_theme_summary/theme 앞에 '[DEMO]' 마커를 붙여 clear 로 정확히 회수한다.
+    """
+    if not table_exists(cur, "trend_scan_run") or not table_exists(cur, "trend_scan_candidate"):
+        print("trend_scan_*: 표가 없어 산업 트렌드 데모를 건너뜁니다.")
+        return
+
+    used: set = set()
+    d1 = free_scan_date(cur, now.date(), used)
+    if d1 is not None:
+        used.add(d1)
+    d2 = free_scan_date(cur, now.date() - dt.timedelta(days=1), used)
+    if d2 is not None:
+        used.add(d2)
+    if d1 is None or d2 is None:
+        print("trend_scan_run: 비어 있는 scan_date 를 찾지 못해 산업 트렌드 데모를 건너뜁니다.")
+        return
+    if d1 != now.date():
+        print(f"trend_scan_run: 오늘({now.date()}) 실행 기록이 이미 있어 {d1} 로 적재합니다(실데이터 보존).")
+
+    xss = "<script>alert('xss')</script>"
+    theme_summary = (
+        f"{DEMO_MARK} ka90001 상위 테마 (등락률 기준)\n"
+        "  1. 반도체 대표주      +3.82%  (구성 42종목)\n"
+        "  2. 반도체 소재·장비    +2.95%  (구성 61종목)\n"
+        "  3. 2차전지            -1.24%  (구성 55종목)\n"
+        "  4. 전력설비           +1.71%  (구성 33종목)\n"
+        f"  5. 이스케이프 검증    {xss}\n")
+    research_summary = (
+        f"{DEMO_MARK} [1단계 웹 조사 요약]\n"
+        "국내: AI 서버 투자 확대로 HBM·파운드리 가동률 상승. 전력설비는 데이터센터 증설 수혜.\n"
+        "해외: 미국 하이퍼스케일러 설비투자 가이던스 상향, 유럽 전력망 교체 수요 지속.\n"
+        "리스크: 환율 변동성과 관세 이슈. 단기 급등 구간은 분할 접근 권고.\n"
+        f"이스케이프·개행 검증: {xss} <img src=x onerror=alert(1)>\n"
+        '따옴표 검증: " onmouseover=alert(1) x="\n')
+
+    runs = [
+        # (scan_date, status, region_scope, cand_cnt, sig_cnt, websearch, in_tok, out_tok, latency, err, 시작분)
+        (d1, "ok", "domestic_global", 6, 2, 9, 18_400, 3_260, 41_200, None, 8),
+        (d2, "partial", "domestic_global", 2, 0, 3, 9_100, 1_040, 26_500,
+         f"{DEMO_MARK} 해외 조사 단계 웹검색 실패(429) — 국내 결과만 반영", 8),
+    ]
+    run_ids = []
+    for (sd, status, scope, cc, sc, ws, it, ot, lat, err, hh) in runs:
+        started = dt.datetime.combine(sd, dt.time(hh, 40, 0))
+        cur.execute(
+            "INSERT INTO trend_scan_run (scan_date, started_at, finished_at, status, region_scope, model,"
+            " domestic_theme_summary, research_summary, candidate_count, signal_count, web_search_count,"
+            " input_tokens, output_tokens, latency_ms, error_msg)"
+            " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (sd, started, started + dt.timedelta(milliseconds=lat), status, scope, "claude-sonnet-4-5",
+             theme_summary, research_summary, cc, sc, ws, it, ot, lat, err))
+        run_ids.append(cur.lastrowid)
+
+    # 하나는 주문까지 이어진 신호(DEMOA001), 하나는 신호만 있는 종목으로 연결해 링크 두 갈래를 모두 만든다.
+    sid1 = demo_signal_id(cur, "DEMOA001")
+    sid2 = demo_signal_id(cur, "000660")
+
+    # (run idx, region, theme, rationale, confidence, theme_cd, theme_nm, stk_cd, stk_nm, match_status, signal_id)
+    cands = [
+        (0, "domestic", f"{DEMO_MARK} AI 반도체 · 파운드리",
+         "AI 서버용 고성능 로직 수요가 이어지며 파운드리 가동률이 개선되는 구간입니다.",
+         88, "177", "반도체 대표주", "DEMOA001", "데모성공종목", "kiwoom_theme_member", sid1),
+        (0, "domestic", f"{DEMO_MARK} HBM · 고대역폭 메모리",
+         "HBM 공급 계약이 확대되고 있으며 해외 가속기 업체의 설비투자 가이던스가 상향됐습니다.",
+         79, "178", "반도체 소재·장비", "000660", "SK하이닉스", "kiwoom_theme_member", sid2),
+        (0, "domestic", f"{DEMO_MARK} 2차전지 소재(양극재)",
+         "전기차 수요 둔화로 단기 모멘텀은 약하나 가격 저점 논의가 나오는 구간입니다.",
+         52, "264", "2차전지", "247540", "에코프로비엠", "kiwoom_theme_member", None),
+        (0, "global", f"{DEMO_MARK} 글로벌 클라우드 · 데이터센터",
+         "해외 하이퍼스케일러 설비투자 확대 — 국내 상장 종목 중 이름이 일치하는 종목으로 연결했습니다.",
+         66, None, None, "035420", "NAVER", "name_matched", None),
+        (0, "global", f"{DEMO_MARK} 전력 인프라 · 변압기 {xss}",
+         f"노후 전력망 교체 수요가 이어집니다. 이스케이프 검증 {xss} <img src=x onerror=alert(1)>",
+         61, None, None, "051910", "LG화학", "name_matched", None),
+        (0, "global", f"{DEMO_MARK} 비만 치료제(GLP-1) 밸류체인",
+         f"해외 제약 테마로 국내 대응 종목을 확정하지 못했습니다. \" onmouseover=alert(1) x=\" {xss}",
+         44, None, None, None, None, "unmatched", None),
+        (1, "domestic", f"{DEMO_MARK} 우주항공 · 위성통신",
+         "정부 예산 증액 논의가 있으나 테마 매칭에 실패해 종목을 특정하지 않았습니다.",
+         None, None, None, None, None, "unmatched", None),
+        (1, "domestic", f"{DEMO_MARK} 희토류 · 핵심광물", None,
+         35, None, None, None, None, "unmatched", None),
+    ]
+    rows = [(run_ids[c[0]], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9], c[10],
+             now - dt.timedelta(days=c[0], minutes=5)) for c in cands]
+    cur.executemany(
+        "INSERT INTO trend_scan_candidate (run_id, region, theme, rationale, confidence, kiwoom_theme_cd,"
+        " kiwoom_theme_nm, stk_cd, stk_nm, match_status, signal_id, created_at)"
+        " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)", rows)
+    linked = sum(1 for c in cands if c[10] is not None)
+    print(f"trend_scan_run: {len(run_ids)}건({d1}, {d2}) / trend_scan_candidate: {len(rows)}건"
+          f" (신호 연결 {linked}건)")
+    if linked < 2:
+        print("  주의: DEMO signal_log 매수 신호를 찾지 못해 일부 후보의 신호 연결이 비었습니다.")
+    if d1 == now.date():
+        print("  주의: 오늘 scan_date 를 데모가 점유합니다(UNIQUE). 서버 트렌드 스캔 전에 clear 를 실행하세요.")
+
+
+def load_trend_attempt(cur, now: dt.datetime) -> None:
+    """
+    웹 '전략 → 산업 트렌드' 화면의 **스캔 시도 이력**(trend_scan_attempt) 검증용 데모.
+      정상 1 · 부분 성공 2 · 오류 1, 예약 2 · 수동 2 (요청자 표시 검증)
+    trend_scan_run 과 달리 scan_date UNIQUE 제약이 없어 오늘 날짜에도 안전하게 덧붙일 수 있다
+    (실데이터를 수정하지 않고 append 만 한다).
+    격리: research_summary 앞의 '[DEMO]' 마커(+ 수동 행은 requested_by 도 '[DEMO]' 로 시작).
+    같이 넣는 trend_scan_request 데모 1건은 status='done' 으로 넣어
+    서버의 요청 처리 루프가 이를 새 요청으로 집어가지 않게 한다.
+    """
+    if not table_exists(cur, "trend_scan_attempt"):
+        print("trend_scan_attempt: 표가 없어 시도 이력 데모를 건너뜁니다.")
+        return
+
+    xss = "<script>alert('xss')</script>"
+    ok_summary = (
+        f"{DEMO_MARK} [1단계 웹 조사 요약]\n"
+        "웹 검색 6회 성공. 국내: HBM·전력설비 수급 개선. 해외: 데이터센터 증설 지속.\n"
+        f"이스케이프·개행 검증: {xss} <img src=x onerror=alert(1)>\n")
+    fail_summary = (
+        f"{DEMO_MARK} 검색을 통해 최신 동향을 확인하겠습니다.\n"
+        "## 조사 결과 보고서\n\n---\n\n### 먼저 알려드릴 중요한 한계\n\n"
+        "**이번 조사에서 웹 검색을 수행하지 못했습니다.** 검색 도구 호출이 사용량 한도 초과로 "
+        "모두 실패했습니다(3회 시도, 전부 실패).\n"
+        '조사 규칙 1번("반드시 웹 검색으로 확인한 최신 사실만 쓴다")에 따라 확신도를 낮게 매겼습니다.\n'
+        f'따옴표 · 이스케이프 검증: " onmouseover=alert(1) x=" {xss}\n')
+    err_summary = f"{DEMO_MARK} 조사 응답을 받기 전에 실행이 중단되었습니다(원문 없음).\n"
+
+    # (scan_date, trigger, requested_by, status, cand, websearch, in_tok, out_tok, latency, err, summary, 시작시각)
+    att = [
+        (now.date(), "scheduled", None, "partial", 10, 3, 35_878, 4_948, 69_953,
+         f"{DEMO_MARK} 웹검색 3회 시도 전부 실패(사용량 한도 초과) - 검색 없이 테마 데이터만으로 분석",
+         fail_summary, dt.datetime.combine(now.date(), dt.time(8, 30, 25))),
+        (now.date(), "manual", f"{DEMO_MARK}admin", "ok", 8, 6, 41_120, 5_310, 58_400, None,
+         ok_summary, now - dt.timedelta(minutes=95)),
+        (now.date() - dt.timedelta(days=1), "scheduled", None, "ok", 10, 6, 33_500, 4_120, 61_300, None,
+         ok_summary, dt.datetime.combine(now.date() - dt.timedelta(days=1), dt.time(8, 30, 12))),
+        (now.date() - dt.timedelta(days=1), "manual", f"{DEMO_MARK}admin", "error", 0, 0, 1_240, 0, 8_900,
+         f"{DEMO_MARK} Anthropic API 오류(529 overloaded) - 재조사 실패",
+         err_summary, now - dt.timedelta(days=1, minutes=30)),
+    ]
+    # created_at 도 명시해 넣는다(기본값 NOW() 로 두면 모든 데모 행이 "방금 시도"로 보여
+    # 화면의 중복 요청 방지 가드까지 걸린다).
+    rows = [(sd, tt, rb, st, "domestic_global", "claude-sonnet-4-5", cc, ws, it, ot, lat, err, rs,
+             started, started + dt.timedelta(milliseconds=lat),
+             started + dt.timedelta(milliseconds=lat) + dt.timedelta(seconds=2))
+            for (sd, tt, rb, st, cc, ws, it, ot, lat, err, rs, started) in att]
+    cur.executemany(
+        "INSERT INTO trend_scan_attempt (scan_date, trigger_type, requested_by, status, region_scope, model,"
+        " candidate_count, web_search_count, input_tokens, output_tokens, latency_ms, error_msg,"
+        " research_summary, started_at, finished_at, created_at)"
+        " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)", rows)
+    print(f"trend_scan_attempt: {len(rows)}건 (정상 2 · 부분 성공 1 · 오류 1 / 예약 2 · 수동 2)")
+
+    if table_exists(cur, "trend_scan_request"):
+        # 처리 완료(done) 상태로만 넣는다 — 서버가 새 요청으로 집어가지 않도록.
+        cur.execute(
+            "INSERT INTO trend_scan_request (requested_at, requested_by, status, run_id, error_msg, processed_at)"
+            " VALUES (%s,%s,'done',NULL,%s,%s)",
+            (now - dt.timedelta(minutes=100), f"{DEMO_MARK}admin",
+             f"{DEMO_MARK} 화면 검증용 요청(서버 처리 대상 아님)", now - dt.timedelta(minutes=95)))
+        print("trend_scan_request: 1건 (status=done, 서버 처리 대상 아님)")
 
 
 # ----------------------------------------------------------------- 적재
@@ -575,6 +782,12 @@ def load(conn) -> None:
         # ---------------------------------------------------- 거래 분석 데모
         load_analysis(cur, acct, run_id, now)
 
+        # ---------------------------------------------------- 산업 트렌드 스캔 데모
+        load_trend(cur, now)
+
+        # ---------------------------------------------------- 스캔 시도 이력 데모
+        load_trend_attempt(cur, now)
+
     conn.commit()
     print("\nDEMO 데이터 적재 완료. 검증 후 반드시 `demo_data.py clear` 를 실행하세요.")
 
@@ -613,6 +826,30 @@ def clear(conn) -> None:
         deleted["algo_run"] = cur.rowcount
         cur.execute("DELETE FROM algorithm_param_history WHERE changed_by=%s", (DEMO_AUTHOR,))
         deleted["algorithm_param_history"] = cur.rowcount
+        # 산업 트렌드 스캔 데모 (후보 → 실행 순서로 지운다: 외래키)
+        if table_exists(cur, "trend_scan_run") and table_exists(cur, "trend_scan_candidate"):
+            cur.execute("SELECT id FROM trend_scan_run WHERE research_summary LIKE %s", (DEMO_MARK + "%",))
+            ids = [int(r["id"]) for r in cur.fetchall()]
+            if ids:
+                ph = ",".join(["%s"] * len(ids))
+                cur.execute(f"DELETE FROM trend_scan_candidate WHERE run_id IN ({ph})", ids)
+                deleted["trend_scan_candidate"] = cur.rowcount
+                cur.execute(f"DELETE FROM trend_scan_run WHERE id IN ({ph})", ids)
+                deleted["trend_scan_run"] = cur.rowcount
+            else:
+                deleted["trend_scan_candidate"] = 0
+                deleted["trend_scan_run"] = 0
+            # 안전망: 마커가 남은 후보 행(실행이 먼저 지워진 경우)
+            cur.execute("DELETE FROM trend_scan_candidate WHERE theme LIKE %s", (DEMO_MARK + "%",))
+            deleted["trend_scan_candidate(mark)"] = cur.rowcount
+        # 스캔 시도 이력 · 재조사 요청 데모
+        if table_exists(cur, "trend_scan_attempt"):
+            cur.execute("DELETE FROM trend_scan_attempt WHERE research_summary LIKE %s", (DEMO_MARK + "%",))
+            deleted["trend_scan_attempt"] = cur.rowcount
+        if table_exists(cur, "trend_scan_request"):
+            cur.execute("DELETE FROM trend_scan_request WHERE requested_by LIKE %s", (DEMO_MARK + "%",))
+            deleted["trend_scan_request"] = cur.rowcount
+
         cur.execute("DELETE FROM app_login_log WHERE username=%s", (DEMO_LOCK_USER,))
         deleted["app_login_log"] = cur.rowcount
         cur.execute("DELETE FROM app_user WHERE username=%s", (DEMO_LOCK_USER,))
@@ -649,6 +886,13 @@ def status(conn) -> int:
             ("app_user", "username = %s", DEMO_LOCK_USER),
             ("app_login_log", "username = %s", DEMO_LOCK_USER),
         ]
+        if table_exists(cur, "trend_scan_run") and table_exists(cur, "trend_scan_candidate"):
+            checks.append(("trend_scan_run", "research_summary LIKE %s", DEMO_MARK + "%"))
+            checks.append(("trend_scan_candidate", "theme LIKE %s", DEMO_MARK + "%"))
+        if table_exists(cur, "trend_scan_attempt"):
+            checks.append(("trend_scan_attempt", "research_summary LIKE %s", DEMO_MARK + "%"))
+        if table_exists(cur, "trend_scan_request"):
+            checks.append(("trend_scan_request", "requested_by LIKE %s", DEMO_MARK + "%"))
         for tbl, cond, val in checks:
             cur.execute(f"SELECT COUNT(*) c FROM {tbl} WHERE {cond}", (val,))
             c = cur.fetchone()["c"]

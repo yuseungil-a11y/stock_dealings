@@ -92,6 +92,8 @@ switch ($r) {
                 'fail_24h' => $d['fail_24h'],
             ],
             'llm' => $d['llm'],
+            // 오늘 산업 트렌드 스캔 요약(오늘 실행이 없으면 null)
+            'trend' => $d['trend'],
             'components' => $status,
             'events' => repo_recent_events(10),
         ]);

@@ -28,7 +28,9 @@ INSERT INTO algorithm (code, name, role, description, is_locked, sort_order) VAL
  ('universe_filter',     '종목 유니버스 필터(시가총액·주가)', 'filter',
   '코스피/코스닥 종목마스터(ka10099)의 상장주식수x전일종가로 시가총액 순위를 만들어, 순위 상위 N·시가총액 하한·1주 가격 범위를 벗어나는 **신규 매수 신호만** 차단한다(매도·손절·청산은 관여하지 않음). 우선주·스팩·관리/거래정지/투자유의 종목 제외 옵션 제공. 종목마스터가 비었거나 오래됐으면 신규 매수를 차단한다.', 0, 35),
  ('claude_advisor',      'Claude 거부권 필터',       'filter',
-  'risk_guard 까지 모두 통과해 곧 주문될 **매수 신호만** Claude API 로 한 번 더 검토해 위험하면 차단한다(1단계 거부권). 매도·손절·청산 신호는 검토하지 않으며, 오류·저확신·상한 초과 시 기본값은 차단(fail_mode). 종목 시세와 최근 일봉만 전송하고 계좌·잔고·키는 전송하지 않는다.', 0, 50)
+  'risk_guard 까지 모두 통과해 곧 주문될 **매수 신호만** Claude API 로 한 번 더 검토해 위험하면 차단한다(1단계 거부권). 매도·손절·청산 신호는 검토하지 않으며, 오류·저확신·상한 초과 시 기본값은 차단(fail_mode). 종목 시세와 최근 일봉만 전송하고 계좌·잔고·키는 전송하지 않는다.', 0, 50),
+ ('claude_trend_scan',   '산업 트렌드 스캔(Claude)', 'entry',
+  '하루 1회(scan_time), 국내(ka90001 테마그룹 등락률)+해외 산업 동향을 Claude 웹 검색으로 조사해 유망 테마를 뽑고, 국내 종목은 ka90002 테마구성종목 또는 종목마스터 이름 매칭으로만 확정한다(매칭 실패 종목은 매수하지 않고 후보로만 기록). 확정 종목을 매수 후보로 만들어 다른 진입 알고리즘과 동일하게 risk_guard 등 전 안전장치를 통과해야 주문된다. 후보/미매칭 내역은 웹 "전략 > 산업 트렌드"에서 조회 가능.', 0, 15)
 ON DUPLICATE KEY UPDATE name=VALUES(name), role=VALUES(role), description=VALUES(description),
                         is_locked=VALUES(is_locked), sort_order=VALUES(sort_order);
 
@@ -111,17 +113,18 @@ ON DUPLICATE KEY UPDATE label=VALUES(label), value_type=VALUES(value_type), defa
 INSERT INTO algorithm_param_def (algorithm_id, param_key, label, value_type, default_value, min_value, max_value, enum_options, unit, description, sort_order)
 SELECT a.id, p.k, p.label, p.t, p.d, p.mn, p.mx, p.eo, p.u, p.ds, p.so FROM algorithm a JOIN (
  SELECT 'use_kospi'         k,'코스피 포함'         label,'bool' t,'1' d,NULL mn,NULL mx,NULL eo,NULL u,'1이면 코스피(거래소) 종목을 매수 대상에 포함' ds,1 so UNION ALL
- SELECT 'use_kosdaq',        '코스닥 포함',         'bool',   '1',     NULL,NULL,        NULL,NULL,'1이면 코스닥 종목을 매수 대상에 포함 (코스피·코스닥 모두 끄면 파라미터 오류)',2 UNION ALL
- SELECT 'rank_scope',        '순위 기준',           'enum',   'per_market',NULL,NULL,    'per_market:시장별 순위,combined:코스피+코스닥 합산 순위',NULL,'시가총액 순위를 시장별로 매길지(코스피 100 + 코스닥 100) 합산으로 매길지',3 UNION ALL
- SELECT 'top_n',             '시가총액 상위 N',     'int',    '100',   '1','2000',       NULL,'개','시가총액 순위 상위 N개만 거래 대상',4 UNION ALL
- SELECT 'min_market_cap_eok','최소 시가총액',       'int',    '0',     '0','100000000',  NULL,'억원','이 시가총액 미만 종목 제외. 0 이면 사용 안 함',5 UNION ALL
- SELECT 'min_price',         '최소 주가(1주)',      'int',    '50000', '0','10000000',   NULL,'원','1주 가격이 이 값 미만인 종목 제외. 0 이면 사용 안 함. risk_guard 의 종목당 유효 한도보다 크면 1주도 살 수 없다',6 UNION ALL
- SELECT 'max_price',         '최대 주가(1주)',      'int',    '0',     '0','100000000',  NULL,'원','1주 가격이 이 값 초과인 종목 제외. 0 이면 사용 안 함(0보다 크면 최소 주가 이상이어야 함)',7 UNION ALL
- SELECT 'exclude_preferred', '우선주 제외',         'bool',   '1',     NULL,NULL,        NULL,NULL,'1이면 우선주(삼성전자우 등) 제외. 보통주가 함께 상장된 경우에만 우선주로 판정',8 UNION ALL
- SELECT 'exclude_spac',      '스팩 제외',           'bool',   '1',     NULL,NULL,        NULL,NULL,'1이면 종목명에 스팩이 들어간 기업인수목적회사 제외',9 UNION ALL
- SELECT 'exclude_warning',   '관리·경고 종목 제외', 'bool',   '1',     NULL,NULL,        NULL,NULL,'1이면 관리종목·거래정지·정리매매·투자유의/경고/위험(order_warning<>0) 종목 제외',10 UNION ALL
- SELECT 'apply_to',          '적용 대상',           'enum',   'entry', NULL,NULL,        'entry:신규 진입 매수만,entry_and_avg:신규 진입 + 물타기',NULL,'어떤 매수 신호에 적용할지. 매도·손절·청산에는 어떤 설정에서도 관여하지 않는다',11 UNION ALL
- SELECT 'stale_days',        '종목마스터 허용 경과일','int',  '5',     '1','30',         NULL,'일','종목마스터 갱신이 이 일수보다 오래되면 신규 매수 차단',12
+ SELECT 'use_kosdaq',        '코스닥 포함',         'bool',   '1',     NULL,NULL,        NULL,NULL,'1이면 코스닥 종목을 매수 대상에 포함',2 UNION ALL
+ SELECT 'use_etf',           'ETF 포함',            'bool',   '1',     NULL,NULL,        NULL,NULL,'1이면 국내 상장 ETF(시가총액=상장주식수x전일종가 기준 자체 순위)도 매수 대상에 포함. 코스피·코스닥·ETF 를 모두 끄면 파라미터 오류',3 UNION ALL
+ SELECT 'rank_scope',        '순위 기준',           'enum',   'per_market',NULL,NULL,    'per_market:시장별 순위,combined:선택된 시장 합산 순위',NULL,'시가총액 순위를 시장별로 매길지(예: 코스피 100 + 코스닥 100 + ETF 100) 선택된 시장 합산으로 매길지',4 UNION ALL
+ SELECT 'top_n',             '시가총액 상위 N',     'int',    '100',   '1','2000',       NULL,'개','시가총액 순위 상위 N개만 거래 대상',5 UNION ALL
+ SELECT 'min_market_cap_eok','최소 시가총액',       'int',    '0',     '0','100000000',  NULL,'억원','이 시가총액 미만 종목 제외. 0 이면 사용 안 함',6 UNION ALL
+ SELECT 'min_price',         '최소 주가(1주)',      'int',    '50000', '0','10000000',   NULL,'원','1주 가격이 이 값 미만인 종목 제외. 0 이면 사용 안 함. risk_guard 의 종목당 유효 한도보다 크면 1주도 살 수 없다',7 UNION ALL
+ SELECT 'max_price',         '최대 주가(1주)',      'int',    '0',     '0','100000000',  NULL,'원','1주 가격이 이 값 초과인 종목 제외. 0 이면 사용 안 함(0보다 크면 최소 주가 이상이어야 함)',8 UNION ALL
+ SELECT 'exclude_preferred', '우선주 제외',         'bool',   '1',     NULL,NULL,        NULL,NULL,'1이면 우선주(삼성전자우 등) 제외. 보통주가 함께 상장된 경우에만 우선주로 판정(ETF 에는 영향 없음)',9 UNION ALL
+ SELECT 'exclude_spac',      '스팩 제외',           'bool',   '1',     NULL,NULL,        NULL,NULL,'1이면 종목명에 스팩이 들어간 기업인수목적회사 제외',10 UNION ALL
+ SELECT 'exclude_warning',   '관리·경고 종목 제외', 'bool',   '1',     NULL,NULL,        NULL,NULL,'1이면 관리종목·거래정지·정리매매·투자유의/경고/위험(order_warning<>0) 종목 제외',11 UNION ALL
+ SELECT 'apply_to',          '적용 대상',           'enum',   'entry', NULL,NULL,        'entry:신규 진입 매수만,entry_and_avg:신규 진입 + 물타기',NULL,'어떤 매수 신호에 적용할지. 매도·손절·청산에는 어떤 설정에서도 관여하지 않는다',12 UNION ALL
+ SELECT 'stale_days',        '종목마스터 허용 경과일','int',  '5',     '1','30',         NULL,'일','종목마스터 갱신이 이 일수보다 오래되면 신규 매수 차단',13
 ) p ON a.code='universe_filter'
 ON DUPLICATE KEY UPDATE label=VALUES(label), value_type=VALUES(value_type), default_value=VALUES(default_value),
   min_value=VALUES(min_value), max_value=VALUES(max_value), enum_options=VALUES(enum_options), unit=VALUES(unit),
@@ -139,6 +142,26 @@ SELECT a.id, p.k, p.label, p.t, p.d, p.mn, p.mx, p.eo, p.u, p.ds, p.so FROM algo
  SELECT 'timeout_sec',       '응답 대기 시간',     'int',    '30',   '5','120',  NULL,'초','이 시간 안에 응답이 없으면 인프라 오류로 처리',7 UNION ALL
  SELECT 'review_averaging_down','물타기도 검토',   'bool',   '1',    NULL,NULL,  NULL,NULL,'1이면 분할매수(물타기) 추가매수 신호도 검토한다(0이면 신규 진입만 검토)',8
 ) p ON a.code='claude_advisor'
+ON DUPLICATE KEY UPDATE label=VALUES(label), value_type=VALUES(value_type), default_value=VALUES(default_value),
+  min_value=VALUES(min_value), max_value=VALUES(max_value), enum_options=VALUES(enum_options), unit=VALUES(unit),
+  description=VALUES(description), sort_order=VALUES(sort_order);
+
+-- ---- 파라미터 정의: claude_trend_scan ---------------------------------
+INSERT INTO algorithm_param_def (algorithm_id, param_key, label, value_type, default_value, min_value, max_value, enum_options, unit, description, sort_order)
+SELECT a.id, p.k, p.label, p.t, p.d, p.mn, p.mx, p.eo, p.u, p.ds, p.so FROM algorithm a JOIN (
+ SELECT 'region_scope'       k,'조사 범위'            label,'enum' t,'domestic_global' d,NULL mn,NULL mx,'domestic_global:국내+해외,domestic:국내만,global:해외만' eo,NULL u,'산업 트렌드 조사 범위' ds,1 so UNION ALL
+ SELECT 'model',              '조사 모델',            'enum',   'claude-opus-5', NULL,NULL, 'claude-opus-5:Claude Opus 5,claude-sonnet-5:Claude Sonnet 5',NULL,'웹 검색 조사에 쓸 모델(Haiku 는 조사 품질상 제외)',2 UNION ALL
+ SELECT 'effort',             '사고 강도',            'enum',   'medium', NULL,NULL, 'low:낮음,medium:보통,high:높음(정밀·고비용)',NULL,'조사 단계 추론량',3 UNION ALL
+ SELECT 'scan_time',          '조사 시각',            'time',   '08:30',  NULL,NULL, NULL,'HH:MM','이 시각 이후 하루 1회만 조사한다(매매 시작 전 권장)',4 UNION ALL
+ SELECT 'max_domestic_themes','국내 테마 참고 개수',  'int',    '8',      '1','20',  NULL,'개','ka90001 상위 테마 중 조사 프롬프트에 근거로 넣을 개수',5 UNION ALL
+ SELECT 'max_candidates_per_theme','테마당 최대 종목', 'int',   '3',      '1','10',  NULL,'개','테마 하나당 매수 후보로 확정할 최대 종목 수',6 UNION ALL
+ SELECT 'max_total_candidates','일 최대 후보 종목수', 'int',    '10',     '1','50',  NULL,'개','하루 전체 후보(=최대 신규 진입) 상한',7 UNION ALL
+ SELECT 'min_confidence',     '최소 확신도',          'int',    '60',     '0','100', NULL,'점','이 값 미만인 후보는 웹에는 기록하되 매수 신호로는 만들지 않는다',8 UNION ALL
+ SELECT 'buy_amount',         '1회 매수금액',         'int',    '100000', '10000','100000000',NULL,'원','후보 종목 1건당 매수금액',9 UNION ALL
+ SELECT 'order_type',         '주문 유형',            'enum',   '3',      NULL,NULL, '3:시장가,0:지정가(보통),6:최유리지정가',NULL,'kt10000 trde_tp',10 UNION ALL
+ SELECT 'max_web_searches',   '조사 시 웹검색 상한',  'int',    '6',      '1','20',  NULL,'회','조사 1회 호출당 web_search 도구 사용 상한(비용 통제)',11 UNION ALL
+ SELECT 'timeout_sec',        '응답 대기 시간',       'int',    '90',     '30','300',NULL,'초','조사(웹검색 포함)는 시간이 걸려 claude_advisor 보다 길게 잡는다',12
+) p ON a.code='claude_trend_scan'
 ON DUPLICATE KEY UPDATE label=VALUES(label), value_type=VALUES(value_type), default_value=VALUES(default_value),
   min_value=VALUES(min_value), max_value=VALUES(max_value), enum_options=VALUES(enum_options), unit=VALUES(unit),
   description=VALUES(description), sort_order=VALUES(sort_order);

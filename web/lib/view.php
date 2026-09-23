@@ -11,8 +11,11 @@ function favicon_links(): string
         . '<link rel="apple-touch-icon" href="' . h(u('assets/img/apple-touch-icon.png')) . '">';
 }
 
-/** 페이지네이션 바. */
-function render_pager(array $result): string
+/**
+ * 페이지네이션 바.
+ * @param string $param 페이지 번호를 담는 쿼리 파라미터 이름(한 화면에 표가 둘 이상일 때 구분)
+ */
+function render_pager(array $result, string $param = 'page'): string
 {
     $page = (int)$result['page'];
     $pages = (int)$result['pages'];
@@ -22,19 +25,19 @@ function render_pager(array $result): string
     if ($pages > 1) {
         $out .= '<span class="pager-links">';
         if ($page > 1) {
-            $out .= '<a class="btn btn-sm" href="' . h(url_with(['page' => 1])) . '">처음</a>'
-                . '<a class="btn btn-sm" href="' . h(url_with(['page' => $page - 1])) . '">이전</a>';
+            $out .= '<a class="btn btn-sm" href="' . h(url_with([$param => 1])) . '">처음</a>'
+                . '<a class="btn btn-sm" href="' . h(url_with([$param => $page - 1])) . '">이전</a>';
         }
         $start = max(1, $page - 2);
         $end = min($pages, $start + 4);
         $start = max(1, $end - 4);
         for ($i = $start; $i <= $end; $i++) {
             $cls = $i === $page ? 'btn btn-sm is-cur' : 'btn btn-sm';
-            $out .= '<a class="' . $cls . '" href="' . h(url_with(['page' => $i])) . '">' . $i . '</a>';
+            $out .= '<a class="' . $cls . '" href="' . h(url_with([$param => $i])) . '">' . $i . '</a>';
         }
         if ($page < $pages) {
-            $out .= '<a class="btn btn-sm" href="' . h(url_with(['page' => $page + 1])) . '">다음</a>'
-                . '<a class="btn btn-sm" href="' . h(url_with(['page' => $pages])) . '">끝</a>';
+            $out .= '<a class="btn btn-sm" href="' . h(url_with([$param => $page + 1])) . '">다음</a>'
+                . '<a class="btn btn-sm" href="' . h(url_with([$param => $pages])) . '">끝</a>';
         }
         $out .= '</span>';
     }
@@ -94,14 +97,16 @@ function filter_form_close(): string
     return '<span class="fld fld-btns"><button class="btn btn-primary btn-sm" type="submit">조회</button>'
         . '<a class="btn btn-sm" href="' . h(url_with(['from' => null, 'to' => null, 'q' => null, 'page' => null,
             'level' => null, 'category' => null, 'side' => null, 'kind' => null, 'type' => null, 'algo' => null,
-            'result' => null, 'api_id' => null, 'rc' => null]))
+            'result' => null, 'api_id' => null, 'rc' => null,
+            'region' => null, 'match' => null, 'signal' => null, 'trigger' => null, 'apage' => null]))
         . '">초기화</a></span></form>';
 }
 
-/** 상태 배지. */
-function badge(string $text, string $kind = ''): string
+/** 상태 배지. $title 을 주면 마우스 오버 설명(툴팁)이 붙는다. */
+function badge(string $text, string $kind = '', string $title = ''): string
 {
-    return '<span class="badge' . ($kind !== '' ? ' badge-' . h($kind) : '') . '">' . h($text) . '</span>';
+    return '<span class="badge' . ($kind !== '' ? ' badge-' . h($kind) : '') . '"'
+        . ($title !== '' ? ' title="' . h($title) . '"' : '') . '>' . h($text) . '</span>';
 }
 
 function order_status_badge(array $o): string
@@ -152,6 +157,90 @@ function llm_decision_badge(string $decision): string
 function llm_action_badge(string $action): string
 {
     return badge($action === 'block' ? '차단' : '통과', $action === 'block' ? 'err' : 'ok');
+}
+
+/* ---------------------------------------------- 산업 트렌드 스캔 (읽기 전용) */
+
+/** 스캔 실행 상태 배지 (ok / partial / error). 부분 성공에는 원인 안내 툴팁을 붙인다. */
+function trend_status_badge(string $status): string
+{
+    return badge(
+        match ($status) { 'ok' => '정상', 'partial' => '부분 성공', 'error' => '오류', default => $status },
+        match ($status) { 'ok' => 'ok', 'partial' => 'warn', 'error' => 'err', default => 'muted' },
+        match ($status) {
+            'partial' => '일부 단계가 실패했습니다 — 웹 검색 실패 가능성이 큽니다. '
+                . '오류 메시지와 아래 조사 원문을 확인하세요.',
+            'error' => '실행이 실패했습니다. 오류 메시지를 확인하세요.',
+            default => '',
+        }
+    );
+}
+
+/** 스캔 실행 · 시도의 구분 배지 (예약 / 수동). */
+function trend_trigger_badge(string $trigger): string
+{
+    return badge(
+        match ($trigger) { 'scheduled' => '예약', 'manual' => '수동', default => ($trigger === '' ? '-' : $trigger) },
+        match ($trigger) { 'scheduled' => 'muted', 'manual' => 'info', default => 'muted' },
+        match ($trigger) {
+            'scheduled' => '설정된 시각에 서버가 자동 실행했습니다.',
+            'manual' => '웹에서 관리자가 "지금 다시 조사"를 눌러 실행됐습니다.',
+            default => '',
+        }
+    );
+}
+
+/** 조사 지역 배지 (국내 / 해외). */
+function trend_region_badge(string $region): string
+{
+    return badge(
+        match ($region) { 'domestic' => '국내', 'global' => '해외', default => $region },
+        match ($region) { 'domestic' => 'info', 'global' => 'muted', default => 'muted' }
+    );
+}
+
+/** 매칭 방식 한글 라벨. */
+function trend_match_label(string $match): string
+{
+    return match ($match) {
+        'kiwoom_theme_member' => '키움 테마 구성종목',
+        'name_matched' => '종목명 일치',
+        'unmatched' => '미매칭',
+        default => $match,
+    };
+}
+
+function trend_match_badge(string $match): string
+{
+    return badge(trend_match_label($match), match ($match) {
+        'kiwoom_theme_member' => 'ok',
+        'name_matched' => 'info',
+        'unmatched' => 'muted',
+        default => 'muted',
+    });
+}
+
+/** 종목을 찾지 못한 이유 안내(추측으로 종목을 채우지 않는다는 설계를 설명). */
+function trend_unmatched_note(array $c): string
+{
+    if ((string)$c['match_status'] !== 'unmatched') {
+        return '';
+    }
+    return ((string)($c['region'] ?? '') === 'global')
+        ? '해외 테마여서 국내 상장 종목으로 직접 연결되지 않았습니다. '
+            . '키움 테마(ka90001)·종목마스터에서 이름이 일치하는 종목을 찾지 못해 추측으로 채우지 않았습니다.'
+        : '키움 테마그룹(ka90001)에 해당 테마가 없고 종목마스터에서도 이름이 일치하는 종목을 찾지 못했습니다. '
+            . '추측으로 종목을 채우지 않으므로 매수 신호로도 이어지지 않습니다.';
+}
+
+/** 접이식 원문 블록 (긴 텍스트, 개행 유지 · 반드시 이스케이프). */
+function trend_text_details(string $label, mixed $raw): string
+{
+    $s = (string)($raw ?? '');
+    if (trim($s) === '') {
+        return '';
+    }
+    return '<details class="jsum"><summary>' . h($label) . '</summary><pre>' . h($s) . '</pre></details>';
 }
 
 /** 상장폐지·거래불가 종목 배지. */
