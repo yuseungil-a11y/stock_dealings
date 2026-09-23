@@ -228,6 +228,31 @@ function clean_int(mixed $v, int $default = 0, ?int $min = null, ?int $max = nul
     return $n;
 }
 
+/**
+ * 실수 파라미터(범위 필터용). 비었거나 숫자가 아니면 null.
+ * 반환값은 항상 prepared statement 바인딩으로만 쓰인다.
+ */
+function clean_num(mixed $v, ?float $min = null, ?float $max = null): ?float
+{
+    if (is_string($v)) {
+        $v = trim($v);
+    }
+    if ($v === null || $v === '' || !is_scalar($v) || !is_numeric((string)$v)) {
+        return null;
+    }
+    $f = (float)$v;
+    if (!is_finite($f)) {
+        return null;
+    }
+    if ($min !== null && $f < $min) {
+        $f = $min;
+    }
+    if ($max !== null && $f > $max) {
+        $f = $max;
+    }
+    return $f;
+}
+
 /** 화이트리스트 선택값. */
 function clean_enum(mixed $v, array $allowed, string $default): string
 {
@@ -279,9 +304,11 @@ function status_label(?string $s): string
 /**
  * 서버 사이드 SVG 라인 차트 (외부 라이브러리·인라인 스크립트 없음).
  * @param array<int,array{label:string,value:float}> $points
+ * @param int $dec y축 라벨·값 표시 소수 자릿수(PER/PBR 처럼 소수가 의미 있는 지표에서 사용)
  */
-function svg_line_chart(array $points, string $title = '', int $w = 720, int $h = 220): string
+function svg_line_chart(array $points, string $title = '', int $w = 720, int $h = 220, int $dec = 0): string
 {
+    $dec = max(0, min($dec, 4));
     $n = count($points);
     if ($n === 0) {
         return '<p class="empty">표시할 데이터가 없습니다.</p>';
@@ -322,7 +349,7 @@ function svg_line_chart(array $points, string $title = '', int $w = 720, int $h 
         $y = round($yOf($vy), 1);
         $svg .= '<line class="grid" x1="' . $padL . '" y1="' . $y . '" x2="' . ($w - $padR) . '" y2="' . $y . '"/>';
         $svg .= '<text class="axis" x="' . ($padL - 6) . '" y="' . ($y + 4) . '" text-anchor="end">'
-            . h(number_format($vy, 0)) . '</text>';
+            . h(number_format($vy, $dec)) . '</text>';
     }
     // x축 라벨(처음/중간/끝)
     $labelIdx = $n === 1 ? [0] : array_unique([0, intdiv($n - 1, 2), $n - 1]);
@@ -335,7 +362,7 @@ function svg_line_chart(array $points, string $title = '', int $w = 720, int $h 
     $svg .= '<polyline class="series" points="' . implode(' ', $pts) . '"/>';
     foreach ($points as $i => $p) {
         $svg .= '<circle class="dot" cx="' . round($xOf($i), 1) . '" cy="' . round($yOf((float)$p['value']), 1)
-            . '" r="2.5"><title>' . h($p['label'] . ' : ' . number_format((float)$p['value'], 0)) . '</title></circle>';
+            . '" r="2.5"><title>' . h($p['label'] . ' : ' . number_format((float)$p['value'], $dec)) . '</title></circle>';
     }
     $svg .= '</svg>';
     return $svg;

@@ -119,6 +119,36 @@ switch ($r) {
         json_out(['ok' => true, 'server_time' => $serverTime,
             'rows' => repo_events(null, null, $level, '', '', 1)['rows']]);
 
+    /* ------------------------------------------------ 기업 재무분석 (리서치)
+     * 읽기 전용 · 계좌/주문과 무관. 하루 1회만 바뀌므로 자동 갱신에는 쓰지 않는다. */
+    case 'research_stocks':
+        json_out(['ok' => true, 'server_time' => $serverTime,
+            'available' => repo_fin_available() || repo_fin_report_available(),
+            'rows' => repo_fin_stocks(clean_text($_GET['q'] ?? '', 40),
+                clean_int($_GET['page'] ?? 1, 1, 1, 100000))['rows']]);
+
+    case 'research_company':
+        $stkRaw = clean_text($_GET['stk'] ?? '', 12);
+        if (preg_match('/^[A-Za-z0-9]{1,12}$/', $stkRaw) !== 1) {
+            json_out(['ok' => false, 'error' => '종목코드(stk)가 필요합니다.'], 400);
+        }
+        $rpt = repo_fin_report_latest($stkRaw);
+        json_out(['ok' => true, 'server_time' => $serverTime,
+            'stk_cd' => $stkRaw,
+            'names' => repo_fin_stock_name($stkRaw),
+            'financials' => repo_fin_statements($stkRaw, FIN_YEARS),
+            'valuation' => repo_fin_valuation_latest($stkRaw),
+            // 본문(report_text)은 화면에서만 보여준다(응답 크기 · 용도 분리).
+            'report' => $rpt === null ? null : [
+                'as_of_date' => $rpt['as_of_date'],
+                'model' => $rpt['model'],
+                'status' => $rpt['status'],
+                'summary' => $rpt['summary'],
+                'error_msg' => $rpt['error_msg'],
+                'created_at' => $rpt['created_at'],
+            ],
+            'disclaimer' => '참고용 리서치 데이터입니다. 매매를 자동으로 실행하지 않습니다.']);
+
     case 'accounts':
         $rows = [];
         foreach ($accounts as $a) {
@@ -135,5 +165,6 @@ switch ($r) {
 
     default:
         json_out(['ok' => false, 'error' => '알 수 없는 요청입니다.',
-            'available' => ['ping', 'status', 'dashboard', 'holdings', 'balance_series', 'events', 'accounts']], 404);
+            'available' => ['ping', 'status', 'dashboard', 'holdings', 'balance_series', 'events', 'accounts',
+                'research_stocks', 'research_company']], 404);
 }

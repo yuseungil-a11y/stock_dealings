@@ -835,7 +835,8 @@ function repo_can_read(string $object): bool
 {
     static $cache = [];
     if (!in_array($object, ['v_trade_analysis', 'order_event', 'event_archive', 'api_error_log',
-        'trend_scan_run', 'trend_scan_candidate', 'trend_scan_attempt'], true)) {
+        'trend_scan_run', 'trend_scan_candidate', 'trend_scan_attempt',
+        'company_corp_code', 'company_financial', 'company_valuation_daily', 'company_analysis_report'], true)) {
         return false;
     }
     if (isset($cache[$object])) {
@@ -1238,6 +1239,379 @@ function repo_user(int $id): ?array
         'SELECT id, username, display_name, role, is_active, last_login_at, created_at FROM app_user WHERE id = ?',
         [$id]
     );
+}
+
+/* ============================================================================
+ * 기업 재무분석 (리서치 — 읽기 전용, 매매와 완전히 무관)
+ *   company_financial        DART 재무제표(분기/사업보고서)
+ *   company_valuation_daily  PER/PBR/ROE/부채비율 일별 계산
+ *   company_analysis_report  Claude 재무분석 리포트(참고용)
+ *   company_corp_code        종목코드 ↔ DART corp_code / 회사명
+ * 이 영역의 어떤 함수도 계좌 · 주문 · 신호 표를 읽거나 쓰지 않는다.
+ * ========================================================================== */
+
+/** DART 보고서 코드 → 한글 라벨. */
+const FIN_REPRT_LABELS = [
+    '11013' => '1분기',
+    '11012' => '반기',
+    '11014' => '3분기',
+    '11011' => '사업보고서',
+];
+
+/** 재무제표 표에 보여줄 최근 사업연도 수. */
+const FIN_YEARS = 5;
+
+/** 밸류에이션 추이 기본/최대 조회 일수. */
+const FIN_TREND_DAYS = 90;
+const FIN_TREND_DAYS_MAX = 365;
+
+/** 리포트 목록 · 종목 목록의 한 페이지 크기. */
+const FIN_PAGE_SIZE = 30;
+
+/** 종목 상세에 함께 보여줄 과거 리포트 수. */
+const FIN_REPORT_HISTORY = 10;
+
+/** 리포트 상태 필터 화이트리스트. */
+const FIN_STATUSES = ['ok', 'error'];
+
+/**
+ * 리포트 목록 정렬 화이트리스트 (키 → 고정 ORDER BY 조각).
+ * 사용자 입력은 이 배열의 키로만 들어오며 SQL 조각은 코드에 고정돼 있다.
+ */
+const FIN_SORTS = [
+    'report_desc' => ['label' => '리포트 최신순', 'sql' => 'r.as_of_date DESC, r.stk_cd ASC'],
+    'per_asc' => ['label' => 'PER 낮은순', 'sql' => '(v.per IS NULL OR v.per <= 0) ASC, v.per ASC, r.stk_cd ASC'],
+    'per_desc' => ['label' => 'PER 높은순', 'sql' => '(v.per IS NULL) ASC, v.per DESC, r.stk_cd ASC'],
+    'pbr_asc' => ['label' => 'PBR 낮은순', 'sql' => '(v.pbr IS NULL OR v.pbr <= 0) ASC, v.pbr ASC, r.stk_cd ASC'],
+    'roe_desc' => ['label' => 'ROE 높은순', 'sql' => '(v.roe IS NULL) ASC, v.roe DESC, r.stk_cd ASC'],
+    'debt_asc' => ['label' => '부채비율 낮은순', 'sql' => '(v.debt_ratio IS NULL) ASC, v.debt_ratio ASC, r.stk_cd ASC'],
+    'code_asc' => ['label' => '종목코드순', 'sql' => 'r.stk_cd ASC'],
+];
+
+function fin_sort_options(): array
+{
+    $out = [];
+    foreach (FIN_SORTS as $k => $v) {
+        $out[$k] = $v['label'];
+    }
+    return $out;
+}
+
+function fin_status_options(): array
+{
+    return ['' => '전체', 'ok' => '정상', 'error' => '오류'];
+}
+
+function fin_reprt_label(?string $code): string
+{
+    $c = (string)$code;
+    return FIN_REPRT_LABELS[$c] ?? ($c === '' ? '-' : $c);
+}
+
+/** 재무제표 표를 읽을 수 있는지. */
+function repo_fin_available(): bool
+{
+    return repo_can_read('company_financial');
+}
+
+/** 밸류에이션 표를 읽을 수 있는지. */
+function repo_fin_valuation_available(): bool
+{
+    return repo_can_read('company_valuation_daily');
+}
+
+/** 분석 리포트 표를 읽을 수 있는지. */
+function repo_fin_report_available(): bool
+{
+    return repo_can_read('company_analysis_report');
+}
+
+/** 종목명 후보 3열(코드/회사명/리포트 종목명) 중 첫 번째 값. */
+function fin_display_name(array $r): string
+{
+    foreach (['stk_nm', 'rpt_nm', 'corp_name'] as $k) {
+        $v = (string)($r[$k] ?? '');
+        if ($v !== '') {
+            return $v;
+        }
+    }
+    return (string)($r['stk_cd'] ?? '');
+}
+
+/**
+ * 재무데이터 또는 분석 리포트가 있는 종목 목록(검색용).
+ * 이름은 company_corp_code · company_analysis_report 에서 가져온다.
+ */
+function repo_fin_stocks(string $q, int $page): array
+{
+    $finOk = repo_fin_available();
+    $rptOk = repo_fin_report_available();
+    if (!$finOk && !$rptOk) {
+        return ['rows' => [], 'total' => 0, 'page' => 1, 'pages' => 1, 'size' => FIN_PAGE_SIZE];
+    }
+    $ccOk = repo_can_read('company_corp_code');
+    $valOk = repo_fin_valuation_available();
+
+    $union = [];
+    if ($finOk) {
+        $union[] = 'SELECT stk_cd FROM company_financial GROUP BY stk_cd';
+    }
+    if ($rptOk) {
+        $union[] = 'SELECT stk_cd FROM company_analysis_report GROUP BY stk_cd';
+    }
+    $inner = 'SELECT b.stk_cd AS stk_cd,'
+        . ($ccOk ? ' (SELECT cc.corp_name FROM company_corp_code cc WHERE cc.stk_cd = b.stk_cd)' : ' NULL')
+        . ' AS corp_name,'
+        . ($rptOk
+            ? ' (SELECT r.stk_nm FROM company_analysis_report r WHERE r.stk_cd = b.stk_cd'
+                . " AND r.stk_nm IS NOT NULL AND r.stk_nm <> '' ORDER BY r.as_of_date DESC, r.id DESC LIMIT 1)"
+            : ' NULL')
+        . ' AS rpt_nm,'
+        . ($finOk ? ' (SELECT COUNT(*) FROM company_financial f WHERE f.stk_cd = b.stk_cd)' : ' 0')
+        . ' AS fin_cnt,'
+        . ($finOk ? ' (SELECT MAX(f.bsns_year) FROM company_financial f WHERE f.stk_cd = b.stk_cd)' : ' NULL')
+        . ' AS last_year,'
+        . ($rptOk
+            ? ' (SELECT MAX(r.as_of_date) FROM company_analysis_report r WHERE r.stk_cd = b.stk_cd)'
+            : ' NULL')
+        . ' AS last_report,'
+        . ($valOk ? ' (SELECT MAX(v.dt) FROM company_valuation_daily v WHERE v.stk_cd = b.stk_cd)' : ' NULL')
+        . ' AS last_val'
+        . ' FROM (' . implode(' UNION ', $union) . ') b';
+
+    $w = '';
+    $p = [];
+    if ($q !== '') {
+        $w = ' WHERE (t.stk_cd LIKE ? OR t.corp_name LIKE ? OR t.rpt_nm LIKE ?)';
+        $like = '%' . $q . '%';
+        $p = [$like, $like, $like];
+    }
+    $base = ' FROM (' . $inner . ') t' . $w;
+    return repo_paginate(
+        'SELECT t.*' . $base . ' ORDER BY (t.last_report IS NULL) ASC, t.last_report DESC, t.stk_cd ASC',
+        'SELECT COUNT(*)' . $base,
+        $p,
+        $page,
+        FIN_PAGE_SIZE
+    );
+}
+
+/** 종목 상세 화면의 머리글용 이름(리포트 → corp_code 순). */
+function repo_fin_stock_name(string $stkCd): array
+{
+    $out = ['stk_cd' => $stkCd, 'stk_nm' => null, 'corp_name' => null, 'corp_code' => null];
+    if (repo_fin_report_available()) {
+        $out['stk_nm'] = db_val(
+            'SELECT stk_nm FROM company_analysis_report WHERE stk_cd = ?'
+            . " AND stk_nm IS NOT NULL AND stk_nm <> '' ORDER BY as_of_date DESC, id DESC LIMIT 1",
+            [$stkCd]
+        );
+    }
+    if (repo_can_read('company_corp_code')) {
+        $row = db_row('SELECT corp_code, corp_name FROM company_corp_code WHERE stk_cd = ?', [$stkCd]);
+        if ($row !== null) {
+            $out['corp_code'] = $row['corp_code'];
+            $out['corp_name'] = $row['corp_name'];
+        }
+    }
+    return $out;
+}
+
+/** 최근 N개 사업연도의 재무제표(연도 내림차순 · 보고서는 사업보고서 → 3분기 → 반기 → 1분기). */
+function repo_fin_statements(string $stkCd, int $years = FIN_YEARS): array
+{
+    if (!repo_fin_available()) {
+        return [];
+    }
+    $maxYear = db_val('SELECT MAX(bsns_year) FROM company_financial WHERE stk_cd = ?', [$stkCd]);
+    if ($maxYear === null) {
+        return [];
+    }
+    $fromYear = (int)$maxYear - max(0, $years - 1);
+    return db_all(
+        'SELECT bsns_year, reprt_code, revenue, operating_profit, net_profit, total_assets,'
+        . ' total_liabilities, total_equity, eps, operating_cash_flow, shares_outstanding, fetched_at'
+        . ' FROM company_financial WHERE stk_cd = ? AND bsns_year >= ?'
+        . " ORDER BY bsns_year DESC, FIELD(reprt_code,'11013','11012','11014','11011') DESC",
+        [$stkCd, $fromYear]
+    );
+}
+
+/** 최근 밸류에이션 1건. */
+function repo_fin_valuation_latest(string $stkCd): ?array
+{
+    if (!repo_fin_valuation_available()) {
+        return null;
+    }
+    return db_row(
+        'SELECT stk_cd, dt, cur_prc, eps_ttm, bps, per, pbr, roe, debt_ratio, financial_asof'
+        . ' FROM company_valuation_daily WHERE stk_cd = ? ORDER BY dt DESC LIMIT 1',
+        [$stkCd]
+    );
+}
+
+/** 밸류에이션 추이(최근 N일, 오래된 날짜 → 최신 순으로 되돌려준다). */
+function repo_fin_valuation_series(string $stkCd, int $days = FIN_TREND_DAYS): array
+{
+    if (!repo_fin_valuation_available()) {
+        return [];
+    }
+    $days = max(1, min($days, FIN_TREND_DAYS_MAX));
+    $rows = db_all(
+        'SELECT dt, cur_prc, eps_ttm, bps, per, pbr, roe, debt_ratio, financial_asof'
+        . ' FROM company_valuation_daily WHERE stk_cd = ? ORDER BY dt DESC LIMIT ?',
+        [$stkCd, $days]
+    );
+    return array_reverse($rows);
+}
+
+/** 종목의 최신 분석 리포트 1건(상태 무관). */
+function repo_fin_report_latest(string $stkCd): ?array
+{
+    if (!repo_fin_report_available()) {
+        return null;
+    }
+    return db_row(
+        'SELECT id, stk_cd, stk_nm, as_of_date, model, summary, report_text, input_tokens, output_tokens,'
+        . ' latency_ms, status, error_msg, created_at'
+        . ' FROM company_analysis_report WHERE stk_cd = ? ORDER BY as_of_date DESC, id DESC LIMIT 1',
+        [$stkCd]
+    );
+}
+
+/** 특정 날짜의 분석 리포트(과거 리포트 열람). */
+function repo_fin_report_by_date(string $stkCd, string $date): ?array
+{
+    if (!repo_fin_report_available()) {
+        return null;
+    }
+    return db_row(
+        'SELECT id, stk_cd, stk_nm, as_of_date, model, summary, report_text, input_tokens, output_tokens,'
+        . ' latency_ms, status, error_msg, created_at'
+        . ' FROM company_analysis_report WHERE stk_cd = ? AND as_of_date = ? LIMIT 1',
+        [$stkCd, $date]
+    );
+}
+
+/** 종목의 리포트 이력 목록(본문 제외). */
+function repo_fin_report_history(string $stkCd, int $limit = FIN_REPORT_HISTORY): array
+{
+    if (!repo_fin_report_available()) {
+        return [];
+    }
+    return db_all(
+        'SELECT id, as_of_date, model, status, summary, error_msg, input_tokens, output_tokens, latency_ms, created_at'
+        . ' FROM company_analysis_report WHERE stk_cd = ? ORDER BY as_of_date DESC, id DESC LIMIT ?',
+        [$stkCd, max(1, min($limit, 100))]
+    );
+}
+
+/**
+ * 리포트 목록 WHERE 조각.
+ * 값은 전부 바인딩되고, 비교 연산자·컬럼은 코드에 고정돼 있다.
+ * @return array{0:string,1:array}
+ */
+function repo_fin_report_where(string $q, string $status, array $range): array
+{
+    $w = '';
+    $p = [];
+    if ($q !== '') {
+        $w .= ' AND (r.stk_cd LIKE ? OR r.stk_nm LIKE ? OR cc.corp_name LIKE ?)';
+        $like = '%' . $q . '%';
+        $p[] = $like;
+        $p[] = $like;
+        $p[] = $like;
+    }
+    if (in_array($status, FIN_STATUSES, true)) {
+        $w .= ' AND r.status = ?';
+        $p[] = $status;
+    }
+    foreach ([['per', 'v.per'], ['pbr', 'v.pbr'], ['roe', 'v.roe'], ['debt', 'v.debt_ratio']] as [$key, $col]) {
+        if (($range[$key . '_min'] ?? null) !== null) {
+            $w .= ' AND ' . $col . ' >= ?';
+            $p[] = (string)$range[$key . '_min'];
+        }
+        if (($range[$key . '_max'] ?? null) !== null) {
+            $w .= ' AND ' . $col . ' <= ?';
+            $p[] = (string)$range[$key . '_max'];
+        }
+    }
+    return [$w, $p];
+}
+
+/** 리포트 목록 FROM 조각 (종목별 최신 리포트 + 최신 밸류에이션). */
+function repo_fin_report_from(): string
+{
+    $ccOk = repo_can_read('company_corp_code');
+    $valOk = repo_fin_valuation_available();
+    $sql = ' FROM company_analysis_report r'
+        . ' JOIN (SELECT stk_cd, MAX(as_of_date) AS d FROM company_analysis_report GROUP BY stk_cd) m'
+        . ' ON m.stk_cd = r.stk_cd AND m.d = r.as_of_date';
+    $sql .= $valOk
+        ? ' LEFT JOIN (SELECT stk_cd, MAX(dt) AS d FROM company_valuation_daily GROUP BY stk_cd) vm'
+            . ' ON vm.stk_cd = r.stk_cd'
+            . ' LEFT JOIN company_valuation_daily v ON v.stk_cd = vm.stk_cd AND v.dt = vm.d'
+        : ' LEFT JOIN (SELECT NULL AS stk_cd, NULL AS per, NULL AS pbr, NULL AS roe, NULL AS debt_ratio,'
+            . ' NULL AS cur_prc, NULL AS dt, NULL AS financial_asof) v ON 1 = 0';
+    $sql .= $ccOk
+        ? ' LEFT JOIN company_corp_code cc ON cc.stk_cd = r.stk_cd'
+        : ' LEFT JOIN (SELECT NULL AS stk_cd, NULL AS corp_name) cc ON 1 = 0';
+    return $sql . ' WHERE 1=1';
+}
+
+/** 분석 리포트가 있는 종목 목록(종목별 최신 리포트 1건 + 최신 밸류에이션). */
+function repo_fin_reports(string $q, string $status, array $range, string $sort, int $page): array
+{
+    if (!repo_fin_report_available()) {
+        return ['rows' => [], 'total' => 0, 'page' => 1, 'pages' => 1, 'size' => FIN_PAGE_SIZE];
+    }
+    [$w, $p] = repo_fin_report_where($q, $status, $range);
+    $base = repo_fin_report_from() . $w;
+    $order = FIN_SORTS[$sort]['sql'] ?? FIN_SORTS['report_desc']['sql'];
+    return repo_paginate(
+        'SELECT r.id, r.stk_cd, r.stk_nm, cc.corp_name, r.as_of_date, r.model, r.summary, r.status, r.error_msg,'
+        . ' r.created_at, v.dt AS val_dt, v.cur_prc, v.per, v.pbr, v.roe, v.debt_ratio, v.financial_asof'
+        . $base . ' ORDER BY ' . $order,
+        'SELECT COUNT(*)' . $base,
+        $p,
+        $page,
+        FIN_PAGE_SIZE
+    );
+}
+
+/** 리포트 목록 요약(같은 필터 조건 기준). */
+function repo_fin_report_summary(string $q, string $status, array $range): array
+{
+    $empty = ['stocks' => 0, 'ok' => 0, 'error' => 0, 'last_date' => null,
+        'avg_per' => null, 'avg_pbr' => null, 'avg_roe' => null, 'avg_debt' => null];
+    if (!repo_fin_report_available()) {
+        return $empty;
+    }
+    [$w, $p] = repo_fin_report_where($q, $status, $range);
+    $row = db_row(
+        'SELECT COUNT(*) AS stocks,'
+        . " SUM(CASE WHEN r.status = 'ok' THEN 1 ELSE 0 END) AS ok_cnt,"
+        . " SUM(CASE WHEN r.status = 'error' THEN 1 ELSE 0 END) AS err_cnt,"
+        . ' MAX(r.as_of_date) AS last_date,'
+        . ' AVG(CASE WHEN v.per > 0 THEN v.per END) AS avg_per,'
+        . ' AVG(CASE WHEN v.pbr > 0 THEN v.pbr END) AS avg_pbr,'
+        . ' AVG(v.roe) AS avg_roe, AVG(v.debt_ratio) AS avg_debt'
+        . repo_fin_report_from() . $w,
+        $p
+    );
+    if ($row === null) {
+        return $empty;
+    }
+    return [
+        'stocks' => (int)$row['stocks'],
+        'ok' => (int)$row['ok_cnt'],
+        'error' => (int)$row['err_cnt'],
+        'last_date' => $row['last_date'],
+        'avg_per' => $row['avg_per'] === null ? null : (float)$row['avg_per'],
+        'avg_pbr' => $row['avg_pbr'] === null ? null : (float)$row['avg_pbr'],
+        'avg_roe' => $row['avg_roe'] === null ? null : (float)$row['avg_roe'],
+        'avg_debt' => $row['avg_debt'] === null ? null : (float)$row['avg_debt'],
+    ];
 }
 
 /* ------------------------------------------------------------- 대시보드 */

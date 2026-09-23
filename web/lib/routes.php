@@ -22,6 +22,10 @@ function app_routes(): array
         'strategy.signals' => ['view' => 'strategy_signals', 'title' => '신호 기록', 'group' => 'strategy'],
         'strategy.claude' => ['view' => 'strategy_claude', 'title' => 'Claude 판단', 'group' => 'strategy'],
         'strategy.trend' => ['view' => 'strategy_trend', 'title' => '산업 트렌드', 'group' => 'strategy'],
+        /* 리서치: DART 재무데이터 + Claude 재무분석 리포트 조회(순수 참고용).
+         * 계좌 · 주문과 전혀 무관하므로 'account' 를 지정하지 않는다(전역 화면). */
+        'research.reports' => ['view' => 'research_reports', 'title' => '재무분석 리포트', 'group' => 'research'],
+        'research.company' => ['view' => 'research_company', 'title' => '기업 재무분석', 'group' => 'research'],
         'system.status' => ['view' => 'system_status', 'title' => '서버 상태', 'group' => 'system'],
         'system.events' => ['view' => 'system_events', 'title' => '이벤트 로그', 'group' => 'system'],
         'system.archive' => ['view' => 'system_archive', 'title' => '이벤트 · API 오류 보관', 'group' => 'system'],
@@ -52,6 +56,10 @@ function app_menu(): array
             'strategy.signals' => '신호 기록',
             'strategy.claude' => 'Claude 판단',
             'strategy.trend' => '산업 트렌드',
+        ]],
+        'research' => ['label' => '리서치', 'items' => [
+            'research.reports' => '재무분석 리포트',
+            'research.company' => '기업 재무분석',
         ]],
         'system' => ['label' => '시스템', 'items' => [
             'system.status' => '서버 상태',

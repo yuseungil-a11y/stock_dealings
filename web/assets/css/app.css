@@ -350,6 +350,20 @@ pre.prompt {
   white-space: pre-wrap; word-break: break-word; color: var(--ink);
 }
 
+/* 기업 재무분석(리서치) — 리포트 본문 · 요약 */
+.reporttext {
+  margin: 4px 0 0; padding: 12px 14px; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 6px; font-family: inherit; font-size: 13px; line-height: 1.7;
+  white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; color: var(--ink);
+  max-height: 70vh; overflow-y: auto;
+}
+.reportsum {
+  margin: 4px 0 10px; padding: 9px 12px; background: #f8fafd; border: 1px solid var(--line-2);
+  border-left: 3px solid var(--accent-2); border-radius: 6px; font-size: 13px; font-weight: 600;
+  white-space: normal; word-break: break-word;
+}
+.fld-num input { width: 104px; }
+
 /* 탭 (JS 없이 GET 링크) */
 .tabs { display: flex; gap: 4px; flex-wrap: wrap; margin: 0 0 12px; border-bottom: 1px solid var(--line); }
 .tab {

@@ -20,6 +20,9 @@
   * 스캔 시도 이력 trend_scan_attempt 데모(정상/부분성공/오류 · 예약/수동 혼합)와
     수동 재조사 요청 trend_scan_request 데모는 error_msg · research_summary · requested_by 의
     '[DEMO]' 마커로 격리한다(요청 행은 status='done' 으로 넣어 서버가 처리 대상으로 보지 않게 한다).
+  * 기업 재무분석(리서치) 화면 검증용 company_corp_code / company_financial /
+    company_valuation_daily / company_analysis_report 데모는 종목코드 접두 'DEMOF' 로 격리한다
+    (실제 종목코드는 6자리 숫자이므로 겹치지 않는다). 매매 파이프라인과 무관한 순수 조회용 표다.
   * 보유종목에는 상장폐지 종목(현재가 0, 종목명 '(폐)' 시작) 1건을 포함해
     웹 화면의 상장폐지 표시/실제 수익률 계산을 검증할 수 있게 한다.
   * 전역 표(system_setting / server_status / algorithm_selection)는 건드리지 않는다.
@@ -57,6 +60,11 @@ DEMO_AUTHOR = "demo_seed"
 DEMO_LOCK_USER = "demo_lock_test"
 # llm_decision_log 데모 행은 stk_cd 접두 'DEMO' 로 식별해 clear 시 정확히 회수한다.
 DEMO_LLM_PREFIX = "DEMO"
+# 기업 재무분석(리서치) 데모 행은 stk_cd 접두 'DEMOF' 로 격리한다.
+# 실제 종목코드(6자리 숫자)와 겹치지 않으므로 실데이터를 건드릴 위험이 없다.
+DEMO_FIN_PREFIX = "DEMOF"
+FIN_TABLES = ("company_corp_code", "company_financial",
+              "company_valuation_daily", "company_analysis_report")
 
 # 상장폐지·거래불가 보유종목 데모 1건 (현재가 0, 매입금액 > 0, 키움이 주는 prft_rt=0)
 DELISTED_STOCK = ("DEMO0001", "(폐)데모폐지", 200, 1_805)
@@ -492,6 +500,143 @@ def load_trend_attempt(cur, now: dt.datetime) -> None:
         print("trend_scan_request: 1건 (status=done, 서버 처리 대상 아님)")
 
 
+# ------------------------------------------------- 기업 재무분석(리서치) 데모
+def load_fundamentals(cur, now: dt.datetime) -> None:
+    """
+    웹 '리서치 → 기업 재무분석 / 재무분석 리포트' 화면 검증용 데모.
+
+      company_corp_code        2종목
+      company_financial        DEMOF01 6개 사업연도(사업보고서) + 당해 1분기 · 반기,
+                               DEMOF02 3개 사업연도 + 전 항목 NULL 1건(미공시 표시 검증)
+      company_valuation_daily  DEMOF01 45일(PER/PBR 변동 → 추이 차트),
+                               DEMOF02 5일(적자라 PER NULL · ROE 음수)
+      company_analysis_report  정상 2건(최신 + 1주일 전, 리포트 이력 검증) · 오류 1건
+
+    격리: 종목코드 접두 'DEMOF' (실제 종목코드 6자리 숫자와 겹치지 않음).
+    실데이터는 어떤 행도 수정하지 않고 데모 종목 행만 추가한다.
+    """
+    missing = [t for t in FIN_TABLES if not table_exists(cur, t)]
+    if missing:
+        print(f"{', '.join(missing)}: 표가 없어 기업 재무분석 데모를 건너뜁니다.")
+        return
+
+    s1, s1nm = f"{DEMO_FIN_PREFIX}01", f"{DEMO_MARK}데모반도체"
+    s2, s2nm = f"{DEMO_FIN_PREFIX}02", f"{DEMO_MARK}데모바이오(적자)"
+    xss = "<script>alert('xss')</script>"
+
+    # ------------------------------------------------------ corp_code 매핑
+    cur.executemany(
+        "INSERT INTO company_corp_code (stk_cd, corp_code, corp_name) VALUES (%s,%s,%s)"
+        " ON DUPLICATE KEY UPDATE corp_name=VALUES(corp_name)",
+        [(s1, "99900001", s1nm), (s2, "99900002", s2nm)])
+
+    # ------------------------------------------------------ 재무제표
+    y0 = now.year
+    eok = 100_000_000  # 1억
+    fin_rows = []
+    # DEMOF01: 6개 사업연도 사업보고서(FIN_YEARS=5 이므로 가장 오래된 1건은 화면에서 잘린다)
+    for i, year in enumerate(range(y0 - 6, y0)):
+        g = 1.0 + 0.12 * i
+        rev = int(42_000 * eok * g)
+        op = int(6_300 * eok * g)
+        net = int(4_900 * eok * g)
+        assets = int(88_000 * eok * g)
+        liab = int(29_000 * eok * g)
+        eq = assets - liab
+        fin_rows.append((s1, year, "11011", rev, op, net, assets, liab, eq,
+                         int(7_200 * g), int(7_100 * eok * g), 5_969_782_550))
+    # DEMOF01: 당해 1분기 · 반기 (분기 라벨 표시 검증)
+    fin_rows.append((s1, y0, "11013", int(12_400 * eok), int(1_950 * eok), int(1_480 * eok),
+                     int(101_000 * eok), int(33_000 * eok), int(68_000 * eok),
+                     2_150, int(2_050 * eok), 5_969_782_550))
+    fin_rows.append((s1, y0, "11012", int(25_900 * eok), int(4_120 * eok), int(3_260 * eok),
+                     int(104_000 * eok), int(34_500 * eok), int(69_500 * eok),
+                     4_480, int(4_300 * eok), 5_969_782_550))
+    # DEMOF02: 적자 기업 3개 사업연도 + 전 항목 NULL 1건(미공시/조회실패 표시 검증)
+    for i, year in enumerate(range(y0 - 3, y0)):
+        fin_rows.append((s2, year, "11011", int((820 + 60 * i) * eok), int(-(310 - 40 * i) * eok),
+                         int(-(290 - 35 * i) * eok), int(2_400 * eok), int(1_950 * eok),
+                         int(450 * eok), -(1_480 - 120 * i), int(-(260 - 30 * i) * eok), 19_600_000))
+    fin_rows.append((s2, y0, "11013", None, None, None, None, None, None, None, None, None))
+    cur.executemany(
+        "INSERT INTO company_financial (stk_cd, bsns_year, reprt_code, revenue, operating_profit,"
+        " net_profit, total_assets, total_liabilities, total_equity, eps, operating_cash_flow,"
+        " shares_outstanding) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
+        " ON DUPLICATE KEY UPDATE revenue=VALUES(revenue)", fin_rows)
+    print(f"company_financial: {len(fin_rows)}건 (DEMOF01 8 · DEMOF02 4, NULL 행 1 포함)")
+
+    # ------------------------------------------------------ 밸류에이션 일별
+    rnd = random.Random(20260923)
+    val_rows = []
+    asof = f"{y0}Q2"
+    base_eps, base_bps = 8_930, 116_400
+    for i in range(45, 0, -1):
+        d = now.date() - dt.timedelta(days=i - 1)
+        prc = 71_500 + int(4_200 * ((i % 11) - 5) / 5) + rnd.randint(-900, 900)
+        per = round(prc / base_eps, 2)
+        pbr = round(prc / base_bps, 4)
+        val_rows.append((s1, d, prc, base_eps, base_bps, per, pbr, 12.8400, 42.0300, asof))
+    for i in range(5, 0, -1):
+        d = now.date() - dt.timedelta(days=i - 1)
+        prc = 4_120 + rnd.randint(-160, 160)
+        # 적자 기업: EPS 음수 → PER 산출 불가(NULL), ROE 음수
+        val_rows.append((s2, d, prc, -1_480, 2_295, None, round(prc / 2_295, 4),
+                         -64.4400, 433.3300, asof))
+    cur.executemany(
+        "INSERT INTO company_valuation_daily (stk_cd, dt, cur_prc, eps_ttm, bps, per, pbr, roe,"
+        " debt_ratio, financial_asof) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
+        " ON DUPLICATE KEY UPDATE cur_prc=VALUES(cur_prc)", val_rows)
+    print(f"company_valuation_daily: {len(val_rows)}건 (DEMOF01 45일 · DEMOF02 5일)")
+
+    # ------------------------------------------------------ 분석 리포트
+    report_ok = (
+        f"{DEMO_MARK} 기업 재무분석 리포트 (참고용 — 매매와 무관)\n\n"
+        "## 1. 안정성\n"
+        "부채비율 42.0%로 동종업계 평균(65%) 대비 낮고, 자본총계가 4년 연속 증가했습니다.\n"
+        "유동성 지표는 공시 주요계정만으로는 확인되지 않아 별도 확인이 필요합니다.\n\n"
+        "## 2. 수익성\n"
+        "영업이익률 15.0% 수준을 유지하고 있으며 영업활동현금흐름이 순이익을 상회합니다.\n\n"
+        "## 3. 성장성\n"
+        "최근 5개 사업연도 매출 연평균 성장률 약 11%. 당해 반기 누적도 전년 동기 대비 증가.\n\n"
+        "## 4. 밸류에이션\n"
+        "PER 8.0배 / PBR 0.61배로 자산가치 대비 저평가 구간으로 볼 여지가 있으나,\n"
+        "업황 사이클 하단에서 이익이 과대평가될 수 있는 점에 유의해야 합니다.\n\n"
+        "## 5. 위험요인\n"
+        "- 전방 수요 둔화 시 가동률 하락\n"
+        "- 환율 · 관세 변동\n"
+        "- 설비투자 확대에 따른 현금흐름 부담\n\n"
+        f"이스케이프 · 개행 검증: {xss} <img src=x onerror=alert(1)>\n"
+        '따옴표 검증: " onmouseover=alert(1) x="\n'
+        "SQL 유사 문자열 검증: ' OR 1=1 -- \n"
+        "본 리포트는 참고용이며 매매를 자동으로 실행하지 않습니다.\n")
+    report_old = (
+        f"{DEMO_MARK} 기업 재무분석 리포트 (1주일 전 생성본)\n\n"
+        "## 요약\n직전 분기 기준으로는 PER 9.1배였습니다. 최신 리포트와 비교해 보세요.\n")
+    report_err = (
+        f"{DEMO_MARK} 리포트 생성에 실패했습니다(본문 없음).\n")
+
+    reports = [
+        (s1, s1nm, now.date(), "claude-sonnet-4-5",
+         f"{DEMO_MARK} 저평가 구간이나 업황 사이클 하단 이익 과대평가 주의 {xss}",
+         report_ok, 18_420, 2_310, 24_800, "ok", None, now - dt.timedelta(hours=6)),
+        (s1, s1nm, now.date() - dt.timedelta(days=7), "claude-sonnet-4-5",
+         f"{DEMO_MARK} 직전 분기 기준 PER 9.1배 — 이력 비교 검증용",
+         report_old, 17_900, 1_980, 21_300, "ok", None, now - dt.timedelta(days=7, hours=6)),
+        (s2, s2nm, now.date(), "claude-sonnet-4-5", None,
+         report_err, 1_120, 0, 7_400, "error",
+         f"{DEMO_MARK} Anthropic API 오류(529 overloaded) - 리포트 생성 실패",
+         now - dt.timedelta(hours=6)),
+    ]
+    cur.executemany(
+        "INSERT INTO company_analysis_report (stk_cd, stk_nm, as_of_date, model, summary, report_text,"
+        " input_tokens, output_tokens, latency_ms, status, error_msg, created_at)"
+        " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
+        " ON DUPLICATE KEY UPDATE report_text=VALUES(report_text), summary=VALUES(summary),"
+        " status=VALUES(status), error_msg=VALUES(error_msg)", reports)
+    print(f"company_analysis_report: {len(reports)}건 (정상 2 · 오류 1)")
+    print(f"company_corp_code: 2건 ({s1}, {s2})")
+
+
 # ----------------------------------------------------------------- 적재
 def demo_account_id(cur) -> int | None:
     cur.execute("SELECT id FROM account WHERE account_no=%s AND env=%s", (DEMO_ACCOUNT_NO, DEMO_ENV))
@@ -788,6 +933,9 @@ def load(conn) -> None:
         # ---------------------------------------------------- 스캔 시도 이력 데모
         load_trend_attempt(cur, now)
 
+        # ---------------------------------------------------- 기업 재무분석(리서치) 데모
+        load_fundamentals(cur, now)
+
     conn.commit()
     print("\nDEMO 데이터 적재 완료. 검증 후 반드시 `demo_data.py clear` 를 실행하세요.")
 
@@ -850,6 +998,12 @@ def clear(conn) -> None:
             cur.execute("DELETE FROM trend_scan_request WHERE requested_by LIKE %s", (DEMO_MARK + "%",))
             deleted["trend_scan_request"] = cur.rowcount
 
+        # 기업 재무분석(리서치) 데모 — 데모 종목코드 접두로만 지운다(실데이터 종목은 건드리지 않음)
+        for tbl in FIN_TABLES:
+            if table_exists(cur, tbl):
+                cur.execute(f"DELETE FROM {tbl} WHERE stk_cd LIKE %s", (DEMO_FIN_PREFIX + "%",))
+                deleted[tbl] = cur.rowcount
+
         cur.execute("DELETE FROM app_login_log WHERE username=%s", (DEMO_LOCK_USER,))
         deleted["app_login_log"] = cur.rowcount
         cur.execute("DELETE FROM app_user WHERE username=%s", (DEMO_LOCK_USER,))
@@ -893,6 +1047,9 @@ def status(conn) -> int:
             checks.append(("trend_scan_attempt", "research_summary LIKE %s", DEMO_MARK + "%"))
         if table_exists(cur, "trend_scan_request"):
             checks.append(("trend_scan_request", "requested_by LIKE %s", DEMO_MARK + "%"))
+        for tbl in FIN_TABLES:
+            if table_exists(cur, tbl):
+                checks.append((tbl, "stk_cd LIKE %s", DEMO_FIN_PREFIX + "%"))
         for tbl, cond, val in checks:
             cur.execute(f"SELECT COUNT(*) c FROM {tbl} WHERE {cond}", (val,))
             c = cur.fetchone()["c"]

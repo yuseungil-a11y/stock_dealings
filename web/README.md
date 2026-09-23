@@ -64,6 +64,8 @@ web/
 | 전략 | 신호 기록 | `strategy.signals` | BUY/SELL/HOLD/BLOCK, 알고리즘 필터 |
 | 전략 | Claude 판단 | `strategy.claude` | Claude 거부권 필터(`llm_decision_log`) 판단 기록 — 오늘 요약 카드, 기간·종목·결과 필터 |
 | 전략 | **산업 트렌드** | `strategy.trend` | 하루 1회 트렌드 스캔(`trend_scan_run`) 이력 + 선별된 매수 후보(`trend_scan_candidate`) + **모든 시도 이력**(`trend_scan_attempt`, 실패 포함) — 요약 카드, 기간·지역·매칭방식·신호 여부·**구분(예약/수동)** 필터, 실행별 후보 펼침, 조사 원문 `<details>`, **"지금 다시 조사" 버튼(admin 전용)** |
+| 리서치 | **재무분석 리포트** | `research.reports` | Claude 재무분석 리포트가 있는 종목을 **종목별 최신 1건**씩 나열(요약 · PER · PBR · ROE · 부채비율 · 리포트일). 종목 검색 · 리포트 상태 · PER/PBR/ROE/부채비율 범위 필터, 정렬(화이트리스트). **계좌 선택 없음** |
+| 리서치 | **기업 재무분석** | `research.company` | 종목 선택(검색 목록) → 최근 5년 재무제표(연도 · 보고서구분 한글 라벨) · 최근 밸류에이션(계산 기준일 · `financial_asof`) · PER/PBR 추이 SVG · **Claude 재무분석 리포트 전문** · 리포트 이력. **계좌 선택 없음** |
 | 시스템 | 서버 상태 | `system.status` | `server_status` 하트비트(지연 경고), 런타임 설정, 실행 이력, API 호출 통계 |
 | 시스템 | 이벤트 로그 | `system.events` | 레벨·분류·기간·메시지 필터 (7일 보관) |
 | 시스템 | **이벤트 · API 오류 보관** | `system.archive` | `event_archive` / `api_error_log` 탭 조회 (장기 보관본) |
@@ -87,6 +89,10 @@ web/
 | `balance_series` | 잔고 추이 (`days`=1~365) |
 | `events` | 최근 이벤트 (`level`) |
 | `accounts` | 계좌 목록(마스킹) |
+| `research_stocks` | 재무데이터 · 분석 리포트가 있는 종목 목록 (`q`, `page`) |
+| `research_company` | 종목별 재무제표 5년 · 최근 밸류에이션 · 최신 리포트 메타 (`stk` 필수, 영숫자 12자 이내) — 리포트 **본문은 포함하지 않는다**(화면 전용) |
+
+> `research_*` 는 하루 1회만 바뀌는 데이터라 대시보드 30초 자동 갱신에 넣지 않았습니다.
 
 ### 3.1 보유종목 파생 필드 (상장폐지 대응)
 
@@ -151,6 +157,27 @@ web/
 예약·수동의 **모든 시도를 실패까지 영구 보존**합니다. 화면에서는 시각·구분(예약/수동)·요청자·상태(정상/부분 성공/오류,
 부분 성공은 "웹 검색 실패 가능성" 툴팁)·웹검색 횟수·후보 수·토큰·지연·오류 메시지와 함께,
 행마다 `<details>` 로 **조사 원문(`research_summary`) 전문**을 개행 그대로(모두 `h()` 이스케이프) 보여줍니다.
+
+## 3.4 기업 재무분석 (리서치 — 매매와 완전히 무관)
+
+DART 재무데이터와 Claude 재무분석 리포트를 보는 **순수 조회 · 연구용** 화면입니다.
+계좌 · 주문 · 알고리즘과 어떤 식으로도 연결되어 있지 않으며, 라우트에 `account` 를 지정하지 않아
+**계좌 선택 UI 자체가 나타나지 않습니다**. 쓰기는 전혀 하지 않습니다.
+
+두 화면 상단에 고정 면책 문구를 띄웁니다(`research_disclaimer()`):
+> 이 리포트는 참고용이며 매매를 자동으로 실행하지 않습니다. 투자 판단의 책임은 본인에게 있습니다.
+
+| 표 | 화면에서 쓰는 곳 |
+|---|---|
+| `company_corp_code` | 회사명 · DART corp_code 표시 |
+| `company_financial` | 최근 **5개 사업연도** 재무제표. `reprt_code` 는 한글 라벨(`11013` 1분기 / `11012` 반기 / `11014` 3분기 / `11011` 사업보고서)로 보여주고, 금액은 **억원 단위**(원 단위 원본은 `<details>` 안에 별도 표) |
+| `company_valuation_daily` | 최근 밸류에이션(PER/PBR/ROE/부채비율)과 **계산 기준일 · `financial_asof`** 병기, PER·PBR 추이 SVG(30/60/90/180/365일) + 일별 값 표 |
+| `company_analysis_report` | `summary` 와 `report_text` **전문**을 접지 않고 바로 노출(개행 유지, 전부 `h()` 이스케이프). 리포트가 없으면 "아직 분석 리포트가 생성되지 않았습니다" 안내. `status='error'` 행은 오류 배지 + `error_msg` |
+
+* 네 표는 **비어 있어도 화면이 정상 동작**합니다(표별 안내문). 권한·표 부재는 `repo_can_read()` 로 감지합니다.
+* 적자 등으로 PER/PBR 이 0 이하이면 **"산출불가"** 로 표기하고 추이 그래프에서 제외합니다.
+* 종목코드(`stk`)는 **영숫자 12자 이내**만 받아들이고, 값은 prepared statement 로만 바인딩합니다.
+* 정렬(`sort`)은 화이트리스트 키 → 고정 `ORDER BY` 조각 매핑이며, 범위 필터는 `clean_num()` 을 통과한 수치만 바인딩합니다.
 
 ## 4. 보안 설계 요약
 
@@ -225,6 +252,12 @@ python D:\claude_stock_dealings\tools\demo_data.py clear
   `trend_scan_request` 1건(`status='done'` — **서버 처리 대상이 아님**)을 적재합니다.
   격리는 `research_summary` / `requested_by` 의 `[DEMO]` 마커로 하며, 시도 이력은 UNIQUE 제약이 없어
   오늘 날짜에도 실데이터를 건드리지 않고 덧붙입니다.
+* **기업 재무분석(리서치) 검증용**으로 종목코드 접두 **`DEMOF`** 데모 2종목을 적재합니다
+  (실제 종목코드는 6자리 숫자여서 겹치지 않습니다): `company_corp_code` 2건,
+  `company_financial` 12건(`DEMOF01` 6개 사업연도 + 당해 1분기·반기 / `DEMOF02` 3개 사업연도 +
+  **전 항목 NULL 1건** — 미공시 표시 검증), `company_valuation_daily` 50건(`DEMOF01` 45일 추이 ·
+  `DEMOF02` 5일, 적자라 PER `NULL`·ROE 음수), `company_analysis_report` 3건(**정상 2**(최신 + 1주일 전,
+  리포트 이력 검증) · **오류 1**). 정상 리포트 본문에는 화면 이스케이프(`h()`) 확인용 payload 가 들어 있습니다.
 * 전역 표(`system_setting`, `server_status`, `algorithm_selection`)는 건드리지 않습니다.
 * 비밀번호는 환경변수 `STOCK_TEST_PW`(하위 호환 `STOCK_DEMO_PW`)로만 받고 소스/로그에 남기지 않습니다.
 
