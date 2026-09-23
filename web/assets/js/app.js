@@ -267,36 +267,35 @@
     setInterval(updateStatus, 30000);
   }
 
-  /* ------------------------------------------------ 자동거래 제어: REAL 재확인 모달
-   * 서버 GUI(stock_svr)의 ConfirmRealDialog 와 동일한 동작 — "REAL" 을 정확히(대소문자·공백까지)
-   * 입력해야만 확인 버튼이 활성화된다. 실제 서버 재검증은 index.php 의 auto_trading_start
-   * 핸들러가 confirm_word 값을 다시 검사하므로, 이 JS 는 사용성을 위한 1차 방어일 뿐이다. */
-  var CONFIRM_WORD = 'REAL';
+  /* ------------------------------------------------ 자동거래 제어: 아이디·비밀번호 재확인 모달
+   * 서버 GUI(stock_svr) 와 동일한 방향 — 고정 문구("REAL") 대신 로그인 아이디+비밀번호 재입력을
+   * 요구한다. 실제 검증은 index.php 의 auto_trading_start 핸들러가 password_verify 로 다시
+   * 수행하므로, 이 JS 는 "완전히 비어있는 입력"만 막는 사용성 보조일 뿐이다. */
   var startBtn = $('#btnAutoStart');
   var dlg = $('#realConfirmDialog');
   if (startBtn && dlg && typeof dlg.showModal === 'function') {
-    var input = $('#realConfirmInput', dlg);
+    var usernameInput = $('#confirmUsername', dlg);
+    var passwordInput = $('#confirmPassword', dlg);
     var okBtn = $('#realConfirmOk', dlg);
     var cancelBtn = $('#realConfirmCancel', dlg);
-    var hiddenWord = $('#confirmWordInput');
     var startForm = $('#startForm');
 
     function checkInput() {
-      okBtn.disabled = (input.value !== CONFIRM_WORD);
+      okBtn.disabled = (usernameInput.value.trim() === '' || passwordInput.value === '');
     }
     startBtn.addEventListener('click', function () {
-      input.value = '';
+      passwordInput.value = '';
       checkInput();
       dlg.showModal();
-      input.focus();
+      passwordInput.focus();
     });
-    input.addEventListener('input', checkInput);
+    usernameInput.addEventListener('input', checkInput);
+    passwordInput.addEventListener('input', checkInput);
     cancelBtn.addEventListener('click', function () { dlg.close(); });
     okBtn.addEventListener('click', function () {
-      if (input.value !== CONFIRM_WORD) { return; }
-      hiddenWord.value = input.value;
+      if (usernameInput.value.trim() === '' || passwordInput.value === '') { return; }
       dlg.close();
-      startForm.submit();
+      startForm.requestSubmit ? startForm.requestSubmit() : startForm.submit();
     });
   }
 })();

@@ -12,6 +12,7 @@ import threading
 from decimal import Decimal
 from typing import Any, Iterable, Sequence
 
+import bcrypt
 import pymysql
 from pymysql.cursors import DictCursor
 
@@ -100,6 +101,32 @@ def should_log_api_error(http_status, return_code) -> bool:
         return int(return_code) != 0
     except (TypeError, ValueError):
         return True      # 해석 불가한 응답코드는 오류로 본다
+
+
+# ---------------------------------------------------------------------- #
+# 인증 (app_user, 웹과 공유) - 자동거래 시작 확인창 재검증용 (R-?? / auto_trade_dialog)
+# ---------------------------------------------------------------------- #
+# 계정이 없어도 동일한 연산비용을 들이기 위한 더미 해시(web/lib/auth.php 의
+# AUTH_DUMMY_HASH 와 동일한 값 - 무작위 비밀번호의 bcrypt 해시이며 비밀값이 아니다).
+_DUMMY_PASSWORD_HASH = "$2y$10$usesomesillystringfore7hnbRJHxXVLeakoG8K30oukPsA.ztMG"  # noqa: S105
+
+
+def _check_password(password_hash: str | None, password: str) -> bool:
+    """bcrypt 해시 대비 비밀번호를 검증하는 순수 함수(DB 접근 없음, 단위테스트용으로 분리).
+
+    PHP `password_hash($x, PASSWORD_DEFAULT)` 가 만드는 해시는 `$2y$` 접두사를 쓰는데,
+    Python `bcrypt` 라이브러리는 버전에 따라 이를 `$2b$` 로 바꿔줘야 검증되는 경우가
+    있다(알고리즘은 동일, 버전 태그 표기만 다름) - 항상 치환한 뒤 검증한다.
+    비밀번호 값은 반환값에도, 예외 메시지에도 절대 그대로 남기지 않는다.
+    """
+    if not password_hash:
+        return False
+    normalized = str(password_hash).replace("$2y$", "$2b$", 1)
+    try:
+        return bcrypt.checkpw(str(password).encode("utf-8"), normalized.encode("utf-8"))
+    except (ValueError, TypeError):
+        # 형식이 깨진 해시 등 - 실패로 처리한다(예외 메시지에 비밀번호가 담기지 않음).
+        return False
 
 
 class GateChangeError(PermissionError):
@@ -1482,3 +1509,41 @@ class Database:
         out["api_error_log"] = self.execute(
             "DELETE FROM api_error_log WHERE created_at < (NOW() - INTERVAL %s DAY)", (d,))
         return out
+
+    # ================================================================== #
+    # 인증 (app_user, 웹과 공유) - 자동거래 시작 확인창의 아이디/비밀번호 재확인용
+    # ================================================================== #
+    def verify_login(self, username: str, password: str) -> tuple[bool, str]:
+        """app_user 자격증명 재확인(웹과 동일 계정/해시 공유). (통과여부, 사유|role) 반환.
+
+        - 계정이 없어도 더미 해시로 동일하게 bcrypt 검증을 수행해 타이밍으로 계정 존재
+          여부가 드러나지 않게 한다(web/lib/auth.php 의 AUTH_DUMMY_HASH 와 동일한 방어 -
+          `_check_password` 호출은 계정 존재 여부와 무관하게 항상 먼저 실행된다).
+        - is_active=0 이거나 locked_until 이 현재보다 미래면 거부한다.
+        - **주의**: `app_user.failed_count`/`locked_until` 은 이 메서드에서 절대 갱신하지
+          않는다 - 그 락아웃 로직은 web/lib/auth.php 의 웹 로그인 전용이며, 여기서는
+          자동거래 시작 확인창의 순수 읽기 전용 재확인만 한다.
+        - 비밀번호 값 자체는 반환값·로그·예외 어디에도 남기지 않는다.
+
+        반환: 성공 시 `(True, role)` (예: "admin"), 실패 시
+        `(False, "계정 없음"|"비활성 계정"|"잠긴 계정"|"비밀번호 불일치")`.
+        """
+        uname = str(username or "").strip()
+        row = None
+        if uname:
+            row = self.query_one(
+                "SELECT id, username, password_hash, display_name, role, is_active, "
+                "locked_until FROM app_user WHERE username=%s", (uname,))
+        stored_hash = row["password_hash"] if row else _DUMMY_PASSWORD_HASH
+        # 계정이 있든 없든 항상 bcrypt 검증을 수행한다(타이밍 사이드채널 방지).
+        verified = _check_password(stored_hash, password)
+        if row is None:
+            return False, "계정 없음"
+        if not verified:
+            return False, "비밀번호 불일치"
+        if not row.get("is_active"):
+            return False, "비활성 계정"
+        locked_until = row.get("locked_until")
+        if locked_until is not None and locked_until > now_kst():
+            return False, "잠긴 계정"
+        return True, str(row.get("role") or "viewer")

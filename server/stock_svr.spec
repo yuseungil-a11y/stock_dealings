@@ -14,7 +14,9 @@ _SKIP_ANTHROPIC = ('anthropic.lib.tools', 'anthropic.lib.environments')
 hidden = ['pymysql', 'httpx', 'websockets', 'tkinter', 'tkinter.ttk',
           'tkinter.messagebox', 'tkinter.simpledialog',
           'certifi', 'jiter', 'sniffio', 'typing_extensions',
-          'annotated_types', 'typing_inspection']
+          'annotated_types', 'typing_inspection',
+          # 자동거래 시작 확인창의 아이디/비밀번호 재확인(app_user, 웹과 공유)
+          'bcrypt']
 hidden += [m for m in collect_submodules('anthropic') if not m.startswith(_SKIP_ANTHROPIC)]
 for pkg in ('pydantic', 'pydantic_core', 'anyio', 'httpx2', 'httpcore2'):
     hidden += collect_submodules(pkg)

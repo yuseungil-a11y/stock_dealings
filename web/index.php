@@ -173,18 +173,24 @@ if ($method === 'POST') {
             true, 303);
         exit;
     } elseif ($action === 'auto_trading_start') {
-        /* 자동거래 시작(관리자 전용) — "REAL" 재확인 필수.
-         * 클라이언트 JS 로 이미 "REAL" 을 정확히 입력해야 버튼이 눌리게 막지만, curl 등으로 이
-         * 검사를 건너뛰고 곧바로 POST 할 수 있으므로 서버에서도 반드시 다시 검사한다(방어의 마지막 줄). */
+        /* 자동거래 시작(관리자 전용) — 로그인 아이디·비밀번호 재확인 필수(step-up 재인증, 로그인 절차 아님).
+         * 클라이언트 JS 로 이미 두 칸을 채워야 버튼이 눌리게 막지만, curl 등으로 이 검사를 건너뛰고
+         * 곧바로 POST 할 수 있으므로 서버에서도 반드시 다시 검사한다(방어의 마지막 줄).
+         * 본인 계정으로만 재확인을 허용한다(다른 admin 자격증명으로 우회 방지) — 계정명 일치 여부와
+         * 무관하게 항상 password_verify 를 한 번 수행해 타이밍으로 계정 존재/일치를 노출하지 않는다. */
         if ($user === null || !auth_is_admin()) {
             http_response_code(403);
             render_standalone(['title' => '접근 권한 없음',
                 'message' => '자동거래 시작은 관리자만 할 수 있습니다.']);
             exit;
         }
-        $confirm = is_string($_POST['confirm_word'] ?? null) ? $_POST['confirm_word'] : '';
-        if ($confirm !== 'REAL') {
-            flash_set('확인 문구가 정확히 "REAL" 이 아니어서 시작 요청을 취소했습니다(공백·대소문자까지 정확히 일치해야 합니다).', 'err');
+        $inUser = clean_text($_POST['username'] ?? '', 50);
+        $inPw = is_string($_POST['password'] ?? null) ? $_POST['password'] : '';
+        $freshHash = (string)(db_val('SELECT password_hash FROM app_user WHERE id = ? LIMIT 1', [$user['id']]) ?? AUTH_DUMMY_HASH);
+        $pwOk = password_verify($inPw, $freshHash);
+        $verified = ($inUser === $user['username']) && $pwOk;
+        if (!$verified) {
+            flash_set('아이디 또는 비밀번호가 올바르지 않아 시작 요청을 취소했습니다.', 'err');
             header('Location: ' . url_page('control.auto_trading'), true, 303);
             exit;
         }

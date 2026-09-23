@@ -1,15 +1,17 @@
 """자동거래 시작 확인창.
 
 현재 모드/주문 게이트/활성 알고리즘/리스크 한도를 요약해 보여주고 시작 여부를 확인한다.
-**게이트가 열려 있고 REAL 이면** `START` 를 직접 입력해야 시작 버튼이 활성화된다(오조작 방지).
+**게이트가 열려 있고 REAL 이면** 실제 로그인 아이디·비밀번호(웹과 공유하는 `app_user`)를
+다시 입력해야 하며, 관리자(admin) 계정으로 검증에 통과해야 시작할 수 있다(오조작 방지).
 """
 from __future__ import annotations
 
+import logging
 import tkinter as tk
 from decimal import Decimal, InvalidOperation
 from tkinter import ttk
 
-CONFIRM_WORD = "START"
+log = logging.getLogger(__name__)
 
 
 def universe_summary(algo: dict | None) -> str:
@@ -115,10 +117,12 @@ def _money(value) -> str:
 class AutoTradeStartDialog(tk.Toplevel):
     """자동거래 시작 확인 대화상자."""
 
-    def __init__(self, master, info: dict):
+    def __init__(self, master, info: dict, db):
         super().__init__(master)
         self.info = info
+        self.db = db
         self.result = False
+        self.verified_username: str | None = None
         self.title("자동거래 시작 확인")
         self.resizable(False, False)
         self.transient(master)
@@ -179,18 +183,31 @@ class AutoTradeStartDialog(tk.Toplevel):
                       wraplength=520, justify="left").grid(
                 row=7, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
-        # -- 확인 입력 ---------------------------------------------------- #
-        self.word_var = tk.StringVar()
+        # -- 확인 입력 (아이디/비밀번호 재확인) --------------------------- #
+        self.user_var = tk.StringVar()
+        self.pw_var = tk.StringVar()
+        self.error_var = tk.StringVar()
         if info["require_word"]:
             warn = ttk.LabelFrame(frm, text="실전 주문 전송 확인", padding=8)
             warn.pack(fill="x", pady=(8, 0))
             ttk.Label(warn, text="⚠ 실계좌에 실제 주문이 전송되는 상태입니다.",
                       foreground="#c62828", font=("맑은 고딕", 10, "bold")).pack(anchor="w")
-            ttk.Label(warn, text=f"계속하려면 아래에 {CONFIRM_WORD} 을(를) 입력하세요.").pack(anchor="w")
-            entry = ttk.Entry(warn, textvariable=self.word_var, width=24)
-            entry.pack(anchor="w", pady=4)
-            entry.focus_set()
-            self.word_var.trace_add("write", lambda *_: self._check())
+            ttk.Label(warn, text="계속하려면 관리자 계정의 아이디·비밀번호를 다시 입력하세요.").pack(anchor="w")
+            id_row = ttk.Frame(warn)
+            id_row.pack(fill="x", pady=(4, 0))
+            ttk.Label(id_row, text="아이디", width=8).pack(side="left")
+            user_entry = ttk.Entry(id_row, textvariable=self.user_var, width=24)
+            user_entry.pack(side="left")
+            pw_row = ttk.Frame(warn)
+            pw_row.pack(fill="x", pady=(4, 0))
+            ttk.Label(pw_row, text="비밀번호", width=8).pack(side="left")
+            pw_entry = ttk.Entry(pw_row, textvariable=self.pw_var, width=24, show="*")
+            pw_entry.pack(side="left")
+            ttk.Label(warn, textvariable=self.error_var, foreground="#c62828").pack(
+                anchor="w", pady=(4, 0))
+            user_entry.focus_set()
+            self.user_var.trace_add("write", lambda *_: self._check())
+            self.pw_var.trace_add("write", lambda *_: self._check())
 
         btns = ttk.Frame(frm)
         btns.pack(fill="x", pady=(12, 0))
@@ -210,13 +227,34 @@ class AutoTradeStartDialog(tk.Toplevel):
         ttk.Label(parent, text=value, foreground=color).grid(row=row, column=1, sticky="w", pady=1)
 
     def _check(self) -> None:
-        ok = self.word_var.get().strip() == CONFIRM_WORD
+        """두 칸이 모두 비어있지 않은지만 본다 - 실제 자격증명 검증은 `_ok()`(클릭 시)에서 한다."""
+        ok = bool(self.user_var.get().strip()) and bool(self.pw_var.get())
         self.ok_btn.configure(state="normal" if ok else "disabled")
 
     def _ok(self) -> None:
-        if self.info["require_word"] and self.word_var.get().strip() != CONFIRM_WORD:
+        if not self.info["require_word"]:
+            self.result = True
+            self.destroy()
+            return
+        username = self.user_var.get().strip()
+        password = self.pw_var.get()
+        if not username or not password:
+            return
+        ok, role_or_reason = self.db.verify_login(username, password)
+        if not ok:
+            log.warning("자동거래 시작 확인 실패 (id=%s): %s", username, role_or_reason)
+        elif role_or_reason != "admin":
+            log.warning("자동거래 시작 확인 거부 (id=%s): 관리자 권한 아님(role=%s)",
+                        username, role_or_reason)
+            ok = False
+        if not ok:
+            # 계정 존재 여부·구체적 실패 사유는 화면에 노출하지 않는다(로그에만 남김).
+            self.error_var.set("아이디 또는 비밀번호가 올바르지 않습니다")
+            self.pw_var.set("")
+            self._check()
             return
         self.result = True
+        self.verified_username = username
         self.destroy()
 
     def _cancel(self) -> None:

@@ -229,15 +229,19 @@ class App(tk.Tk):
             approved = True
             log.info("스모크 모드: 자동거래 시작 확인창 자동 승인 (게이트 닫힘 확인됨)")
         else:
-            dlg = AutoTradeStartDialog(self, info)
+            dlg = AutoTradeStartDialog(self, info, self.db)
             self.wait_window(dlg)
             approved = dlg.result
         if not approved:
             self.log_event("INFO", "algo", "자동거래 시작 취소됨 (UI 확인창)")
             return
 
+        by = "UI 버튼"
+        if info["require_word"] and not self._auto_confirm and dlg.verified_username:
+            by = f"UI 버튼({dlg.verified_username})"
+
         # R-11: 확인창에 보여준 게이트와 지금 게이트를 비교해 더 열렸으면 거부한다
-        if self.engine.start_auto_trading(by="UI 버튼", shown_gate=info["gate"]):
+        if self.engine.start_auto_trading(by=by, shown_gate=info["gate"]):
             state = "주문 전송 ON" if info["gate_open"] else "관찰(신호만)"
             self.log_event("WARN" if info["gate_open"] else "INFO", "algo",
                            f"자동거래 시작 (UI 버튼, {info['mode']}, {state}, "

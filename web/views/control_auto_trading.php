@@ -38,7 +38,6 @@ $cmds = repo_recent_auto_trading_commands(20);
     <form method="post" action="<?= h(u('index.php')) ?>" id="startForm">
       <?= csrf_field() ?>
       <input type="hidden" name="action" value="auto_trading_start">
-      <input type="hidden" name="confirm_word" id="confirmWordInput" value="">
       <button class="btn btn-primary" type="button" id="btnAutoStart">자동거래 시작</button>
     </form>
     <form method="post" action="<?= h(u('index.php')) ?>">
@@ -47,14 +46,18 @@ $cmds = repo_recent_auto_trading_commands(20);
       <button class="btn" type="submit">자동거래 중지</button>
     </form>
   </div>
-  <p class="hint">시작은 "REAL" 재확인 절차를 거칩니다(대소문자·공백까지 정확히 일치해야 함). 중지는 항상 안전한 방향이므로 확인 절차가 없습니다.</p>
+  <p class="hint">시작은 로그인 아이디·비밀번호 재확인 절차를 거칩니다. 중지는 항상 안전한 방향이므로 확인 절차가 없습니다.</p>
 
   <dialog id="realConfirmDialog" class="confirmdlg">
     <div class="confirmdlg-body">
       <h3>실계좌 자동거래 시작 확인</h3>
       <p>⚠ 자동거래를 시작하면 서버 게이트 설정에 따라 <strong>실제 주문이 즉시 전송될 수 있습니다.</strong></p>
-      <p>계속하려면 아래 입력칸에 정확히 <strong class="mono">REAL</strong> 을 입력하세요(대문자, 공백 없이).</p>
-      <input type="text" id="realConfirmInput" autocomplete="off" spellcheck="false" placeholder="REAL">
+      <p>계속하려면 로그인 아이디와 비밀번호를 다시 입력하세요.</p>
+      <p id="confirmError" class="alert alert-err" hidden>아이디와 비밀번호를 모두 입력하세요.</p>
+      <input type="text" id="confirmUsername" name="username" autocomplete="username" form="startForm"
+             value="<?= h($user['username'] ?? '') ?>" placeholder="아이디">
+      <input type="password" id="confirmPassword" name="password" autocomplete="current-password" form="startForm"
+             placeholder="비밀번호">
       <div class="confirmdlg-actions">
         <button class="btn" type="button" id="realConfirmCancel">취소</button>
         <button class="btn btn-primary" type="button" id="realConfirmOk" disabled>시작</button>
