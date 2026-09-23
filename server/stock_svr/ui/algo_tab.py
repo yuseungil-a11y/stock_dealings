@@ -116,8 +116,11 @@ class AlgoTab(ttk.Frame):
             ttk.Spinbox(row, from_=1, to=999, textvariable=pv, width=5).pack(side="left", padx=(0, 6))
             missing = "" if a["code"] in known else "  (구현 없음)"
             lock = " 🔒" if a["is_locked"] else ""
-            btn = ttk.Button(row, text=f"{a['name']} [{a['code']}]{lock}{missing}",
-                             command=lambda aid=a["id"]: self.select(aid), width=34)
+            # 좌측 목록 폭이 좁아 "이름 [code]"를 다 쓰면 잘리는 경우가 있었다(특히 이름이
+            # 긴 신규 필터들). 코드는 우측 파라미터 화면 제목(select())에 이미 나오므로
+            # 목록에서는 이름만 보여준다.
+            btn = ttk.Button(row, text=f"{a['name']}{lock}{missing}",
+                             command=lambda aid=a["id"]: self.select(aid))
             btn.pack(side="left", fill="x", expand=True)
 
         if self.algos and self.selected_id is None:
@@ -151,10 +154,12 @@ class AlgoTab(ttk.Frame):
         # (창을 좁혀도 오른쪽이 잘리지 않도록 한 줄에 여러 열을 두지 않는다)
         for i, d in enumerate(defs):
             r = i * 2
+            # 파라미터 블록 사이 간격이 좁아 값 줄과 다음 파라미터 라벨이 붙어 보이던 문제
+            # — 위쪽(라벨/입력칸) 여백과 아래쪽(설명 줄) 여백을 모두 넉넉히 늘린다.
             ttk.Label(self.form, text=f"{d['label']}").grid(
-                row=r, column=0, sticky="e", padx=(0, 6), pady=(6, 0))
+                row=r, column=0, sticky="e", padx=(0, 6), pady=(12, 0))
             var, widget = self._make_widget(d, a["params"].get(d["param_key"], d["default_value"]))
-            widget.grid(row=r, column=1, sticky="w", pady=(6, 0))
+            widget.grid(row=r, column=1, sticky="w", pady=(12, 0))
             self._param_widgets[d["param_key"]] = (d, var)
             hint = []
             if d.get("unit"):
@@ -165,8 +170,9 @@ class AlgoTab(ttk.Frame):
             text = " / ".join(hint)
             if d.get("description"):
                 text += f"  —  {d['description']}"
-            lbl = ttk.Label(self.form, text=text, foreground="#777777", wraplength=360, justify="left")
-            lbl.grid(row=r + 1, column=1, columnspan=2, sticky="w", padx=(0, 6), pady=(0, 2))
+            lbl = ttk.Label(self.form, text=text, foreground="#777777", wraplength=360,
+                            justify="left")
+            lbl.grid(row=r + 1, column=1, columnspan=2, sticky="w", padx=(0, 6), pady=(2, 8))
             self._desc_labels.append(lbl)
         self._build_extra(a)
         self.after_idle(self._fit_desc_width)
