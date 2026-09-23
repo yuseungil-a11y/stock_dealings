@@ -116,6 +116,7 @@ def _ensure_loaded() -> None:
         claude_trend_scan,
         fundamentals_filter,
         ma_cross_filter,
+        macd_cross,
         momentum_screen,
         risk_guard,
         universe_filter,

@@ -37,7 +37,9 @@ INSERT INTO algorithm (code, name, role, description, is_locked, sort_order) VAL
  ('claude_trend_scan',   '산업 트렌드 스캔(Claude)', 'entry',
   '하루 1회(scan_time), 국내(ka90001 테마그룹 등락률)+해외 산업 동향을 Claude 웹 검색으로 조사해 유망 테마를 뽑고, 국내 종목은 ka90002 테마구성종목 또는 종목마스터 이름 매칭으로만 확정한다(매칭 실패 종목은 매수하지 않고 후보로만 기록). 확정 종목을 매수 후보로 만들어 다른 진입 알고리즘과 동일하게 risk_guard 등 전 안전장치를 통과해야 주문된다. 후보/미매칭 내역은 웹 "전략 > 산업 트렌드"에서 조회 가능.', 0, 15),
  ('fundamentals_filter', '재무 건전성 필터(PER·PBR·ROE·부채비율)', 'filter',
-  '매매와 분리된 DART 재무분석 결과(company_valuation_daily)를 신규 매수 신호에 적용하는 필터. PER·PBR·ROE·부채비율 각각의 개별 기준값을 넘으면(개별 기준값 통과제) 매수를 차단한다. 재무데이터가 없거나 오래되면(stale_days) 매수를 차단한다(안전 우선, fail-closed). 매도·손절·청산에는 관여하지 않는다.', 0, 38)
+  '매매와 분리된 DART 재무분석 결과(company_valuation_daily)를 신규 매수 신호에 적용하는 필터. PER·PBR·ROE·부채비율 각각의 개별 기준값을 넘으면(개별 기준값 통과제) 매수를 차단한다. 재무데이터가 없거나 오래되면(stale_days) 매수를 차단한다(안전 우선, fail-closed). 매도·손절·청산에는 관여하지 않는다.', 0, 38),
+ ('macd_cross',           'MACD 골든크로스',          'entry',
+  'universe_filter와 동일한 시총 상위 종목 로직(자체 파라미터)을 대상으로, MACD 라인이 Signal 라인을 아래에서 위로 교차(골든크로스)하는 순간만 매수 신호를 낸다. 제로선 필터 없음(단순 교차만). 이미 보유·거래불가 종목 제외, 일 신규진입 한도 적용.', 0, 12)
 ON DUPLICATE KEY UPDATE name=VALUES(name), role=VALUES(role), description=VALUES(description),
                         is_locked=VALUES(is_locked), sort_order=VALUES(sort_order);
 
@@ -187,6 +189,31 @@ SELECT a.id, p.k, p.label, p.t, p.d, p.mn, p.mx, p.eo, p.u, p.ds, p.so FROM algo
  SELECT 'apply_to',          '적용 대상',            'enum',   'entry',NULL,NULL,       'entry:신규 진입 매수만,entry_and_avg:신규 진입 + 물타기',NULL,'어떤 매수 신호에 적용할지. 매도·손절·청산에는 어떤 설정에서도 관여하지 않는다',9 UNION ALL
  SELECT 'stale_days',        '재무데이터 허용 경과일','int',   '10',   '1','90',        NULL,'일','company_valuation_daily 갱신이 이 일수보다 오래되면(또는 데이터가 없으면) 신규 매수 차단',10
 ) p ON a.code='fundamentals_filter'
+ON DUPLICATE KEY UPDATE label=VALUES(label), value_type=VALUES(value_type), default_value=VALUES(default_value),
+  min_value=VALUES(min_value), max_value=VALUES(max_value), enum_options=VALUES(enum_options), unit=VALUES(unit),
+  description=VALUES(description), sort_order=VALUES(sort_order);
+
+-- ---- 파라미터 정의: macd_cross -----------------------------------------
+INSERT INTO algorithm_param_def (algorithm_id, param_key, label, value_type, default_value, min_value, max_value, enum_options, unit, description, sort_order)
+SELECT a.id, p.k, p.label, p.t, p.d, p.mn, p.mx, p.eo, p.u, p.ds, p.so FROM algorithm a JOIN (
+ SELECT 'fast_period'       k,'MACD 단기 EMA 기간'  label,'int' t,'12' d,'2' mn,'100' mx,NULL eo,'일' u,'MACD 단기 EMA 기간' ds,1 so UNION ALL
+ SELECT 'slow_period',       'MACD 장기 EMA 기간',  'int',    '26',  '3','200',      NULL,'일','MACD 장기 EMA 기간 (단기보다 커야 함)',2 UNION ALL
+ SELECT 'signal_period',     'Signal 선 EMA 기간',  'int',    '9',   '2','100',      NULL,'일','Signal 선 EMA 기간',3 UNION ALL
+ SELECT 'top_n',             '시가총액 상위 N',     'int',    '100', '1','2000',     NULL,'개','시가총액 순위 상위 N개만 대상 (universe_filter와 별개 독립 설정)',4 UNION ALL
+ SELECT 'use_kospi',         '코스피 포함',         'bool',   '1',   NULL,NULL,      NULL,NULL,'1이면 코스피(거래소) 종목을 대상에 포함',5 UNION ALL
+ SELECT 'use_kosdaq',        '코스닥 포함',         'bool',   '1',   NULL,NULL,      NULL,NULL,'1이면 코스닥 종목을 대상에 포함',6 UNION ALL
+ SELECT 'use_etf',           'ETF 포함',            'bool',   '0',   NULL,NULL,      NULL,NULL,'MACD는 개별종목 추세 추종이 목적이라 기본은 ETF 제외. 1이면 ETF도 대상에 포함',7 UNION ALL
+ SELECT 'min_price',         '최소 주가(1주)',      'int',    '10000','0','10000000',NULL,'원','1주 가격이 이 값 미만인 종목 제외. 0 이면 사용 안 함',8 UNION ALL
+ SELECT 'max_price',         '최대 주가(1주)',      'int',    '0',   '0','100000000',NULL,'원','1주 가격이 이 값 초과인 종목 제외. 0 이면 사용 안 함',9 UNION ALL
+ SELECT 'min_market_cap_eok','최소 시가총액',       'int',    '0',   '0','100000000',NULL,'억원','이 시가총액 미만 종목 제외. 0 이면 사용 안 함',10 UNION ALL
+ SELECT 'exclude_preferred', '우선주 제외',         'bool',   '1',   NULL,NULL,      NULL,NULL,'1이면 우선주(삼성전자우 등) 제외',11 UNION ALL
+ SELECT 'exclude_spac',      '스팩 제외',           'bool',   '1',   NULL,NULL,      NULL,NULL,'1이면 종목명에 스팩이 들어간 기업인수목적회사 제외',12 UNION ALL
+ SELECT 'exclude_warning',   '관리·경고 종목 제외', 'bool',   '1',   NULL,NULL,      NULL,NULL,'1이면 관리종목·거래정지·정리매매·투자유의/경고/위험 종목 제외',13 UNION ALL
+ SELECT 'stale_days',        '종목마스터 허용 경과일','int',  '5',   '1','30',       NULL,'일','종목마스터 갱신이 이 일수보다 오래되면 신규 매수 차단',14 UNION ALL
+ SELECT 'buy_amount',        '1회 매수금액',        'int',    '100000','10000','100000000',NULL,'원','신규 진입 시 종목당 최초 매수금액',15 UNION ALL
+ SELECT 'max_new_per_day',   '일 신규 진입 종목수', 'int',    '3',   '0','50',       NULL,'종목','하루에 새로 진입할 최대 종목 수 (0이면 신규진입 안 함)',16 UNION ALL
+ SELECT 'order_type',        '주문 유형',           'enum',   '3',   NULL,NULL,      '3:시장가,0:지정가(보통),6:최유리지정가',NULL,'kt10000 trde_tp',17
+) p ON a.code='macd_cross'
 ON DUPLICATE KEY UPDATE label=VALUES(label), value_type=VALUES(value_type), default_value=VALUES(default_value),
   min_value=VALUES(min_value), max_value=VALUES(max_value), enum_options=VALUES(enum_options), unit=VALUES(unit),
   description=VALUES(description), sort_order=VALUES(sort_order);
