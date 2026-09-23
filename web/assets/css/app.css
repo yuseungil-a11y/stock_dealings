@@ -131,7 +131,13 @@ a:hover { text-decoration: underline; }
 /* ------------------------------------------------------------ 표 */
 .tablewrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 .tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
-.tbl th, .tbl td { padding: 7px 9px; border-bottom: 1px solid var(--line-2); text-align: left; white-space: nowrap; }
+.tbl th, .tbl td {
+  padding: 7px 9px; border-bottom: 1px solid var(--line-2); text-align: left; white-space: nowrap;
+  /* 요약처럼 여러 줄로 접히는 셀이 있는 행에서, 다른 짧은 셀들이 기본값(middle)으로
+     세로 가운데 정렬되면 행 중간 높이에 걸려 옆 줄 텍스트와 뒤섞여 보인다.
+     모든 셀을 위쪽 정렬해 줄 바뀐 문단이 저 혼자 아래로 자라도록 한다. */
+  vertical-align: top;
+}
 .tbl thead th {
   background: #f7f9fc; color: var(--ink-2); font-weight: 600; font-size: 12px;
   border-bottom: 1px solid var(--line); position: sticky; top: 0;
@@ -146,7 +152,7 @@ a:hover { text-decoration: underline; }
 /* max-width 는 table-layout:auto(기본값)에서 강제되지 않아, 공백 없이 긴 문자열
    (알고리즘 설명의 "5/20, 20/60)" 류)이 셀 폭을 넘어 옆 칸(변경자/시각 등)과
    겹쳐 보이는 문제가 있었다. overflow-wrap 로 필요하면 글자 단위로 줄바꿈해 강제한다. */
-.wrap-td { white-space: normal; min-width: 180px; max-width: 460px; overflow-wrap: anywhere; word-break: break-word; }
+.wrap-td { white-space: normal; min-width: 180px; max-width: 460px; overflow-wrap: anywhere; word-break: break-word; line-height: 1.6; }
 .mono { font-family: Consolas, "Courier New", monospace; font-size: 12px; }
 .stk-nm { font-weight: 600; }
 .stk-cd { color: var(--muted); font-size: 11px; font-family: Consolas, monospace; }

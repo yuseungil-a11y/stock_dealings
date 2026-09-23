@@ -7,7 +7,7 @@ if (!defined('STOCK_APP')) { http_response_code(404); exit('Not Found'); }
  * 직접 고치지 말고 `python tools/bump_version.py web patch|minor|major` 로 올린다(CHANGELOG.md 동시 갱신).
  * 형식: MAJOR.MINOR.PATCH (SemVer). 서버 버전과는 독립적으로 관리한다.
  */
-const STOCK_WEB_VERSION = '1.4.0';
+const STOCK_WEB_VERSION = '1.4.1';
 const STOCK_WEB_RELEASED = '2026-09-23';
 
 /** 서버 하트비트 메시지("heartbeat 09:55:34 · v0.1.0")에서 서버 버전을 뽑는다. 없으면 null. */
