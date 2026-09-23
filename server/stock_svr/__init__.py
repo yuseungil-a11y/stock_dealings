@@ -8,5 +8,5 @@
 # 서버 버전 — 이 파일이 서버 버전의 유일한 원천이다.
 # 직접 고치지 말고 `python tools/bump_version.py server patch|minor|major` 로 올린다(CHANGELOG.md 동시 갱신).
 # 형식: MAJOR.MINOR.PATCH (SemVer). 웹 버전과는 독립적으로 관리한다.
-__version__ = "1.6.1"
+__version__ = "1.7.0"
 __released__ = "2026-09-23"

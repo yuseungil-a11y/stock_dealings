@@ -53,6 +53,14 @@ class FakeDb:
         self.trend_attempts: list[dict] = []      # append-only 감사로그
         self.trend_requests: list[dict] = []      # 웹의 "지금 다시 조사" 요청 큐
         self.now_for_stale: _dt.datetime | None = None   # 멈춘 요청 정리 기준 시각(테스트)
+        # 기업 재무분석 (DART + Claude, 매매 무관)
+        self.corp_codes: dict[str, dict] = {}
+        self.corp_codes_updated_at: _dt.datetime | None = None
+        self.financials: dict[tuple[str, int, str], dict] = {}
+        self.valuations: dict[tuple[str, _dt.date], dict] = {}
+        self.company_reports: dict[tuple[str, _dt.date], dict] = {}
+        self.price_daily: dict[str, list[dict]] = {}
+        self._carid = 0
         self._taid = 0
         self._trid = 0
         self._oid = 0
@@ -484,6 +492,107 @@ class FakeDb:
                 n += 1
         return n
 
+    # -- 기업 재무분석 (DART + Claude, 매매 무관) ------------------------ #
+    def company_corp_code_stats(self) -> dict:
+        self._maybe_fail("company_corp_code_stats")
+        return {"count": len(self.corp_codes), "updated_at": self.corp_codes_updated_at}
+
+    def upsert_company_corp_codes(self, rows) -> int:
+        self._maybe_fail("upsert_company_corp_codes")
+        n = 0
+        for r in rows:
+            if not r.get("stk_cd") or not r.get("corp_code"):
+                continue
+            self.corp_codes[str(r["stk_cd"])] = {
+                "stk_cd": str(r["stk_cd"]), "corp_code": str(r["corp_code"])[:8],
+                "corp_name": str(r.get("corp_name") or "")[:120]}
+            n += 1
+        return n
+
+    def company_corp_codes(self, stk_cds=None):
+        self._maybe_fail("company_corp_codes")
+        if stk_cds is None:
+            return [dict(v) for _, v in sorted(self.corp_codes.items())]
+        wanted = {str(c) for c in stk_cds if c}
+        return [dict(v) for k, v in sorted(self.corp_codes.items()) if k in wanted]
+
+    def company_financial_keys(self, stk_cds):
+        self._maybe_fail("company_financial_keys")
+        wanted = {str(c) for c in stk_cds if c}
+        return {k for k in self.financials if k[0] in wanted}
+
+    def upsert_company_financial(self, stk_cd, bsns_year, reprt_code, **values) -> int:
+        self._maybe_fail("upsert_company_financial")
+        from stock_svr.db import Database
+
+        key = (str(stk_cd), int(bsns_year), str(reprt_code))
+        row = {"stk_cd": key[0], "bsns_year": key[1], "reprt_code": key[2]}
+        for col in Database._FINANCIAL_COLS:      # noqa: SLF001 - 실제 컬럼 목록과 맞춘다
+            value = values.get(col)
+            row[col] = None if value is None else int(value)
+        self.financials[key] = row
+        return 1
+
+    def company_financials(self, stk_cd, since_year=None):
+        self._maybe_fail("company_financials")
+        rows = [dict(v) for k, v in self.financials.items()
+                if k[0] == str(stk_cd) and (since_year is None or k[1] >= int(since_year))]
+        rows.sort(key=lambda r: (r["bsns_year"], r["reprt_code"]))
+        return rows
+
+    def upsert_company_valuation(self, stk_cd, dt, **values) -> int:
+        self._maybe_fail("upsert_company_valuation")
+        row = {"stk_cd": str(stk_cd), "dt": dt}
+        row.update({k: values.get(k) for k in
+                    ("cur_prc", "eps_ttm", "bps", "per", "pbr", "roe", "debt_ratio",
+                     "financial_asof")})
+        self.valuations[(str(stk_cd), dt)] = row
+        return 1
+
+    def company_valuation(self, stk_cd, dt):
+        row = self.valuations.get((str(stk_cd), dt))
+        return dict(row) if row else None
+
+    def upsert_company_report(self, stk_cd, as_of_date, *, model, report_text, stk_nm=None,
+                              summary=None, input_tokens=None, output_tokens=None,
+                              latency_ms=None, status="ok", error_msg=None) -> int:
+        self._maybe_fail("upsert_company_report")
+        from stock_svr.db import COMPANY_REPORT_TEXT_MAX, _trim_masked
+
+        key = (str(stk_cd), as_of_date)
+        existing = self.company_reports.get(key)
+        if existing is None:
+            self._carid += 1
+        self.company_reports[key] = {
+            "id": existing["id"] if existing else self._carid,
+            "stk_cd": key[0], "as_of_date": as_of_date,
+            "stk_nm": _trim_masked(stk_nm, 60), "model": str(model)[:50],
+            "summary": _trim_masked(summary, 500),
+            "report_text": _trim_masked(report_text, COMPANY_REPORT_TEXT_MAX) or "-",
+            "input_tokens": input_tokens, "output_tokens": output_tokens,
+            "latency_ms": latency_ms,
+            "status": status if status in ("ok", "error") else "error",
+            "error_msg": _trim_masked(error_msg, 255)}
+        return 1
+
+    def company_report_on(self, stk_cd, as_of_date):
+        row = self.company_reports.get((str(stk_cd), as_of_date))
+        return dict(row) if row else None
+
+    def company_reported_codes(self, as_of_date) -> set:
+        self._maybe_fail("company_reported_codes")
+        return {k[0] for k, v in self.company_reports.items()
+                if k[1] == as_of_date and v.get("status") == "ok"}
+
+    def latest_closes(self, stk_cds) -> dict:
+        self._maybe_fail("latest_closes")
+        out = {}
+        for code in {str(c) for c in stk_cds if c}:
+            bars = sorted(self.price_daily.get(code, []), key=lambda b: b["dt"])
+            if bars and bars[-1].get("cur_prc"):
+                out[code] = int(bars[-1]["cur_prc"])
+        return out
+
     # -- 기타 ---------------------------------------------------------- #
     def scalar(self, sql: str, args=None, default=None):
         if "stop_loss_pct" in sql:
@@ -602,6 +711,19 @@ def _reset_trend_scan():
     reset_state()
     yield
     reset_state()
+
+
+@pytest.fixture(autouse=True)
+def _reset_fundamentals():
+    """기업 재무분석의 날짜 캐시(하루 1회 / corpCode 하루 1회)가 테스트 간에 새지 않게 한다."""
+    from stock_svr.services.corp_code_sync import reset_state as reset_corp
+    from stock_svr.services.fundamentals import reset_state as reset_fund
+
+    reset_fund()
+    reset_corp()
+    yield
+    reset_fund()
+    reset_corp()
 
 
 @pytest.fixture

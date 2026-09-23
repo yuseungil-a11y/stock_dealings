@@ -25,6 +25,8 @@ from ..kiwoom.ws import (
     TYPE_ORDER_EXEC,
     KiwoomWebSocket,
 )
+from ..services.fundamentals import POLL_SEC as FUNDAMENTALS_POLL_SEC
+from ..services.fundamentals import FundamentalsService
 from ..services.housekeeping import HousekeepingService
 from ..services.sync_account import AccountService
 from ..services.sync_market import MarketService
@@ -157,6 +159,9 @@ class Engine:
         self.executor: Executor | None = None
         # 웹의 "지금 다시 조사" 요청 큐 처리기 (관찰 전용, 자동거래와 무관)
         self.trend_requests: TrendRequestWorker | None = None
+        # 기업 재무분석(DART + Claude). **매매와 무관한 읽기 전용 참고 리포트**이며
+        # 주문 게이트·자동거래 상태를 읽지도 쓰지도 않는다.
+        self.fundamentals: FundamentalsService | None = None
         self.run_id: int | None = None
         self._master_synced_date = None
 
@@ -416,6 +421,10 @@ class Engine:
         # 기동 시 1회: 처리 중이던 채로 죽은 요청 정리(다음 요청이 영영 막히지 않게)
         self._safe("수동 재조사 요청 정리", self.trend_requests.cleanup_stale)
 
+        # 기업 재무분석(참고용). [dart] 키가 없으면 due_reason 이 매번 생략 사유를 돌려준다.
+        self.fundamentals = FundamentalsService(self.db, dart_cfg=self.cfg.dart,
+                                                anthropic_cfg=self.cfg.anthropic)
+
         self._safe("보관기간 정리", lambda: self.house.run_purge(
             self._retention_days(), self.cfg.logging.path))
         self._safe("종목마스터 갱신", self._sync_master_if_needed)
@@ -443,6 +452,7 @@ class Engine:
         last_eval = 0.0
         last_master = 0.0
         last_trend_req = 0.0
+        last_fundamentals = 0.0
         while not self._stop.is_set():
             now_mono = time.monotonic()
             open_now = self.market_open()
@@ -475,6 +485,13 @@ class Engine:
                 last_trend_req = now_mono
                 self._safe("수동 재조사 요청 처리", self.trend_requests.poll_once)
 
+            # 기업 재무분석(하루 1회, 장마감 후) — **매매와 무관한 참고 리포트**다.
+            # 자동거래 스위치·주문 게이트를 보지 않고, 엔진이 돌고 있으면 항상 확인한다.
+            if self.fundamentals is not None \
+                    and now_mono - last_fundamentals >= FUNDAMENTALS_POLL_SEC:
+                last_fundamentals = now_mono
+                self._safe("기업 재무분석", self.fundamentals.run_if_due)
+
             if self._reset_eval:
                 self._reset_eval = False
                 last_eval = 0.0
@@ -505,6 +522,8 @@ class Engine:
         if self._auto_trading.is_set():
             self._safe("자동거래 중지", lambda: self.stop_auto_trading(
                 by="엔진 종료", reason="엔진(조회·동기화) 정지"))
+        if self.fundamentals:
+            self._safe("DART 세션 종료", self.fundamentals.close)
         if self.ws:
             self._safe("WS 종료", lambda: self.ws.stop(timeout=5))
         if self.run_id:

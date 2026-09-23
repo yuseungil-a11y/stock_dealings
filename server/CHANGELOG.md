@@ -7,6 +7,16 @@
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-09-23
+### 추가
+- **기업 재무분석(DART OpenAPI + Claude, 참고용 — 매매와 완전히 무관)**: 시총 상위 종목(ETF·우선주·스팩 제외, `universe_filter` 의 순위 계산 재사용)에 대해 DART 공시 재무제표를 모으고 주가와 결합해 EPS(TTM)/BPS/PER/PBR/ROE/부채비율을 **서버(Python)가 계산**한 뒤, Claude 가 그 숫자를 **해석만** 해서 안정성/수익성/성장성/밸류에이션/현금흐름/주요 위험요인 리포트를 만든다. 장마감 후(기본 16시) 하루 1회 돌며 `company_corp_code`/`company_financial`/`company_valuation_daily`/`company_analysis_report` 에 기록한다
+  - **매매 파이프라인과 완전 분리**: `algorithm`/`algorithm_selection` 에 등록하지 않고(알고리즘이 아니다), `signal_log`/`orders`/Executor/risk_guard 어디에도 연결되지 않으며, 주문 게이트(`order_enabled` 등)를 **읽지도 쓰지도 않는다**. 자동거래 ON/OFF 와 무관하게 엔진이 돌고 있으면 동작한다. 테스트가 새 모듈들의 소스(주석·docstring 제외)를 AST 로 파싱해 매매 식별자가 한 번도 나오지 않는 것을 강제한다
+  - DART 는 **읽기 전용 GET** 두 개만 쓴다 — `corpCode.xml`(고유번호 매핑, 대상 종목만 저장·월 1회·하루 1회 다운로드 한도), `fnlttSinglAcntAll.json`(단일회사 전체 재무제표, `CFS` → 없으면 `OFS`). 계정은 `account_id`(IFRS 택사노미 ID) 우선 매칭이고, `status='013'`(조회된 데이타가 없습니다)은 **미공시 정상 응답이라 오류로 취급하지 않는다**. 인증키는 로그·예외 메시지에 남기지 않는다
+  - 호출 절감: 이미 저장된 (종목, 연도, 보고서코드)는 재조회하지 않고, 처음 보는 종목만 5년치 전체를 받은 뒤로는 최근 2개 분기만 매일 확인한다. 공시 예정일 전에는 아예 묻지 않으며, 호출 상한은 **종목 단위**로 걸어 과거 분기가 비는 일이 없게 한다
+  - 분모가 0·음수이거나 데이터가 없으면 해당 지표만 NULL(오류 아님). 리포트 실패는 `status='error'`+`error_msg` 로 남고 한 종목의 예외가 나머지를 멈추지 않는다
+  - 설정 `[dart] apikey_file`(**값이 아니라 파일 경로**), `base_url`, `min_interval_sec`(기본 0.4), `http_timeout_sec`(기본 60). 운영값은 `system_setting` 에서 읽기만 한다(`fundamentals_top_n`·`fundamentals_years`·`fundamentals_report_limit`·`fundamentals_max_fetch`·`fundamentals_run_hour`·`fundamentals_model`)
+  - 점검 명령 `python -m stock_svr --fundamentals-check [종목코드...] [--refresh]` 추가(실제 DART+Claude 1회, 키움 API 미사용, DB 기록, 엔진 루프·WS 미기동)
+
 ## [1.6.1] - 2026-09-23
 ### 수정
 - 재배포 등으로 이전 프로세스가 강제 종료돼 정상 종료 경로를 못 타면, 자동거래가 실제로는 항상 중지 상태로 새로 시작하는데도 웹 관제의 표시가 이전 값("실행중")에 그대로 남던 문제 수정. 부팅 시 `server_status(auto_trading)` 을 실제 상태(중지)로 맞춘다

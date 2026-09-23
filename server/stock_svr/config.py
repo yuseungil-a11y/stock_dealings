@@ -110,6 +110,38 @@ class AnthropicConfig:
 
 
 @dataclass
+class DartConfig:
+    """기업 재무분석(DART OpenAPI) 용 설정.
+
+    **매매와 무관한 읽기 전용 참고 기능**이다. 키움/Anthropic 키와 동일하게 값은 설정파일에
+    쓰지 않고 **파일 경로만** 지정하며, 필요한 시점에만 읽어 메모리에 둔다.
+    """
+
+    apikey_file: str = ""
+    base_url: str = "https://opendart.fss.or.kr"
+    # DART 공식 한도는 1일 20,000회로 넉넉하지만 호출 폭주를 피하려고 보수적으로 잡는다
+    min_interval_sec: float = 0.4
+    # corpCode.xml(약 3.6MB ZIP) 다운로드가 있어 키움보다 길게 준다
+    http_timeout_sec: float = 60.0
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.apikey_file)
+
+    def read_key(self) -> str:
+        """인증키(40자리)를 파일에서 읽는다. 반환값은 절대 로그/DB/화면에 남기지 않는다."""
+        if not self.apikey_file:
+            raise ConfigError("[dart] apikey_file 경로가 설정되지 않았습니다.")
+        try:
+            key = Path(self.apikey_file).read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            raise ConfigError(f"DART 키 파일을 읽을 수 없습니다: {exc}") from exc
+        if not key:
+            raise ConfigError("DART 키 파일이 비어 있습니다.")
+        return key
+
+
+@dataclass
 class LoggingConfig:
     dir: str = "logs"
     level: str = "INFO"
@@ -126,6 +158,7 @@ class AppConfig:
     db: DbConfig = field(default_factory=DbConfig)
     kiwoom: KiwoomConfig = field(default_factory=KiwoomConfig)
     anthropic: AnthropicConfig = field(default_factory=AnthropicConfig)
+    dart: DartConfig = field(default_factory=DartConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     source_path: Path | None = None
 
@@ -165,6 +198,7 @@ def load_config(path: str | os.PathLike | None = None) -> AppConfig:
     db_s = parser["db"] if parser.has_section("db") else None
     kw_s = parser["kiwoom"] if parser.has_section("kiwoom") else None
     an_s = parser["anthropic"] if parser.has_section("anthropic") else None
+    dt_s = parser["dart"] if parser.has_section("dart") else None
     lg_s = parser["logging"] if parser.has_section("logging") else None
 
     db = DbConfig(
@@ -195,10 +229,16 @@ def load_config(path: str | os.PathLike | None = None) -> AppConfig:
         # 전체 지연이 timeout_sec 를 넘지 않도록 SDK 재시도는 낮게 유지한다
         max_retries=max(0, min(3, _to_int(_get(an_s, "max_retries", 1), 1))),
     )
+    dart_cfg = DartConfig(
+        apikey_file=_get(dt_s, "apikey_file", ""),
+        base_url=str(_get(dt_s, "base_url", "https://opendart.fss.or.kr")).rstrip("/"),
+        min_interval_sec=_to_float(_get(dt_s, "min_interval_sec", 0.4), 0.4),
+        http_timeout_sec=_to_float(_get(dt_s, "http_timeout_sec", 60), 60.0),
+    )
     logging_cfg = LoggingConfig(
         dir=_get(lg_s, "dir", "logs"),
         level=str(_get(lg_s, "level", "INFO")).upper(),
         retention_days=_to_int(_get(lg_s, "retention_days", 7), 7),
     )
-    return AppConfig(db=db, kiwoom=kiwoom, anthropic=anthropic_cfg, logging=logging_cfg,
-                     source_path=cfg_path)
+    return AppConfig(db=db, kiwoom=kiwoom, anthropic=anthropic_cfg, dart=dart_cfg,
+                     logging=logging_cfg, source_path=cfg_path)

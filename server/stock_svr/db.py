@@ -59,6 +59,9 @@ PURGEABLE_TABLES = ("event_log", "api_call_log", "screening_result",
 # trend_scan_run 의 TEXT 컬럼(조사 요약)에 저장할 최대 길이
 TREND_TEXT_MAX = 8000
 
+# company_analysis_report.report_text(TEXT) 저장 상한
+COMPANY_REPORT_TEXT_MAX = 16000
+
 
 def _trim_masked(text: str | None, limit: int) -> str | None:
     """DB 저장 전 마스킹 + 길이 제한. 빈 값은 NULL."""
@@ -813,6 +816,144 @@ class Database:
         return {"calls": int(row.get("calls") or 0),
                 "input_tokens": int(row.get("in_tok") or 0),
                 "output_tokens": int(row.get("out_tok") or 0)}
+
+    # ================================================================== #
+    # 기업 재무분석 (DART + Claude) — **매매와 무관한 읽기 전용 참고 리포트**
+    #
+    # 이 구역의 어떤 메서드도 algorithm / algorithm_selection / signal_log / orders /
+    # system_setting 게이트 3키를 읽거나 쓰지 않는다.
+    # ================================================================== #
+    def company_corp_code_stats(self) -> dict:
+        """매핑 건수와 최신 갱신 시각(월 1회 갱신 판단용)."""
+        row = self.query_one(
+            "SELECT COUNT(*) AS cnt, MAX(updated_at) AS updated_at FROM company_corp_code") or {}
+        return {"count": int(row.get("cnt") or 0), "updated_at": row.get("updated_at")}
+
+    def upsert_company_corp_codes(self, rows: list[dict]) -> int:
+        sql = ("INSERT INTO company_corp_code (stk_cd, corp_code, corp_name) VALUES (%s,%s,%s) "
+               "ON DUPLICATE KEY UPDATE corp_code=VALUES(corp_code), corp_name=VALUES(corp_name)")
+        params = [(str(r["stk_cd"])[:12], str(r["corp_code"])[:8],
+                   _trim_masked(r.get("corp_name"), 120) or str(r["stk_cd"]))
+                  for r in rows if r.get("stk_cd") and r.get("corp_code")]
+        return self.execute_many(sql, params)
+
+    def company_corp_codes(self, stk_cds: Sequence[str] | None = None) -> list[dict]:
+        if stk_cds is None:
+            return self.query("SELECT * FROM company_corp_code ORDER BY stk_cd")
+        codes = [str(c) for c in stk_cds if c]
+        if not codes:
+            return []
+        holes = ",".join(["%s"] * len(codes))
+        return self.query(
+            f"SELECT * FROM company_corp_code WHERE stk_cd IN ({holes}) ORDER BY stk_cd",
+            tuple(codes))
+
+    def company_financial_keys(self, stk_cds: Sequence[str]) -> set[tuple[str, int, str]]:
+        """이미 저장된 (종목, 연도, 보고서코드) 조합. 재조회를 건너뛰기 위한 캐시 키."""
+        codes = [str(c) for c in stk_cds if c]
+        if not codes:
+            return set()
+        holes = ",".join(["%s"] * len(codes))
+        rows = self.query(
+            "SELECT stk_cd, bsns_year, reprt_code FROM company_financial "
+            f"WHERE stk_cd IN ({holes})", tuple(codes))
+        return {(str(r["stk_cd"]), int(r["bsns_year"]), str(r["reprt_code"])) for r in rows}
+
+    _FINANCIAL_COLS = ("revenue", "operating_profit", "net_profit", "total_assets",
+                       "total_liabilities", "total_equity", "eps", "operating_cash_flow",
+                       "shares_outstanding")
+
+    def upsert_company_financial(self, stk_cd: str, bsns_year: int, reprt_code: str,
+                                 **values) -> int:
+        cols = ("stk_cd", "bsns_year", "reprt_code", *self._FINANCIAL_COLS, "fetched_at")
+        updates = ", ".join(f"{c}=VALUES({c})" for c in (*self._FINANCIAL_COLS, "fetched_at"))
+        args = [str(stk_cd)[:12], int(bsns_year), str(reprt_code)[:5]]
+        for col in self._FINANCIAL_COLS:
+            value = values.get(col)
+            args.append(None if value is None else int(value))
+        args.append(now_kst())
+        return self.execute(
+            f"INSERT INTO company_financial ({', '.join(cols)}) "
+            f"VALUES ({', '.join(['%s'] * len(cols))}) ON DUPLICATE KEY UPDATE {updates}",
+            args)
+
+    def company_financials(self, stk_cd: str, since_year: int | None = None) -> list[dict]:
+        """한 종목의 재무제표 행(과거 → 최신). `since_year` 이상만."""
+        if since_year is None:
+            return self.query(
+                "SELECT * FROM company_financial WHERE stk_cd=%s "
+                "ORDER BY bsns_year, reprt_code", (str(stk_cd),))
+        return self.query(
+            "SELECT * FROM company_financial WHERE stk_cd=%s AND bsns_year>=%s "
+            "ORDER BY bsns_year, reprt_code", (str(stk_cd), int(since_year)))
+
+    def upsert_company_valuation(self, stk_cd: str, dt: _dt.date, **values) -> int:
+        cols = ("stk_cd", "dt", "cur_prc", "eps_ttm", "bps", "per", "pbr", "roe",
+                "debt_ratio", "financial_asof")
+        updates = ", ".join(f"{c}=VALUES({c})" for c in cols[2:])
+        args = [str(stk_cd)[:12], dt]
+        for col in cols[2:]:
+            value = values.get(col)
+            if col == "financial_asof":
+                args.append(str(value)[:20] if value else None)
+            elif col in ("per", "pbr", "roe", "debt_ratio"):
+                args.append(None if value is None else Decimal(str(value)))
+            else:
+                args.append(None if value is None else int(value))
+        return self.execute(
+            f"INSERT INTO company_valuation_daily ({', '.join(cols)}) "
+            f"VALUES ({', '.join(['%s'] * len(cols))}) ON DUPLICATE KEY UPDATE {updates}",
+            args)
+
+    def company_valuation(self, stk_cd: str, dt: _dt.date) -> dict | None:
+        return self.query_one(
+            "SELECT * FROM company_valuation_daily WHERE stk_cd=%s AND dt=%s",
+            (str(stk_cd), dt))
+
+    def upsert_company_report(self, stk_cd: str, as_of_date: _dt.date, *, model: str,
+                              report_text: str, stk_nm: str | None = None,
+                              summary: str | None = None, input_tokens: int | None = None,
+                              output_tokens: int | None = None, latency_ms: int | None = None,
+                              status: str = "ok", error_msg: str | None = None) -> int:
+        """같은 날 재실행하면 **갱신**한다(UNIQUE(stk_cd, as_of_date))."""
+        return self.execute(
+            "INSERT INTO company_analysis_report (stk_cd, stk_nm, as_of_date, model, summary, "
+            "report_text, input_tokens, output_tokens, latency_ms, status, error_msg) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+            "ON DUPLICATE KEY UPDATE stk_nm=VALUES(stk_nm), model=VALUES(model), "
+            "summary=VALUES(summary), report_text=VALUES(report_text), "
+            "input_tokens=VALUES(input_tokens), output_tokens=VALUES(output_tokens), "
+            "latency_ms=VALUES(latency_ms), status=VALUES(status), "
+            "error_msg=VALUES(error_msg), created_at=VALUES(created_at)",
+            (str(stk_cd)[:12], _trim_masked(stk_nm, 60), as_of_date, str(model)[:50],
+             _trim_masked(summary, 500), _trim_masked(report_text, COMPANY_REPORT_TEXT_MAX) or "-",
+             input_tokens, output_tokens, latency_ms,
+             status if status in ("ok", "error") else "error", _trim_masked(error_msg, 255)))
+
+    def company_report_on(self, stk_cd: str, as_of_date: _dt.date) -> dict | None:
+        return self.query_one(
+            "SELECT * FROM company_analysis_report WHERE stk_cd=%s AND as_of_date=%s",
+            (str(stk_cd), as_of_date))
+
+    def company_reported_codes(self, as_of_date: _dt.date) -> set[str]:
+        """그날 이미 리포트를 만든 종목(성공분만). 하루 상한 안에서 다음 종목으로 넘어가기 위해."""
+        rows = self.query(
+            "SELECT stk_cd FROM company_analysis_report WHERE as_of_date=%s AND status='ok'",
+            (as_of_date,))
+        return {str(r["stk_cd"]) for r in rows}
+
+    def latest_closes(self, stk_cds: Sequence[str]) -> dict[str, int]:
+        """`price_daily` 의 최신 종가(있는 종목만). 없으면 호출부가 stock_master 로 대체한다."""
+        codes = [str(c) for c in stk_cds if c]
+        if not codes:
+            return {}
+        holes = ",".join(["%s"] * len(codes))
+        rows = self.query(
+            "SELECT p.stk_cd, p.cur_prc FROM price_daily p JOIN ("
+            f"  SELECT stk_cd, MAX(dt) AS dt FROM price_daily WHERE stk_cd IN ({holes}) "
+            "  GROUP BY stk_cd) m ON m.stk_cd=p.stk_cd AND m.dt=p.dt",
+            tuple(codes))
+        return {str(r["stk_cd"]): int(r["cur_prc"]) for r in rows if r.get("cur_prc")}
 
     # ================================================================== #
     # 주문 / 체결 / 거래내역

@@ -26,6 +26,7 @@ run_stock_svr.bat                             REM GUI 실행 (엔진 자동 시�
 | `python -m stock_svr --eval-once --allow-orders` | 관찰 전용 해제 시도(콘솔에 `ORDER` 입력 필요). **효과 없음(이중 잠금)** — 이 경로는 자동거래 스위치를 켜지 않으므로 주문이 전송되지 않는다(R-13). **평상시 사용 금지** |
 | `python -m stock_svr --claude-check` | **Claude 거부권 필터 점검**: 합성 종목 2건(정상형/위험형)을 실제 Claude API 로 1회씩 검토해 결정·확신도·근거·토큰·지연을 출력. 키움 API 미사용·DB 미기록 |
 | `python -m stock_svr --trend-scan-check` | **산업 트렌드 스캔 점검**: 오늘 스캔을 강제로 1회 수행(스케줄·중복방지 무시). 실제 `ka90001`/`ka90002`(읽기 전용) + 실제 Claude 2회 호출. **관찰 전용**(게이트를 닫고 Executor 로 넘기지 않음), **DB 에는 기록**(감사 추적). 엔진 루프·WS 를 띄우지 않아 운영 중인 서버와 함께 실행해도 된다 |
+| `python -m stock_svr --fundamentals-check [종목코드...] [--refresh]` | **기업 재무분석 점검(매매 무관)**: 실제 DART OpenAPI(읽기 전용 GET) + 실제 Claude 로 종목 1~3개의 재무제표 수집·PER/PBR/ROE/부채비율 계산·리포트 생성을 1회 수행하고 출력. 키움 API 미사용, **DB 에는 기록**. 신호·주문·게이트를 전혀 건드리지 않는다(10절) |
 | `python -m pytest -q` | 단위테스트 |
 
 동시에 두 인스턴스가 뜨면 한도 계산이 어긋나므로 단일 실행을 강제한다(R-08).
@@ -42,6 +43,10 @@ run_stock_svr.bat                             REM GUI 실행 (엔진 자동 시�
   * `[anthropic]` — Claude 거부권 필터용 API 키도 **값이 아니라 파일 경로**(`apikey_file`)로 지정한다.
     비워 두면 `claude_advisor` 를 쓸 수 없다(활성화돼 있으면 매수 신호가 전부 차단된다).
     `max_retries` 는 SDK 재시도 횟수(기본 1).
+  * `[dart]` — 기업 재무분석(**매매 무관 참고 리포트**, 10절)용 DART OpenAPI 인증키도
+    **파일 경로**(`apikey_file`)로 지정한다. 비워 두면 그 기능만 동작하지 않고 매매에는 영향이 없다.
+    `base_url`(기본 `https://opendart.fss.or.kr`), `min_interval_sec`(기본 0.4),
+    `http_timeout_sec`(기본 60).
   * `[logging]` — 로그 경로/레벨/보관일수
   * 값에 `%` 가 들어갈 수 있어 `ConfigParser(interpolation=None)` 으로 읽는다.
 * 런타임 스위치는 DB `system_setting` (UI 설정 탭에서 편집, 엔진이 매 주기 다시 읽음)
@@ -138,6 +143,14 @@ server/
       trend_scan.py    **산업 트렌드 스캔(하루 1회)**: ka90001/ka90002 + Claude 2단계 호출 →
                        trend_scan_run / trend_scan_candidate / trend_scan_attempt + 매수 신호
                        + **수동 재조사 요청 큐 처리(TrendRequestWorker, 관찰 전용)**
+      corp_code_sync.py **기업 재무분석(매매 무관)**: DART corpCode.xml → company_corp_code
+      fundamentals.py  **기업 재무분석(매매 무관, 하루 1회)**: DART 재무제표 수집 →
+                       company_financial / company_valuation_daily + Claude 리포트 →
+                       company_analysis_report. **신호·주문을 만들지 않는다**
+    dart/              DART OpenAPI(읽기 전용 GET). 키움과 완전히 분리된 패키지
+      client.py        corpCode.xml / fnlttSinglAcntAll.json, 최소간격·재시도·키 미노출
+      parse.py         응답 → DB 컬럼 (account_id = IFRS 택사노미 ID 우선 매칭)
+      valuation.py     EPS(TTM)/BPS/PER/PBR/ROE/부채비율 계산 (순수 함수)
     engine/
       context.py       EngineContext + **OrderGateState(게이트 판정)** + fail-closed 플래그
       executor.py      **주문 게이트 · 유일한 주문 전송 지점** (재시도 금지·환경 검증, 주문 맥락/이벤트 기록)
@@ -146,6 +159,7 @@ server/
       client.py        Anthropic Messages API 래퍼(구조화 출력·웹 검색 도구·오류 분류·키 미노출)
       prompt.py        시스템 프롬프트/입력 JSON/출력 스키마 + 컨텍스트 제공자 훅
       trend_prompt.py  트렌드 스캔 조사/추출 프롬프트 + 출력 스키마 + 로컬 재검증
+      fundamental_prompt.py  기업 재무분석 리포트 프롬프트(계산은 Python, 해석만 Claude)
     algo/
       base.py registry.py params.py
       risk_guard.py  momentum_screen.py  volatility_breakout.py
@@ -591,18 +605,149 @@ FROM trend_scan_request ORDER BY id DESC LIMIT 20;
 * `signal_id` 는 Executor 가 `signal_log` 에 남긴 행을 가리킨다. risk_guard·claude_advisor 가
   중간에 막았으면 NULL 이고, 차단 사유는 `signal_log` 의 BLOCK 행에서 확인한다.
 
-## 10. 개발 시 지켜야 할 것
+## 10. 기업 재무분석 (참고용, **매매 무관**)
+
+DART OpenAPI 로 공시 재무제표를 모으고, Claude 가 그 숫자를 **해석만** 해서 종목별 재무분석
+리포트를 만든다. 사람이 읽어 보는 **참고 문서**이며 자동매매와 아무 관계가 없다.
+
+### 매매 파이프라인과의 분리 (가장 중요)
+
+| 항목 | 상태 |
+|---|---|
+| `algorithm` / `algorithm_selection` 등록 | **안 한다.** 알고리즘이 아니라서 평가 사이클에서 돌지 않는다 |
+| `signal_log` / `orders` / Executor / risk_guard | **연결 없음.** 신호를 만들지 않으므로 연결할 것 자체가 없다 |
+| 주문 게이트(`order_enabled`·`trading_mode`·`real_trading_confirm`) | **읽지도 쓰지도 않는다** |
+| 자동거래 ON/OFF | **무관.** 엔진이 돌고 있으면 그것만으로 동작한다 |
+| 키움 API | **추가 호출 없음.** 이미 DB 에 있는 `stock_master`·`price_daily` 만 읽는다 |
+
+`tests/test_fundamentals.py` 가 새 모듈들의 **소스(주석·docstring 제외)** 를 파싱해
+`algorithm_selection`·`signal_log`·`order_enabled`·`Executor`·`risk_guard` 같은 식별자가
+한 번도 나오지 않는 것을 강제한다. 위 규칙을 어기면 테스트가 깨진다.
+
+### 테이블 (`db/schema.sql` 10절)
+
+| 테이블 | 갱신 주기 | 내용 |
+|---|---|---|
+| `company_corp_code` | 월 1회 | 종목코드 ↔ DART 고유번호(8자리). **대상 종목만** 저장(전체 상장사 12만 건을 쌓지 않는다) |
+| `company_financial` | 분기 공시마다 | (종목, 사업연도, 보고서코드) 단위 주요 계정. 매출/영업이익/순이익/자산·부채·자본/EPS/영업활동현금흐름 |
+| `company_valuation_daily` | 매일 | 주가 × 최근 확정 재무 → EPS(TTM)/BPS/PER/PBR/ROE/부채비율 |
+| `company_analysis_report` | 하루 1회 (UNIQUE(stk_cd, as_of_date)) | Claude 리포트 본문·요약·토큰·상태. 같은 날 다시 돌리면 **갱신** |
+
+### 대상 종목 · 스케줄
+
+* 대상은 `universe_filter` 와 **같은 시총 상위 순위 계산**(`stock_master` 기반)을 재사용하되
+  **ETF 는 항상 제외**한다(ETF 는 DART 재무제표가 없다). 우선주·스팩도 제외한다.
+* 엔진 루프가 `fundamentals.POLL_SEC`(30분)마다 확인하고, **장마감 후(기본 16시) 하루 1회**만
+  실제로 돈다. 실패해도 같은 날 다시 돌지 않는다(유료 호출 폭주 방지).
+* 운영값은 `system_setting` 에서 **읽기만** 한다(없으면 기본값. 서버가 값을 쓰지 않는다).
+
+| 키 | 기본 | 의미 |
+|---|---|---|
+| `fundamentals_top_n` | 30 | 시장별 시총 상위 몇 종목을 대상으로 할지 |
+| `fundamentals_years` | 5 | 몇 년치 재무제표를 받을지 |
+| `fundamentals_report_limit` | 3 | 하루에 만들 Claude 리포트 건수 |
+| `fundamentals_max_fetch` | 300 | 한 번 실행에서 나갈 DART 호출 수 상한 |
+| `fundamentals_run_hour` | 16 | 실행 시각(시) |
+| `fundamentals_model` | `claude-sonnet-5` | 리포트 모델(`llm.client.MODELS` 만 허용) |
+
+### DART API 사용 범위 (읽기 전용 GET 만)
+
+| 엔드포인트 | 쓰임 | 파라미터 |
+|---|---|---|
+| `GET /api/corpCode.xml` | 종목코드 ↔ 고유번호 매핑 | `crtfc_key` |
+| `GET /api/fnlttSinglAcntAll.json` | 단일회사 **전체** 재무제표 | `crtfc_key`, `corp_code`, `bsns_year`, `reprt_code`, `fs_div` |
+
+* `reprt_code`: `11013`(1분기) / `11012`(반기) / `11014`(3분기) / `11011`(사업보고서).
+* `fs_div`: `CFS`(연결) → 없으면 `OFS`(개별)로 한 번 더 물어본다.
+* "단일회사 주요계정"(`fnlttSinglAcnt.json`)은 **EPS·영업활동현금흐름이 없어서** 쓰지 않는다
+  (실제 응답으로 확인).
+* 계정 식별은 `account_id`(IFRS 택사노미 ID: `ifrs-full_Revenue`, `ifrs-full_Equity`,
+  `ifrs-full_BasicEarningsLossPerShare`, `ifrs-full_CashFlowsFromUsedInOperatingActivities` …)
+  **우선**이고, 비표준 ID 일 때만 계정명으로 보조 판정한다.
+* 응답 `status` 가 `"000"` 이 아니면 오류. 단 **`"013"`(조회된 데이타가 없습니다)은 오류가 아니다** —
+  아직 공시되지 않은 분기를 물었을 때 정상적으로 나온다.
+* 호출 간 최소 간격 `0.4초`(`[dart] min_interval_sec`). 공식 한도는 1일 20,000회지만 보수적으로 둔다.
+* **인증키는 쿼리 파라미터로만 붙이고 로그·예외 메시지에 URL 을 싣지 않는다**(키움 앱키·Anthropic 키와 동일).
+
+### 호출을 줄이는 규칙
+
+* 이미 저장된 `(종목, 연도, 보고서코드)`는 **다시 조회하지 않는다**(확정 분기 값은 바뀌지 않는다).
+* 처음 보는 종목만 5년치 전체를 받고, 그 뒤로는 **최근 2개 분기**만 매일 확인한다.
+* 분기마다 '공시가 나올 법한 날짜'(1분기 5/5, 반기 8/4, 3분기 11/4, 사업보고서 다음 해 3/21)
+  이전에는 아예 묻지 않는다.
+* 호출 상한은 **종목 단위**로 건다 — 한 종목을 중간에 끊으면 그 종목이 다음 날
+  '데이터 있는 종목'으로 분류돼 과거 분기가 영영 비기 때문이다.
+
+### 계산 규칙 (전부 Python, Claude 는 계산하지 않는다)
+
+* `EPS(TTM)` = 최근 **연속 4개 분기** 합산. 4분기 단독값은 `연간 − (1Q+2Q+3Q)` 로 만든다.
+  연속 4개 분기가 없으면 최근 사업보고서의 연간 EPS 를 그대로 쓴다.
+* `BPS` = 자본총계 ÷ 발행주식수(`stock_master.list_count`, 키움 종목마스터).
+* `PER` = 주가 ÷ EPS(TTM), `PBR` = 주가 ÷ BPS,
+  `ROE` = 순이익(TTM) ÷ 자본총계 × 100, `부채비율` = 부채총계 ÷ 자본총계 × 100.
+* **분모가 0·음수이거나 원천 데이터가 없으면 그 지표만 NULL 이다. 오류가 아니다.**
+  (적자 기업의 PER, 자본잠식 기업의 PBR/ROE/부채비율이 여기에 해당한다.)
+
+### Claude 리포트
+
+* 입력은 **이미 계산이 끝난 숫자 JSON 하나**뿐이다. 계좌·잔고·보유수량·키는 넣지 않는다.
+* 웹 검색 도구를 쓰지 않고, 구조화 출력 `{summary, report_text}` 최소 스키마만 강제한다.
+* 매수/매도 추천·목표가·수익률 예측을 프롬프트에서 금지한다.
+* 안정성 / 수익성 / 성장성 / 밸류에이션 / 현금흐름 / 주요 위험요인 6개 항목.
+* 실패는 `status='error'` + `error_msg` 로 남고, 한 종목의 예외가 나머지를 멈추지 않는다.
+
+### `--fundamentals-check` (점검)
+
+```
+python -m stock_svr --fundamentals-check 005930          # 지정 종목 1건
+python -m stock_svr --fundamentals-check 005930 000660   # 최대 3건
+python -m stock_svr --fundamentals-check                 # 시총 1위 종목 자동 선택
+python -m stock_svr --fundamentals-check 005930 --refresh  # 저장된 분기도 DART 에서 다시 받기
+```
+
+* 실제 DART(읽기 전용 GET) + 실제 Claude(종목당 1회)를 쓰고 **DB 에 정상 기록**한다.
+* 키움 API 는 호출하지 않는다. 주문 게이트·자동거래를 건드리지 않는다.
+* 엔진 루프·WebSocket 을 띄우지 않으므로 **운영 중인 서버를 멈추지 않아도 된다**
+  (단일 실행 락을 잡지 않는다 - `--trend-scan-check` 와 같다).
+
+### 조회 예 (DBeaver)
+
+```sql
+-- 오늘 계산된 밸류에이션
+SELECT v.stk_cd, m.stk_nm, v.cur_prc, v.eps_ttm, v.bps, v.per, v.pbr, v.roe,
+       v.debt_ratio, v.financial_asof
+FROM company_valuation_daily v JOIN stock_master m ON m.stk_cd = v.stk_cd
+WHERE v.dt = CURDATE() ORDER BY v.per;
+
+-- 한 종목의 최근 재무 추이
+SELECT bsns_year, reprt_code, revenue, operating_profit, net_profit,
+       total_equity, total_liabilities, eps, operating_cash_flow
+FROM company_financial WHERE stk_cd = '005930' ORDER BY bsns_year, reprt_code;
+
+-- 오늘자 리포트
+SELECT stk_cd, stk_nm, status, summary, input_tokens, output_tokens, latency_ms
+FROM company_analysis_report WHERE as_of_date = CURDATE() ORDER BY stk_cd;
+
+SELECT report_text FROM company_analysis_report
+WHERE stk_cd = '005930' ORDER BY as_of_date DESC LIMIT 1;
+```
+
+## 11. 개발 시 지켜야 할 것
 
 * **실주문 API(`kt10000~3`, `kt10006~9`, `kt50000~3`, `ust2*`)를 실서버로 호출하지 않는다.**
   주문 경로 테스트는 `stock_svr/kiwoom/fake.py::FakeRest` 로만 한다.
 * 읽기 전용 TR 만 개발 중 실서버 호출 허용:
   `au10001/au10002`, `ka00001`, `kt00001`, `kt00018`, `ka10075`, `ka10076`, `ka10099`,
   `ka10027`, `ka10023`, `ka10081`, `ka10001`, `kt00015`, `ka10170`, `ka90001`, `ka90002`
-* 앱키/시크릿키/토큰/DB 비밀번호/Anthropic API 키를 출력·로그·커밋하지 않는다
-  (`--check`/`--claude-check` 도 "키 파일 읽기 OK" 수준만 출력한다).
+* 앱키/시크릿키/토큰/DB 비밀번호/Anthropic API 키/**DART 인증키**를 출력·로그·커밋하지 않는다
+  (`--check`/`--claude-check`/`--fundamentals-check` 도 "키 파일 읽기 OK" 수준만 출력한다).
 * Anthropic API 는 `claude_advisor` 가 활성일 때의 매수 신호 검토, `claude_trend_scan` 의
-  하루 1회 스캔(조사 1회 + 추출 1회), 그리고 `--claude-check`/`--trend-scan-check` 에서만 호출한다.
+  하루 1회 스캔(조사 1회 + 추출 1회), 기업 재무분석 리포트(하루 최대 `fundamentals_report_limit` 건),
+  그리고 `--claude-check`/`--trend-scan-check`/`--fundamentals-check` 에서만 호출한다.
   단위테스트는 가짜 클라이언트만 쓴다(실 API 호출 없음).
+* DART OpenAPI 는 **읽기 전용 GET** 두 개(`corpCode.xml`, `fnlttSinglAcntAll.json`)만 쓴다.
+  이 경로는 매매와 무관하며 `algorithm`/`signal_log`/`orders`/주문 게이트에 절대 연결하지 않는다
+  (10절 참고, 테스트가 소스 수준에서 강제한다).
 * Rate limit: 요청 간 최소 간격(`min_interval_sec_*`) 유지, `1700` 응답 시 지수 백오프.
   실측은 `api_call_log` 로 확인한다.
 * `git commit/push` 금지(형상관리 별도 담당).

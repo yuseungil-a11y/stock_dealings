@@ -6,6 +6,7 @@
     python -m stock_svr --eval-once    # 엔진 없이 평가 사이클 1회(관찰모드 진단, 주문 전송 없음)
     python -m stock_svr --claude-check # Claude 거부권 필터 점검(합성 데이터 2건, DB/키움 미사용)
     python -m stock_svr --trend-scan-check  # 산업 트렌드 스캔 1회 강제 실행(관찰 전용, DB 기록)
+    python -m stock_svr --fundamentals-check 005930  # 기업 재무분석(DART+Claude) 1회, 매매 무관
 """
 from __future__ import annotations
 
@@ -35,6 +36,14 @@ def build_parser() -> argparse.ArgumentParser:
                    help="산업 트렌드 스캔 점검: 실제 키움 ka90001/ka90002(읽기 전용) + 실제 Claude"
                         " API(조사+구조화 추출)로 오늘 스캔을 1회 강제 실행. "
                         "**관찰 전용**(주문 게이트를 닫고 Executor 로 넘기지 않음), DB 에는 기록")
+    p.add_argument("--fundamentals-check", nargs="*", metavar="STK_CD",
+                   help="기업 재무분석 점검: 실제 DART OpenAPI(읽기 전용 GET) + Claude 로 "
+                        "종목 1~3개의 재무제표 수집·PER/PBR/ROE 계산·리포트 생성을 1회 수행. "
+                        "종목코드를 주면 그 종목만, 생략하면 시총 상위에서 자동 선택. "
+                        "**매매와 무관**(신호·주문·게이트를 전혀 건드리지 않음), DB 에는 기록")
+    p.add_argument("--refresh", action="store_true",
+                   help="--fundamentals-check 에서 이미 저장된 분기도 DART 에서 다시 받는다"
+                        "(평소에는 캐시 우선)")
     p.add_argument("--smoke", type=float, metavar="SEC",
                    help="GUI 를 SEC 초만 띄웠다가 자동 종료(스모크 테스트)")
     p.add_argument("--eval-once", action="store_true",
@@ -375,6 +384,128 @@ def cmd_trend_scan_check(cfg, db: Database) -> int:
 
 
 # ====================================================================== #
+def cmd_fundamentals_check(cfg, db: Database, codes: list[str], refresh: bool = False) -> int:
+    """기업 재무분석 점검 — **매매와 무관한 읽기 전용 참고 리포트**.
+
+    * DART OpenAPI 는 읽기 전용 GET(`corpCode.xml`, `fnlttSinglAcntAll.json`)만 호출한다.
+    * Claude 는 종목당 1회(구조화 출력, 웹 검색 없음) 호출한다.
+    * 키움 API 는 **호출하지 않는다** — 이미 DB 에 있는 `stock_master`/`price_daily` 만 읽는다.
+    * 주문 게이트·자동거래·`algorithm_selection` 은 읽지도 쓰지도 않는다.
+    """
+    from .services.fundamentals import CODE, FundamentalsService
+    from .dart.valuation import REPRT_LABEL, period_label
+
+    print(f"\n=== stock_svr --fundamentals-check ({now_kst():%Y-%m-%d %H:%M:%S} KST) ===")
+    print(f"  설정 파일: {cfg.source_path}")
+    print("  이 기능은 매매와 무관합니다 (신호·주문·게이트를 전혀 건드리지 않습니다)")
+    if not cfg.dart.configured:
+        print("  [FAIL] [dart] apikey_file 경로가 설정되지 않았습니다.")
+        return 1
+    try:
+        cfg.dart.read_key()
+        print("  [ OK ] DART 인증키 파일 읽기 성공 (값 비표시)")
+    except ConfigError as exc:
+        print(f"  [FAIL] {exc}")
+        return 1
+    if not cfg.anthropic.configured:
+        print("  [FAIL] [anthropic] apikey_file 경로가 설정되지 않았습니다.")
+        return 1
+    try:
+        cfg.anthropic.read_key()
+        print("  [ OK ] Anthropic API 키 파일 읽기 성공 (값 비표시)")
+    except ConfigError as exc:
+        print(f"  [FAIL] {exc}")
+        return 1
+    if not db.ping():
+        print(f"  [FAIL] DB 접속 실패: {db.last_error or '연결 실패'}")
+        return 1
+    attach_db_handler(db, logging.INFO)
+
+    svc = FundamentalsService(db, dart_cfg=cfg.dart, anthropic_cfg=cfg.anthropic)
+    wanted = [c.strip() for c in (codes or []) if c.strip()]
+    limit = max(1, min(3, len(wanted))) if wanted else 1
+    print(f"  설정      : 시총상위 {svc.opts.top_n}종목 / {svc.opts.years}년치 / "
+          f"모델 {svc.opts.model} / 리포트 상한 {svc.opts.report_limit}건(점검은 {limit}건)")
+    if wanted:
+        print(f"  지정 종목 : {', '.join(wanted)}")
+    print("\n  ... 수집·계산·리포트 생성 중 (DART 호출이 많아 수 분 걸릴 수 있습니다)\n")
+
+    try:
+        result = svc.run_once(force_fetch=refresh, force_report=True, report_limit=limit,
+                              only_codes=wanted or None)
+    finally:
+        svc.close()
+
+    print(f"  대상 종목  : {len(result.targets)}종목"
+          + (f" (시총 상위 {svc.opts.top_n}위 이내)" if not wanted else ""))
+    cc = result.corp_code or {}
+    print(f"  고유번호   : 매칭 {cc.get('matched', 0)} / 저장 {cc.get('saved', 0)} / "
+          f"미매칭 {cc.get('missing', 0)}"
+          + (f"  (생략: {cc['skipped']})" if cc.get("skipped") else ""))
+    f = result.fetch
+    print(f"  DART 수집  : 호출 {f.get('calls', 0)}회 → 저장 {f.get('saved', 0)}건, "
+          f"미공시 {f.get('no_data', 0)}건, 오류 {f.get('errors', 0)}건"
+          + ("  [상한 도달]" if f.get("truncated") else ""))
+    for err in result.errors:
+        print(f"  [WARN] {err}")
+
+    for val in result.valuations:
+        rows = val.get("financial_rows") or []
+        print(f"\n  --- {val['stk_cd']} {val.get('stk_nm', '')} "
+              f"({val.get('market_label', '-')}, 시총 {(val.get('market_cap') or 0) // 100000000:,}억) ---")
+        print(f"      재무데이터 : {len(rows)}건 "
+              f"({period_label(rows[0]) if rows else '-'} ~ {val.get('financial_asof') or '-'})")
+        for row in rows[-6:]:
+            print(f"        · {period_label(row):<8} {REPRT_LABEL.get(str(row.get('reprt_code')), '-'):<8}"
+                  f" 매출 {_eok(row.get('revenue')):>12} 영업이익 {_eok(row.get('operating_profit')):>12}"
+                  f" 순이익 {_eok(row.get('net_profit')):>12} EPS {_m(row.get('eps')):>8}"
+                  f" 영업CF {_eok(row.get('operating_cash_flow')):>12}")
+        print(f"      주가/지표  : 현재가 {_m(val.get('cur_prc'))}원  EPS(TTM) {_m(val.get('eps_ttm'))}원"
+              f"  BPS {_m(val.get('bps'))}원")
+        print(f"                   PER {_d(val.get('per'))}  PBR {_d(val.get('pbr'))}"
+              f"  ROE {_d(val.get('roe'))}%  부채비율 {_d(val.get('debt_ratio'))}%"
+              f"  (기준 {val.get('financial_asof') or '-'})")
+        print(f"      EPS 근거   : {val.get('eps_basis')} / ROE 분자: {val.get('net_basis')}")
+
+    for rep in result.reports:
+        print(f"\n  === 리포트: {rep['stk_cd']} {rep['stk_nm']} [{rep['status']}] ===")
+        if rep["status"] != "ok":
+            print(f"      오류: {rep['error_msg']}")
+            continue
+        print(f"      요약: {rep['summary']}")
+        print("      ----")
+        for line in (rep["report_text"] or "").splitlines():
+            print(f"      {line}")
+        print(f"      ---- 토큰 입력 {rep['input_tokens']:,} / 출력 {rep['output_tokens']:,}"
+              f"  지연 {rep['latency_ms']:,}ms  모델 {rep['model']}")
+
+    print(f"\n  합계 토큰  : 입력 {result.input_tokens:,} / 출력 {result.output_tokens:,}")
+    print(f"  DB 기록    : company_corp_code / company_financial / company_valuation_daily / "
+          f"company_analysis_report ({len(result.reports)}건)")
+    print(f"  ({CODE} 은 algorithm 테이블에 등록되지 않으며, 키움 주문 API 는 호출하지 "
+          f"않았습니다)\n")
+    failed = sum(1 for r in result.reports if r["status"] != "ok")
+    return 0 if (result.reports and not failed) else 2
+
+
+def _eok(value) -> str:
+    """원 → 억원 표기."""
+    try:
+        return f"{int(value) / 100_000_000:,.0f}억"
+    except (TypeError, ValueError):
+        return "-"
+
+
+def _d(value) -> str:
+    if value is None:
+        return "-"
+    try:
+        return f"{float(value):,.2f}"
+    except (TypeError, ValueError):
+        return "-"
+
+
+# ====================================================================== #
 def cmd_eval_once(cfg, db: Database, force_market: bool, all_algos: bool,
                   allow_orders: bool = False) -> int:
     """엔진을 기동해 평가 1회만 수행하고 종료.
@@ -444,6 +575,10 @@ def main(argv: list[str] | None = None) -> int:
             # 엔진 루프·WS 를 띄우지 않는 읽기 전용 점검이므로 단일 실행 락을 잡지 않는다
             # (`--check`/`--claude-check` 와 같다 - 운영 중인 서버를 멈추지 않아도 된다)
             return cmd_trend_scan_check(cfg, db)
+        if args.fundamentals_check is not None:
+            # 엔진 루프·WS 를 띄우지 않는 읽기 전용 점검이라 단일 실행 락을 잡지 않는다
+            # (운영 중인 서버를 멈추지 않아도 된다 - `--trend-scan-check` 와 같다)
+            return cmd_fundamentals_check(cfg, db, args.fundamentals_check, args.refresh)
         if args.eval_once:
             with single_instance():
                 return cmd_eval_once(cfg, db, args.force_market, args.all_algos,
