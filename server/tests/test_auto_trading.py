@@ -253,3 +253,18 @@ def test_all_order_paths_go_through_unlock(api):
     from stock_svr.kiwoom.errors import OrderBlockedError
     with pytest.raises(OrderBlockedError):
         rest.call(api, {})
+
+
+def test_startup_corrects_stale_running_status_after_forced_kill():
+    """이전 프로세스가 강제 종료돼(재배포 등) DB 에 '실행중'이 남아 있어도,
+    부팅 시 실제 상태(중지)와 표시를 일치시켜야 한다."""
+    db = FakeDb()
+    db.statuses[AUTO_COMPONENT] = ("warn", AUTO_TEXT_ORDER_ON)  # 강제종료로 남은 오래된 값
+    eng = Engine(AppConfig(), db)
+    assert eng.auto_trading_active is False              # 실제 상태는 이미 중지(Event 미설정)
+    assert db.statuses[AUTO_COMPONENT][1] == AUTO_TEXT_ORDER_ON  # 아직 표시는 안 고쳐짐
+
+    eng.reset_auto_status_stopped()                       # _startup() 이 부팅 시 호출하는 것
+
+    assert db.statuses[AUTO_COMPONENT] == ("unknown", AUTO_TEXT_STOPPED)
+    assert eng.status.snapshot()["auto_status"] == ("unknown", AUTO_TEXT_STOPPED)

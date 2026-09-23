@@ -183,6 +183,17 @@ class Engine:
     def auto_trading_active(self) -> bool:
         return self._auto_trading.is_set()
 
+    def reset_auto_status_stopped(self) -> None:
+        """server_status(auto_trading) 표시를 '중지'로 맞춘다.
+
+        `self._auto_trading`(threading.Event)는 프로세스 시작 시 항상 미설정(중지) 상태다.
+        하지만 DB의 표시 문구는 **정상 종료 경로에서만** '중지'로 갱신되므로, 이전 프로세스가
+        강제 종료돼(예: 재배포의 `Stop-Process -Force`) 그 경로를 못 타면 '실행중'이 그대로
+        남아 웹 관제가 실제와 다른 상태를 보여준다. `_startup()`이 부팅 시 항상 호출해
+        실제 상태(중지)와 표시를 일치시킨다.
+        """
+        self._set_status(AUTO_COMPONENT, "unknown", AUTO_TEXT_STOPPED)
+
     def current_gate(self) -> OrderGateState:
         try:
             return OrderGateState.from_settings(self.db.get_settings())
@@ -362,6 +373,8 @@ class Engine:
         self.status.set(mode=gate.trading_mode.upper(), order_allowed=gate.can_send_order,
                         gate_text=gate.describe())
         log.info("엔진 시작 (env=%s, 주문게이트 %s)", self.env, gate.describe())
+
+        self.reset_auto_status_stopped()
 
         if self.db.ping():
             self._set_status("db", "ok", f"{self.cfg.db.host}:{self.cfg.db.port}/{self.cfg.db.name}")
