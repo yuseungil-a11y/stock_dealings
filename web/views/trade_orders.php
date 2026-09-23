@@ -44,6 +44,7 @@ $tradeTp = ['0' => '보통(지정가)', '3' => '시장가', '5' => '조건부지
         $slip = slippage_pct($r['signal_price'] ?? null, $r['avg_fill_pric'] ?? null);
         $oid = (int)$r['id'];
         $rowEvents = $events[$oid] ?? [];
+        $detId = 'detrow-' . $oid;
         ?>
         <tr class="<?= ((int)$r['is_dry_run'] === 1 || $r['status'] === 'SIGNAL_ONLY') ? 'row-dry' : (in_array((string)$r['status'], ['FAILED', 'REJECTED'], true) ? 'lv-error' : '') ?>">
           <td><?= h(kst($r['created_at'])) ?></td>
@@ -62,15 +63,16 @@ $tradeTp = ['0' => '보통(지정가)', '3' => '시장가', '5' => '조건부지
           <td class="wrap-td"><?= ($r['reject_reason'] ?? '') !== '' ? h($r['reject_reason']) : '<span class="muted">-</span>' ?></td>
           <td class="wrap-td"><?= h($r['reason']) ?><?php if ($r['return_msg'] !== null && $r['return_msg'] !== ''): ?>
             <span class="muted">· <?= h($r['return_code']) ?> <?= h($r['return_msg']) ?></span><?php endif; ?></td>
-          <td class="wrap-td">
-            <details class="rowdet"><summary>상세</summary>
-              <div class="rowdet-body">
-                <p class="rd-k">주문 상태 타임라인</p>
-                <?= order_timeline_html($rowEvents, $oeAvailable) ?>
-                <?= json_details('신호 맥락 (signal_context)', $r['signal_context'] ?? null) ?>
-                <?= json_details('파라미터 스냅샷 (params_snapshot)', $r['params_snapshot'] ?? null) ?>
-              </div>
-            </details>
+          <td><details class="rowdet" data-target="<?= h($detId) ?>"><summary>상세</summary></details></td>
+        </tr>
+        <tr class="rowdet-line" id="<?= h($detId) ?>" hidden>
+          <td colspan="16">
+            <div class="rowdet-body">
+              <p class="rd-k">주문 상태 타임라인</p>
+              <?= order_timeline_html($rowEvents, $oeAvailable) ?>
+              <?= json_details('신호 맥락 (signal_context)', $r['signal_context'] ?? null) ?>
+              <?= json_details('파라미터 스냅샷 (params_snapshot)', $r['params_snapshot'] ?? null) ?>
+            </div>
           </td>
         </tr>
       <?php endforeach; ?>

@@ -61,6 +61,15 @@
     $all('details.dd').forEach(function (o) { o.open = false; });
   });
 
+  /* ------------------------------------------------ 거래 분석 "상세" 행 펼치기
+   * 상세 내용이 표의 좁은 마지막 칸에 갇혀 가로 스크롤 없이는 안 보이던 문제 —
+   * <summary>만 원래 칸에 두고, 실제 내용은 표 전체 너비의 다음 행(rowdet-line)에 둔다. */
+  $all('details.rowdet[data-target]').forEach(function (d) {
+    var target = document.getElementById(d.getAttribute('data-target'));
+    if (!target) { return; }
+    d.addEventListener('toggle', function () { target.hidden = !d.open; });
+  });
+
   /* ------------------------------------------------ select 자동 제출 */
   $all('select[data-autosubmit]').forEach(function (sel) {
     sel.addEventListener('change', function () {

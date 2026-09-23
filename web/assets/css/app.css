@@ -317,9 +317,14 @@ input:focus, select:focus, button:focus { outline: 2px solid var(--accent-2); ou
 /* 행 펼침 상세 (JS 없이 <details> 만 사용) */
 details.rowdet > summary { cursor: pointer; font-size: 12px; color: var(--accent-2); white-space: nowrap; }
 details.rowdet[open] > summary { font-weight: 600; }
+/* 상세 내용은 같은 행의 좁은 마지막 칸이 아니라, 표 전체 너비를 쓰는 별도 행(rowdet-line)에
+   펼친다 — 열이 많은 표(응답코드·거부사유 등 nowrap 칸이 여럿)라 마지막 칸에 갇혀 있으면
+   가로 스크롤을 끝까지 넘겨야만 보였다. */
+.rowdet-line { background: #f8fafd; }
+.rowdet-line > td { padding: 10px 14px; }
 .rowdet-body {
-  margin-top: 6px; padding: 8px 10px; background: #f8fafd; border: 1px solid var(--line-2);
-  border-radius: 6px; min-width: 300px; max-width: 620px; white-space: normal;
+  margin: 0; padding: 8px 10px; background: var(--panel); border: 1px solid var(--line-2);
+  border-radius: 6px; max-width: 900px; white-space: normal;
 }
 .rd-k { margin: 8px 0 2px; font-size: 11px; font-weight: 700; color: var(--ink-2); }
 .rd-k:first-child { margin-top: 0; }

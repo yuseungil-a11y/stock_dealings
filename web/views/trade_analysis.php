@@ -114,7 +114,7 @@ $prompts = [
         <th class="num">슬리피지</th><th>응답코드 · 메시지</th><th>거부사유</th><th>Claude 판단</th><th>상세</th>
       </tr></thead>
       <tbody>
-      <?php foreach ($res['rows'] as $r): ?>
+      <?php foreach ($res['rows'] as $ri => $r): ?>
         <?php
         $status = (string)($r['order_status'] ?? '');
         $dry = (int)($r['is_dry_run'] ?? 0) === 1 || $status === 'SIGNAL_ONLY';
@@ -122,6 +122,7 @@ $prompts = [
         $rowEvents = ($oid !== null && isset($events[$oid])) ? $events[$oid] : [];
         $rowCls = in_array($status, ['FAILED', 'REJECTED'], true) ? 'lv-error'
             : ((string)$r['signal_type'] === 'BLOCK' ? 'lv-warn' : ($dry ? 'row-dry' : ''));
+        $detId = 'detrow-' . (int)$ri;
         ?>
         <tr class="<?= h($rowCls) ?>">
           <td><?= h(kst($r['signal_time'])) ?>
@@ -145,37 +146,38 @@ $prompts = [
               <?= ($r['llm_final'] ?? '') !== '' ? llm_action_badge((string)$r['llm_final']) : '' ?>
               <span class="sub"><?= $r['llm_confidence'] === null ? '' : h(nfmt($r['llm_confidence']) . '%') ?></span>
             <?php else: ?><span class="muted">-</span><?php endif; ?></td>
-          <td class="wrap-td">
-            <details class="rowdet"><summary>상세</summary>
-              <div class="rowdet-body">
-                <?php if (($r['signal_detail'] ?? '') !== ''): ?>
-                  <p class="rd-k">신호 사유</p><p class="rd-v"><?= h($r['signal_detail']) ?></p>
-                <?php endif; ?>
-                <?php if (($r['order_reason'] ?? '') !== ''): ?>
-                  <p class="rd-k">주문 사유</p><p class="rd-v"><?= h($r['order_reason']) ?></p>
-                <?php endif; ?>
-                <?php if (($r['llm_reasons'] ?? '') !== ''): ?>
-                  <p class="rd-k">Claude 근거<?= ($r['llm_model'] ?? '') !== '' ? ' (' . h($r['llm_model']) . ')' : '' ?></p>
-                  <p class="rd-v"><?= h($r['llm_reasons']) ?></p>
-                <?php endif; ?>
-                <?php if ($status !== '' || $r['trde_tp'] !== null): ?>
-                  <p class="rd-k">주문 정보</p>
-                  <p class="rd-v">주문번호 <span class="mono"><?= h($r['ord_no'] ?? '-') ?></span>
-                    · 거래구분 <?= h($tradeTp[(string)$r['trde_tp']] ?? ($r['trde_tp'] ?? '-')) ?>
-                    · 주문단가 <?= $r['ord_uv'] === null ? '시장가' : h(money($r['ord_uv'])) ?>
-                    · 체결 <?= h(nfmt($r['exec_cnt'])) ?>건 / <?= h(money($r['exec_amount'])) ?>원
-                    · 수수료·세금 <?= h(money($r['exec_fee_tax'])) ?>원</p>
-                <?php endif; ?>
-                <?= json_details('신호 맥락 (signal_context)', $r['signal_context']) ?>
-                <?= json_details('파라미터 스냅샷 (params_snapshot)', $r['params_snapshot']) ?>
-                <p class="rd-k">주문 상태 타임라인</p>
-                <?php if ($oid === null): ?>
-                  <p class="tl-empty">연결된 주문이 없습니다(신호만 기록).</p>
-                <?php else: ?>
-                  <?= order_timeline_html($rowEvents, $oeAvailable) ?>
-                <?php endif; ?>
-              </div>
-            </details>
+          <td><details class="rowdet" data-target="<?= h($detId) ?>"><summary>상세</summary></details></td>
+        </tr>
+        <tr class="rowdet-line" id="<?= h($detId) ?>" hidden>
+          <td colspan="14">
+            <div class="rowdet-body">
+              <?php if (($r['signal_detail'] ?? '') !== ''): ?>
+                <p class="rd-k">신호 사유</p><p class="rd-v"><?= h($r['signal_detail']) ?></p>
+              <?php endif; ?>
+              <?php if (($r['order_reason'] ?? '') !== ''): ?>
+                <p class="rd-k">주문 사유</p><p class="rd-v"><?= h($r['order_reason']) ?></p>
+              <?php endif; ?>
+              <?php if (($r['llm_reasons'] ?? '') !== ''): ?>
+                <p class="rd-k">Claude 근거<?= ($r['llm_model'] ?? '') !== '' ? ' (' . h($r['llm_model']) . ')' : '' ?></p>
+                <p class="rd-v"><?= h($r['llm_reasons']) ?></p>
+              <?php endif; ?>
+              <?php if ($status !== '' || $r['trde_tp'] !== null): ?>
+                <p class="rd-k">주문 정보</p>
+                <p class="rd-v">주문번호 <span class="mono"><?= h($r['ord_no'] ?? '-') ?></span>
+                  · 거래구분 <?= h($tradeTp[(string)$r['trde_tp']] ?? ($r['trde_tp'] ?? '-')) ?>
+                  · 주문단가 <?= $r['ord_uv'] === null ? '시장가' : h(money($r['ord_uv'])) ?>
+                  · 체결 <?= h(nfmt($r['exec_cnt'])) ?>건 / <?= h(money($r['exec_amount'])) ?>원
+                  · 수수료·세금 <?= h(money($r['exec_fee_tax'])) ?>원</p>
+              <?php endif; ?>
+              <?= json_details('신호 맥락 (signal_context)', $r['signal_context']) ?>
+              <?= json_details('파라미터 스냅샷 (params_snapshot)', $r['params_snapshot']) ?>
+              <p class="rd-k">주문 상태 타임라인</p>
+              <?php if ($oid === null): ?>
+                <p class="tl-empty">연결된 주문이 없습니다(신호만 기록).</p>
+              <?php else: ?>
+                <?= order_timeline_html($rowEvents, $oeAvailable) ?>
+              <?php endif; ?>
+            </div>
           </td>
         </tr>
       <?php endforeach; ?>
