@@ -29,6 +29,7 @@ from stock_svr.algo.fundamentals_filter import (
     age_days,
     check_indicators,
     check_valuation,
+    needs_fetch,
 )
 from stock_svr.algo.params import ParamSet
 
@@ -364,3 +365,119 @@ def test_check_indicators_direct():
     assert ok
     ok, reason = check_indicators(valuation(per="30", pbr="1", roe="10", debt="50"), opts())
     assert not ok and "PER" in reason
+
+
+# ====================================================================== #
+# 12. needs_fetch — 온디맨드 재수집 대상 판정(순수 함수)
+# ====================================================================== #
+def test_needs_fetch_true_when_no_data():
+    assert needs_fetch(None, opts(), now=NOW) is True
+
+
+def test_needs_fetch_true_when_stale():
+    old_dt = (NOW - _dt.timedelta(days=15)).date()
+    row = valuation(dt=old_dt)
+    assert needs_fetch(row, opts(stale_days=10), now=NOW) is True
+
+
+def test_needs_fetch_false_when_fresh_even_if_indicators_violate():
+    """행이 있고 신선하면, 지표 위반으로 차단되더라도 재수집 대상이 아니다."""
+    row = valuation(dt=NOW.date(), per="999", pbr="999", roe="-999", debt="999")
+    assert needs_fetch(row, opts(stale_days=10), now=NOW) is False
+
+
+def test_needs_fetch_false_when_dt_unparsable():
+    row = valuation(dt="이상한값")
+    assert needs_fetch(row, opts(), now=NOW) is False
+
+
+def test_needs_fetch_false_at_exact_stale_boundary():
+    boundary_dt = (NOW - _dt.timedelta(days=10)).date()
+    row = valuation(dt=boundary_dt)
+    assert needs_fetch(row, opts(stale_days=10), now=NOW) is False
+
+
+# ====================================================================== #
+# 13. 온디맨드 재수집 큐 연동 (fundamentals_fetch.enqueue)
+# ====================================================================== #
+def test_filter_enqueues_fetch_when_no_data():
+    db = db_with(None)
+    ctx = make_ctx(db, now=NOW)
+    kept = algo().filter_signals(ctx, [buy("005930")])
+    assert kept == []
+    assert len(db.fetch_requests) == 1
+    req = db.fetch_requests[0]
+    assert req["stk_cd"] == "005930" and req["source"] == CODE and req["status"] == "pending"
+
+
+def test_filter_enqueues_fetch_when_stale():
+    old_dt = (NOW - _dt.timedelta(days=30)).date()
+    db = db_with(valuation(dt=old_dt))
+    ctx = make_ctx(db, now=NOW)
+    kept = algo(stale_days=10).filter_signals(ctx, [buy("005930")])
+    assert kept == []
+    assert len(db.fetch_requests) == 1
+    assert db.fetch_requests[0]["stk_cd"] == "005930"
+
+
+def test_filter_does_not_enqueue_on_threshold_violation():
+    """행은 있고 최신인데 기준을 넘어 차단된 경우는 재수집해도 결과가 바뀌지 않으므로 큐에 넣지 않는다."""
+    db = db_with(valuation(per="99", pbr="1", roe="10", debt="50"))
+    ctx = make_ctx(db, now=NOW)
+    kept = algo().filter_signals(ctx, [buy("005930")])
+    assert kept == []
+    assert db.fetch_requests == []
+
+
+def test_filter_does_not_enqueue_when_lookup_fails():
+    """`latest_company_valuation` 조회 자체가 실패하면 판단 불가로 차단하되, 재수집 큐에도 넣지 않는다."""
+    db = db_with(valuation())
+    db.fail_on.add("latest_company_valuation")
+    ctx = make_ctx(db, now=NOW)
+    kept = algo().filter_signals(ctx, [buy("005930")])
+    assert kept == []
+    assert db.fetch_requests == []
+
+
+def test_filter_enqueue_is_deduplicated_by_open_request():
+    """이미 pending 요청이 있으면 새로 넣지 않는다(같은 종목이 여러 번 차단돼도)."""
+    db = db_with(None)
+    db.insert_fetch_request("005930", "삼성전자", source=CODE)
+    ctx = make_ctx(db, now=NOW)
+    algo().filter_signals(ctx, [buy("005930")])
+    assert len(db.fetch_requests) == 1
+
+
+def test_filter_block_result_unaffected_when_enqueue_raises(monkeypatch):
+    """재수집 큐 등록이 예기치 않게 실패해도 필터의 차단 판정 자체는 그대로다."""
+    import stock_svr.algo.fundamentals_filter as mod
+
+    def boom(*a, **kw):
+        raise RuntimeError("큐 등록 실패(테스트)")
+
+    monkeypatch.setattr(mod, "enqueue_fetch", boom)
+    db = db_with(None)
+    ctx = make_ctx(db, now=NOW)
+    sig = buy("005930")
+    kept = algo().filter_signals(ctx, [sig])
+    assert kept == []
+    assert len(db.signals) == 1 and "재무데이터 없음" in db.signals[0]["detail"]
+
+
+def test_filter_source_does_not_call_dart_directly():
+    """fundamentals_filter.py 는 DART 를 직접 호출하지 않는다(큐 등록 함수만 호출)."""
+    import stock_svr.algo.fundamentals_filter as mod
+
+    src = inspect.getsource(mod)
+    assert "DartClient" not in src and "dart.client" not in src
+    assert "corp_code_sync" not in src and "single_account_all" not in src
+
+
+def test_no_data_with_avg_down_when_apply_to_excludes_it_does_not_enqueue():
+    """apply_to 설정으로 이 필터가 관여하지 않는 신호(KIND_AVG_DOWN, entry 전용)는 큐에도 안 들어간다."""
+    db = db_with(None)
+    ctx = make_ctx(db, now=NOW)
+    sig = buy("005930", kind=KIND_AVG_DOWN)
+    kept = algo(apply_to="entry").filter_signals(ctx, [sig])
+    assert kept == [sig]
+    assert db.fetch_requests == []

@@ -27,6 +27,8 @@ from ..kiwoom.ws import (
 )
 from ..services.fundamentals import POLL_SEC as FUNDAMENTALS_POLL_SEC
 from ..services.fundamentals import FundamentalsService
+from ..services.fundamentals_fetch import FETCH_REQUEST_POLL_SEC
+from ..services.fundamentals_fetch import FetchRequestWorker
 from ..services.housekeeping import HousekeepingService
 from ..services.sync_account import AccountService
 from ..services.sync_market import MarketService
@@ -162,6 +164,9 @@ class Engine:
         # 기업 재무분석(DART + Claude). **매매와 무관한 읽기 전용 참고 리포트**이며
         # 주문 게이트·자동거래 상태를 읽지도 쓰지도 않는다.
         self.fundamentals: FundamentalsService | None = None
+        # fundamentals_filter 의 온디맨드 재수집 요청 큐 처리기(종목 1개만, 신호 없음,
+        # Claude 미호출). 자동거래·주문 게이트와 무관하게 동작한다.
+        self.fetch_requests: FetchRequestWorker | None = None
         self.run_id: int | None = None
         self._master_synced_date = None
 
@@ -424,6 +429,11 @@ class Engine:
         # 기업 재무분석(참고용). [dart] 키가 없으면 due_reason 이 매번 생략 사유를 돌려준다.
         self.fundamentals = FundamentalsService(self.db, dart_cfg=self.cfg.dart,
                                                 anthropic_cfg=self.cfg.anthropic)
+        # fundamentals_filter 의 온디맨드 재수집 요청 처리기. FundamentalsService.fetch_one()
+        # 만 호출하고(종목 1개, Claude 미호출) 게이트·자동거래 상태와 무관하게 동작한다.
+        self.fetch_requests = FetchRequestWorker(self.db, self.fundamentals)
+        # 기동 시 1회: 처리 중이던 채로 죽은 요청 정리(다음 요청이 영영 막히지 않게)
+        self._safe("온디맨드 재수집 요청 정리", self.fetch_requests.cleanup_stale)
 
         self._safe("보관기간 정리", lambda: self.house.run_purge(
             self._retention_days(), self.cfg.logging.path))
@@ -453,6 +463,7 @@ class Engine:
         last_master = 0.0
         last_trend_req = 0.0
         last_fundamentals = 0.0
+        last_fetch_req = 0.0
         while not self._stop.is_set():
             now_mono = time.monotonic()
             open_now = self.market_open()
@@ -491,6 +502,13 @@ class Engine:
                     and now_mono - last_fundamentals >= FUNDAMENTALS_POLL_SEC:
                 last_fundamentals = now_mono
                 self._safe("기업 재무분석", self.fundamentals.run_if_due)
+
+            # fundamentals_filter 의 온디맨드 재수집 요청(종목 1개, Claude 미호출) —
+            # **자동거래·주문 게이트와 무관하게** 항상 확인한다. 신호/주문은 만들지 않는다.
+            if self.fetch_requests is not None \
+                    and now_mono - last_fetch_req >= FETCH_REQUEST_POLL_SEC:
+                last_fetch_req = now_mono
+                self._safe("온디맨드 재무데이터 재수집", self.fetch_requests.poll_once)
 
             if self._reset_eval:
                 self._reset_eval = False

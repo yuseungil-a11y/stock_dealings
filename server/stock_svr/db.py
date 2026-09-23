@@ -962,6 +962,87 @@ class Database:
             tuple(codes))
         return {str(r["stk_cd"]): int(r["cur_prc"]) for r in rows if r.get("cur_prc")}
 
+    def stock_master_row(self, stk_cd: str) -> dict | None:
+        """종목마스터 단건(상장주식수·전일종가 등). 온디맨드 재무데이터 수집 대상 조회용."""
+        return self.query_one(
+            "SELECT stk_cd, stk_nm, market_code, market_name, list_count, last_price, "
+            "state, order_warning FROM stock_master WHERE stk_cd=%s", (str(stk_cd),))
+
+    # ================================================================== #
+    # 온디맨드 재무데이터 수집 요청 큐 (fundamentals_filter 전용)
+    #
+    # fundamentals_filter(매매 사이클 안의 순수 DB 읽기 필터)가 "재무데이터 없음/오래됨"
+    # 으로 매수를 차단할 때, 그 종목만 재수집하도록 남기는 요청이다. 이 메서드들은
+    # DART 를 절대 호출하지 않는다(빠른 INSERT/UPDATE 뿐) - 실제 수집은
+    # `services.fundamentals_fetch.FetchRequestWorker` 가 폴링해서 한다.
+    # ================================================================== #
+    def open_fetch_request(self, stk_cd: str) -> dict | None:
+        """이미 pending/processing 인 요청(중복 요청 방지용 dedupe 조회)."""
+        return self.query_one(
+            "SELECT * FROM company_fetch_request WHERE stk_cd=%s "
+            "AND status IN ('pending','processing') ORDER BY id DESC LIMIT 1",
+            (str(stk_cd),))
+
+    def recent_fetch_request(self, stk_cd: str, minutes: int = 60) -> dict | None:
+        """최근 `minutes` 분 안에 끝난(성공/실패 불문) 요청(재요청 쿨다운 판단용)."""
+        return self.query_one(
+            "SELECT * FROM company_fetch_request WHERE stk_cd=%s "
+            "AND status IN ('done','error') AND finished_at >= (NOW() - INTERVAL %s MINUTE) "
+            "ORDER BY finished_at DESC LIMIT 1",
+            (str(stk_cd), max(1, int(minutes))))
+
+    def insert_fetch_request(self, stk_cd: str, stk_nm: str | None = None,
+                             source: str = "fundamentals_filter") -> int:
+        return self.insert(
+            "INSERT INTO company_fetch_request (stk_cd, stk_nm, source) VALUES (%s,%s,%s)",
+            (str(stk_cd)[:12], _trim_masked(stk_nm, 60), str(source)[:50] if source else None))
+
+    def pending_fetch_request(self) -> dict | None:
+        """가장 오래된 pending 요청 1건(claim 전 조회)."""
+        return self.query_one(
+            "SELECT * FROM company_fetch_request WHERE status='pending' "
+            "ORDER BY requested_at, id LIMIT 1")
+
+    def count_processing_fetch_requests(self) -> int:
+        return int(self.scalar(
+            "SELECT COUNT(*) AS n FROM company_fetch_request WHERE status='processing'",
+            default=0) or 0)
+
+    def claim_fetch_request(self, max_tries: int = 5) -> dict | None:
+        """pending 요청 1건을 **원자적으로** claim 한다. 못 잡으면 None.
+
+        `trend_scan_request` 와 동일하게 `UPDATE ... WHERE id=%s AND status='pending'`
+        의 영향 행 수로 승자를 가린다(0이면 남이 가져간 것 → 다음 건으로).
+        """
+        for _ in range(max(1, int(max_tries))):
+            row = self.pending_fetch_request()
+            if row is None:
+                return None
+            won = self.execute(
+                "UPDATE company_fetch_request SET status='processing', claimed_at=%s "
+                "WHERE id=%s AND status='pending'", (now_kst(), int(row["id"])))
+            if won:
+                out = dict(row)
+                out["status"] = "processing"
+                return out
+        return None
+
+    def finish_fetch_request(self, request_id: int, *, status: str,
+                             error_msg: str | None = None) -> int:
+        return self.execute(
+            "UPDATE company_fetch_request SET status=%s, error_msg=%s, finished_at=%s "
+            "WHERE id=%s",
+            (status if status in ("pending", "processing", "done", "error") else "error",
+             _trim_masked(error_msg, 255), now_kst(), int(request_id)))
+
+    def expire_stale_fetch_requests(self, minutes: int = 10,
+                                    reason: str = "서버 재시작으로 중단") -> int:
+        """`processing` 인 채 오래 멈춰 있는 요청을 `error` 로 정리한다(서버가 처리 중 죽은 경우)."""
+        return self.execute(
+            "UPDATE company_fetch_request SET status='error', error_msg=%s, finished_at=%s "
+            "WHERE status='processing' AND requested_at < (NOW() - INTERVAL %s MINUTE)",
+            (_trim_masked(reason, 255), now_kst(), max(1, int(minutes))))
+
     # ================================================================== #
     # 주문 / 체결 / 거래내역
     # ================================================================== #

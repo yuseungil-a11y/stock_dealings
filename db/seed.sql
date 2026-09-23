@@ -11,7 +11,12 @@ INSERT IGNORE INTO system_setting (setting_key, value, description) VALUES
  ('real_trading_confirm','0',    '실계좌 주문 이중확인 (trading_mode=real 이면서 이 값이 1이어야 실주문 전송)'),
  ('poll_interval_sec',   '30',   '알고리즘 평가 주기(초)'),
  ('log_retention_days',  '7',    '로그(파일/DB) 보관 기간(일)'),
- ('archive_retention_days','365', '분석용 영구 보관 테이블(event_archive/api_error_log) 보관 기간(일). order_event/orders/executions/signal_log 는 삭제하지 않음');
+ ('archive_retention_days','365', '분석용 영구 보관 테이블(event_archive/api_error_log) 보관 기간(일). order_event/orders/executions/signal_log 는 삭제하지 않음'),
+ ('fundamentals_top_n',      '100', '기업 재무분석(DART, 참고용) 대상 - 시장별(코스피/코스닥) 시가총액 상위 N개. 서버 설정 화면에서 편집 가능'),
+ ('fundamentals_years',      '5',   '기업 재무분석 - 수집할 재무제표 연수'),
+ ('fundamentals_report_limit','3', '기업 재무분석 - 하루에 새로 생성할 Claude 해설 리포트 건수 상한(0=리포트 생성 끔)'),
+ ('fundamentals_max_fetch',  '300', '기업 재무분석 - 하루 DART 재무제표 호출 수 상한'),
+ ('fundamentals_run_hour',   '16',  '기업 재무분석 - 장마감 후 하루 1회 자동 실행 시각(시)');
 
 -- ---- 알고리즘 ---------------------------------------------------------
 INSERT INTO algorithm (code, name, role, description, is_locked, sort_order) VALUES

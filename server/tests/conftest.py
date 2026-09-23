@@ -60,6 +60,8 @@ class FakeDb:
         self.valuations: dict[tuple[str, _dt.date], dict] = {}
         self.company_reports: dict[tuple[str, _dt.date], dict] = {}
         self.price_daily: dict[str, list[dict]] = {}
+        # 온디맨드 재무데이터 수집 요청 큐 (fundamentals_filter 전용)
+        self.fetch_requests: list[dict] = []
         self._carid = 0
         self._taid = 0
         self._trid = 0
@@ -68,6 +70,7 @@ class FakeDb:
         self._lid = 0
         self._tid = 0
         self._tcid = 0
+        self._cfrid = 0
 
     def _maybe_fail(self, name: str) -> None:
         if name in self.fail_on:
@@ -600,6 +603,93 @@ class FakeDb:
             if bars and bars[-1].get("cur_prc"):
                 out[code] = int(bars[-1]["cur_prc"])
         return out
+
+    def stock_master_row(self, stk_cd: str):
+        self._maybe_fail("stock_master_row")
+        for r in self.stock_master_rows:
+            if str(r.get("stk_cd")) == str(stk_cd):
+                return dict(r)
+        return None
+
+    # -- 온디맨드 재무데이터 수집 요청 큐 (fundamentals_filter 전용) ------ #
+    def open_fetch_request(self, stk_cd: str):
+        self._maybe_fail("open_fetch_request")
+        rows = [r for r in self.fetch_requests
+                if r["stk_cd"] == str(stk_cd) and r["status"] in ("pending", "processing")]
+        rows.sort(key=lambda r: -r["id"])
+        return dict(rows[0]) if rows else None
+
+    def recent_fetch_request(self, stk_cd: str, minutes: int = 60):
+        self._maybe_fail("recent_fetch_request")
+        cutoff = (self.now_for_stale or _dt.datetime(2026, 9, 23, 10, 30)) \
+            - _dt.timedelta(minutes=max(1, int(minutes)))
+        rows = [r for r in self.fetch_requests
+                if r["stk_cd"] == str(stk_cd) and r["status"] in ("done", "error")
+                and r.get("finished_at") is not None and r["finished_at"] >= cutoff]
+        rows.sort(key=lambda r: r["finished_at"], reverse=True)
+        return dict(rows[0]) if rows else None
+
+    def insert_fetch_request(self, stk_cd: str, stk_nm=None,
+                             source: str = "fundamentals_filter") -> int:
+        self._maybe_fail("insert_fetch_request")
+        self._cfrid += 1
+        row = {"id": self._cfrid, "stk_cd": str(stk_cd), "stk_nm": stk_nm, "status": "pending",
+               "source": source, "requested_at": self.now_for_stale or _dt.datetime(2026, 9, 23, 10, 30),
+               "claimed_at": None, "finished_at": None, "error_msg": None}
+        self.fetch_requests.append(row)
+        return self._cfrid
+
+    def pending_fetch_request(self):
+        self._maybe_fail("pending_fetch_request")
+        rows = [r for r in self.fetch_requests if r["status"] == "pending"]
+        rows.sort(key=lambda r: (r["requested_at"], r["id"]))
+        return dict(rows[0]) if rows else None
+
+    def count_processing_fetch_requests(self) -> int:
+        self._maybe_fail("count_processing_fetch_requests")
+        return sum(1 for r in self.fetch_requests if r["status"] == "processing")
+
+    def claim_fetch_request(self, max_tries: int = 5):
+        """실제 Database 와 같은 '영향 행 수로 승자 판정' 방식."""
+        self._maybe_fail("claim_fetch_request")
+        for _ in range(max(1, int(max_tries))):
+            row = self.pending_fetch_request()
+            if row is None:
+                return None
+            won = 0
+            for r in self.fetch_requests:
+                if r["id"] == row["id"] and r["status"] == "pending":
+                    r["status"] = "processing"
+                    r["claimed_at"] = self.now_for_stale or _dt.datetime(2026, 9, 23, 10, 30)
+                    won = 1
+            if won:
+                out = dict(row)
+                out["status"] = "processing"
+                return out
+        return None
+
+    def finish_fetch_request(self, request_id: int, *, status: str, error_msg=None) -> int:
+        self._maybe_fail("finish_fetch_request")
+        from stock_svr.db import _trim_masked
+
+        for r in self.fetch_requests:
+            if r["id"] == request_id:
+                r.update({"status": status, "error_msg": _trim_masked(error_msg, 255),
+                          "finished_at": self.now_for_stale or _dt.datetime(2026, 9, 23, 10, 35)})
+                return 1
+        return 0
+
+    def expire_stale_fetch_requests(self, minutes: int = 10,
+                                    reason: str = "서버 재시작으로 중단") -> int:
+        self._maybe_fail("expire_stale_fetch_requests")
+        cutoff = (self.now_for_stale or _dt.datetime(2026, 9, 23, 10, 30)) \
+            - _dt.timedelta(minutes=max(1, int(minutes)))
+        n = 0
+        for r in self.fetch_requests:
+            if r["status"] == "processing" and r["requested_at"] < cutoff:
+                r.update({"status": "error", "error_msg": reason, "finished_at": cutoff})
+                n += 1
+        return n
 
     # -- 기타 ---------------------------------------------------------- #
     def scalar(self, sql: str, args=None, default=None):

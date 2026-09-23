@@ -664,4 +664,28 @@ CREATE TABLE IF NOT EXISTS company_analysis_report (
   KEY ix_car_stk (stk_cd, created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='종목별 Claude 재무분석 리포트. algorithm 테이블에 등록되지 않으며 매매 파이프라인과 전혀 연결되지 않는다(순수 참고용)';
 
+-- =====================================================================
+-- 11. 온디맨드 재무데이터 수집 요청 큐 (fundamentals_filter 전용)
+--   * fundamentals_filter(매매 사이클 안에서 도는 순수 DB 읽기 필터)가 "재무데이터
+--     없음/오래됨"으로 매수를 차단할 때, 그 종목 1개만 재수집하도록 종목코드만
+--     빠르게 INSERT 하는 큐다. DART 호출은 절대 매매 사이클 안에서 동기적으로 하지
+--     않는다 - trend_scan_request(웹의 "지금 다시 조사" 요청)와 동일한 큐 패턴으로,
+--     엔진이 백그라운드에서 폴링해 처리한다.
+--   * 매매 신호·주문과 전혀 관계없다(algorithm/algorithm_selection 에 등록하지 않음).
+-- =====================================================================
+CREATE TABLE IF NOT EXISTS company_fetch_request (
+  id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  stk_cd        VARCHAR(12) NOT NULL,
+  stk_nm        VARCHAR(60) NULL,
+  status        ENUM('pending','processing','done','error') NOT NULL DEFAULT 'pending',
+  source        VARCHAR(50) NULL COMMENT '요청 출처(예: fundamentals_filter)',
+  requested_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  claimed_at    DATETIME NULL,
+  finished_at   DATETIME NULL,
+  error_msg     VARCHAR(255) NULL,
+  PRIMARY KEY (id),
+  KEY ix_cfr_status (status),
+  KEY ix_cfr_stk (stk_cd)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='fundamentals_filter 가 매수 직전 "재무데이터 없음/오래됨"으로 차단할 때 남기는 온디맨드 재수집 요청(종목 1개뿐). 엔진이 폴링해 그 종목만 DART 재무제표를 수집한다 - Claude 리포트는 만들지 않는다';
+
 SET FOREIGN_KEY_CHECKS = 1;

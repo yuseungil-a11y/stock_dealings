@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import tkinter as tk
 from tkinter import messagebox, ttk
 
@@ -116,6 +117,64 @@ class SettingsTab(ttk.Frame):
         ttk.Button(btns, text="설정 저장", command=self.save).pack(side="left")
         ttk.Button(btns, text="다시 읽기", command=self.reload).pack(side="left", padx=6)
 
+        fin_box = ttk.LabelFrame(
+            self, text="기업 재무분석 대상 (DART, 참고용 — 매매와 무관, 자세한 내용은 리서치 화면 참조)",
+            padding=10)
+        fin_box.pack(fill="x", pady=(12, 0))
+
+        ttk.Label(fin_box, text="시장별 대상 상위 N:").grid(row=0, column=0, sticky="e", padx=(0, 6), pady=4)
+        self.fin_top_n_var = tk.StringVar(value="100")
+        ttk.Spinbox(fin_box, from_=1, to=500, textvariable=self.fin_top_n_var, width=10).grid(
+            row=0, column=1, sticky="w", pady=4)
+        ttk.Label(fin_box, text="코스피·코스닥 각각 시가총액 순위 상위 N개 기업을 재무분석 대상으로 삼는다"
+                                "(universe_filter 와 동일한 순위 로직 재사용). 기본 100",
+                  foreground="#777777").grid(row=0, column=2, sticky="w", padx=(10, 0))
+
+        ttk.Label(fin_box, text="수집 연수:").grid(row=1, column=0, sticky="e", padx=(0, 6), pady=4)
+        self.fin_years_var = tk.StringVar(value="5")
+        ttk.Spinbox(fin_box, from_=1, to=10, textvariable=self.fin_years_var, width=10).grid(
+            row=1, column=1, sticky="w", pady=4)
+        ttk.Label(fin_box, text="몇 년치 분기·반기·사업보고서를 받을지", foreground="#777777").grid(
+            row=1, column=2, sticky="w", padx=(10, 0))
+
+        ttk.Label(fin_box, text="하루 Claude 리포트 상한:").grid(row=2, column=0, sticky="e", padx=(0, 6), pady=4)
+        self.fin_report_limit_var = tk.StringVar(value="3")
+        ttk.Spinbox(fin_box, from_=0, to=50, textvariable=self.fin_report_limit_var, width=10).grid(
+            row=2, column=1, sticky="w", pady=4)
+        ttk.Label(fin_box, text="하루에 새로 생성할 Claude 해설 리포트 건수 상한(0이면 리포트 생성 끔 — "
+                                "PER/PBR/ROE 수집·계산은 계속됨, Claude 비용과 직결)",
+                  foreground="#777777").grid(row=2, column=2, sticky="w", padx=(10, 0))
+
+        ttk.Label(fin_box, text="하루 DART 호출 상한:").grid(row=3, column=0, sticky="e", padx=(0, 6), pady=4)
+        self.fin_max_fetch_var = tk.StringVar(value="300")
+        ttk.Spinbox(fin_box, from_=0, to=5000, textvariable=self.fin_max_fetch_var, width=10).grid(
+            row=3, column=1, sticky="w", pady=4)
+        ttk.Label(fin_box, text="DART 는 무료이나 전체 대상을 한 번에 못 받을 수 있어 며칠에 걸쳐 백필된다",
+                  foreground="#777777").grid(row=3, column=2, sticky="w", padx=(10, 0))
+
+        ttk.Label(fin_box, text="실행 시각(시):").grid(row=4, column=0, sticky="e", padx=(0, 6), pady=4)
+        self.fin_run_hour_var = tk.StringVar(value="16")
+        ttk.Spinbox(fin_box, from_=0, to=23, textvariable=self.fin_run_hour_var, width=10).grid(
+            row=4, column=1, sticky="w", pady=4)
+        ttk.Label(fin_box, text="장마감 후 하루 1회 자동 실행하는 시각", foreground="#777777").grid(
+            row=4, column=2, sticky="w", padx=(10, 0))
+
+        btns2 = ttk.Frame(fin_box)
+        btns2.grid(row=5, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        ttk.Button(btns2, text="재무분석 설정 저장", command=self.save_fundamentals).pack(side="left")
+        self.fin_run_btn = ttk.Button(btns2, text="지금 수집 실행 (최대 3개)",
+                                      command=self.run_fundamentals_now)
+        self.fin_run_btn.pack(side="left", padx=(6, 0))
+        ttk.Label(fin_box,
+                  text="하루 자동 실행(장마감 후 1회)과 별개로, 원할 때 직접 최대 3개 종목을 즉시 수집·"
+                       "리포트 생성한다(DART+Claude 호출, 수 분 걸릴 수 있음). 오늘 이미 리포트가 있는 "
+                       "종목은 건너뛰고 다음 종목으로 넘어간다 — 여러 번 누르면 대상 종목을 순서대로 채워나간다.",
+                  foreground="#777777", wraplength=640, justify="left").grid(
+            row=6, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        self.fin_run_status_var = tk.StringVar(value="")
+        ttk.Label(fin_box, textvariable=self.fin_run_status_var, foreground="#1565c0").grid(
+            row=7, column=0, columnspan=3, sticky="w", pady=(4, 0))
+
         engine_box = ttk.LabelFrame(self, text="엔진(조회·동기화)", padding=10)
         engine_box.pack(fill="x", pady=(12, 0))
         self.start_btn = ttk.Button(engine_box, text="엔진(조회·동기화) 시작",
@@ -150,6 +209,11 @@ class SettingsTab(ttk.Frame):
             self.confirm_var.set(s.get("real_trading_confirm") == "1")
             self.poll_var.set(s.get("poll_interval_sec", "30"))
             self.retention_var.set(s.get("log_retention_days", "7"))
+            self.fin_top_n_var.set(s.get("fundamentals_top_n", "100"))
+            self.fin_years_var.set(s.get("fundamentals_years", "5"))
+            self.fin_report_limit_var.set(s.get("fundamentals_report_limit", "3"))
+            self.fin_max_fetch_var.set(s.get("fundamentals_max_fetch", "300"))
+            self.fin_run_hour_var.set(s.get("fundamentals_run_hour", "16"))
             self._update_gate_text(s)
         except Exception:  # noqa: BLE001
             log.exception("설정 로드 실패")
@@ -238,6 +302,108 @@ class SettingsTab(ttk.Frame):
                                "system", "설정 변경: " + ", ".join(changed))
             messagebox.showinfo("설정 저장", "저장되었습니다.\n" + "\n".join(changed), parent=self)
         self.reload()
+
+    def save_fundamentals(self) -> None:
+        """기업 재무분석(DART, 참고용) 대상·주기 설정 저장.
+
+        게이트 3키가 아니므로 REAL 확인 없이 일반 `set_setting` 으로 저장한다.
+        매매 파이프라인은 이 값을 전혀 읽지 않는다(재무분석은 매매와 완전 분리).
+        """
+        db = self.app.db
+        if not db:
+            return
+        fields = (
+            ("fundamentals_top_n", self.fin_top_n_var, 1, 500),
+            ("fundamentals_years", self.fin_years_var, 1, 10),
+            ("fundamentals_report_limit", self.fin_report_limit_var, 0, 50),
+            ("fundamentals_max_fetch", self.fin_max_fetch_var, 0, 5000),
+            ("fundamentals_run_hour", self.fin_run_hour_var, 0, 23),
+        )
+        current = db.get_settings()
+        changed = []
+        for key, var, lo, hi in fields:
+            try:
+                val = max(lo, min(hi, int(str(var.get()).strip())))
+            except (TypeError, ValueError):
+                messagebox.showerror("설정 저장 실패", f"{key}: 숫자를 입력하세요.", parent=self)
+                return
+            var.set(str(val))
+            if current.get(key) == str(val):
+                continue
+            try:
+                db.set_setting(key, str(val), updated_by="ui")
+            except Exception as exc:  # noqa: BLE001 - 한 항목 실패가 나머지를 막지 않게
+                log.exception("재무분석 설정 저장 실패: %s", key)
+                messagebox.showerror("설정 저장 실패", f"{key}: {exc}", parent=self)
+                continue
+            changed.append(f"{key}={val}")
+        if changed:
+            self.app.log_event("INFO", "system", "재무분석 설정 변경: " + ", ".join(changed))
+            messagebox.showinfo("설정 저장", "저장되었습니다.\n" + "\n".join(changed), parent=self)
+        self.reload()
+
+    def run_fundamentals_now(self) -> None:
+        """"지금 수집 실행" 버튼 — 하루 자동 실행(16시 1회)과 별개로 수동 즉시 실행.
+
+        네트워크(DART+Claude) 호출이 수 분 걸릴 수 있어 별도 스레드에서 돌리고,
+        UI 갱신은 `self.after(0, ...)` 로 메인 스레드에 넘긴다(universe_preview.py 와 동일 패턴).
+        매매 파이프라인(게이트·algorithm_selection·signal_log·orders·Executor·risk_guard)은
+        전혀 건드리지 않는다 — `FundamentalsService.run_once()` 는 참고용 재무 리포트만 만든다.
+        """
+        db = self.app.db
+        cfg = self.app.cfg
+        if not db:
+            return
+        if not cfg.dart.configured:
+            messagebox.showerror("실행 불가", "[dart] apikey_file 이 설정되지 않았습니다.", parent=self)
+            return
+        if not cfg.anthropic.configured:
+            messagebox.showerror("실행 불가", "[anthropic] apikey_file 이 설정되지 않았습니다.", parent=self)
+            return
+
+        self.fin_run_btn.configure(state="disabled")
+        self.fin_run_status_var.set("실행 중... (DART+Claude 호출, 수 분 걸릴 수 있습니다)")
+
+        def work() -> None:
+            from ..services.fundamentals import FundamentalsService
+
+            svc = FundamentalsService(db, dart_cfg=cfg.dart, anthropic_cfg=cfg.anthropic)
+            try:
+                result = svc.run_once(report_limit=3)
+                msg = self._format_result(result)
+                err: Exception | None = None
+            except Exception as exc:  # noqa: BLE001 - 실행 실패를 UI 로 보고하고 앱은 죽지 않게
+                log.exception("재무분석 수동 실행 실패")
+                msg = ""
+                err = exc
+            finally:
+                svc.close()
+            try:
+                self.after(0, lambda: self._on_fundamentals_done(msg, err))
+            except tk.TclError:
+                pass        # 창이 이미 닫힘
+
+        threading.Thread(target=work, name="fundamentals-run-now", daemon=True).start()
+
+    @staticmethod
+    def _format_result(result) -> str:
+        f = result.fetch
+        reports = result.reports or []
+        ok = sum(1 for r in reports if r.get("status") == "ok")
+        err = sum(1 for r in reports if r.get("status") != "ok")
+        names = ", ".join(f"{r.get('stk_nm') or r.get('stk_cd')}" for r in reports) or "(없음 - 오늘 대상 종목 소진 또는 전부 이미 완료)"
+        return (f"대상 {len(result.targets)}종목 중 리포트 {len(reports)}건 생성"
+                f"(정상 {ok} / 오류 {err})  -  {names}  |  DART 호출 {f.get('calls', 0)}회")
+
+    def _on_fundamentals_done(self, msg: str, err: Exception | None) -> None:
+        if self.winfo_exists():
+            self.fin_run_btn.configure(state="normal")
+            self.fin_run_status_var.set(
+                f"실패: {type(err).__name__}: {err}" if err else msg)
+        if err is None:
+            self.app.log_event("INFO", "system", f"재무분석 수동 실행: {msg}")
+        else:
+            self.app.log_event("ERROR", "system", f"재무분석 수동 실행 실패: {err}")
 
     def refresh_engine_state(self, running: bool, gate_text: str = "") -> None:
         self.engine_var.set(("실행 중" if running else "정지됨") + (f"   ({gate_text})" if gate_text else ""))

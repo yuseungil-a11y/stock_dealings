@@ -417,6 +417,73 @@ class FundamentalsService:
         return out
 
     # ================================================================== #
+    # 온디맨드: 종목 1개만 (fundamentals_filter 전용 - services.fundamentals_fetch 가 호출)
+    # ================================================================== #
+    def fetch_one(self, stk_cd: str, stk_nm: str | None = None, *,
+                  today: _dt.date | None = None, force: bool = False,
+                  max_fetch: int | None = None) -> dict:
+        """종목 1개만 corp_code 매핑 + 재무제표 수집 + 밸류에이션 계산.
+
+        `fundamentals_filter` 가 매수 직전 "재무데이터 없음/오래됨"으로 차단한 종목을
+        `FetchRequestWorker` 가 큐에서 꺼내 호출하는 경로다. 대상 종목이 `targets()`의
+        시총 상위 순위에 없어도(배치 대상이 아니어도) 동작해야 하므로 `stock_master`
+        를 직접 읽어 대상 1건을 만든다. **Claude 리포트는 절대 만들지 않는다**
+        (`make_reports()` 를 호출하지 않는다 - 숫자만 계산하고 끝나야 비용이 0원이다).
+
+        예외를 밖으로 던지지 않는다 - 실패 사유는 `result["errors"]` 에 모은다.
+        """
+        today = today or today_kst()
+        result: dict = {"stk_cd": stk_cd, "stk_nm": stk_nm, "corp_code": {}, "fetch": {},
+                        "valuation": None, "errors": []}
+        try:
+            row = self.db.stock_master_row(stk_cd)
+        except Exception as exc:  # noqa: BLE001
+            result["errors"].append(f"종목마스터 조회 실패: {type(exc).__name__}")
+            log.warning("%s: 종목마스터 조회 실패 (%s)", CODE, stk_cd, exc_info=True)
+            return result
+        if row is None:
+            result["errors"].append("종목마스터에 없는 종목")
+            return result
+        target = {"stk_cd": str(stk_cd), "stk_nm": row.get("stk_nm") or stk_nm,
+                 "list_count": row.get("list_count"), "last_price": row.get("last_price")}
+
+        from .corp_code_sync import CorpCodeSync
+
+        try:
+            result["corp_code"] = CorpCodeSync(self.db, self.dart()).sync(
+                [stk_cd], today, force=force)
+            if result["corp_code"].get("error"):
+                result["errors"].append(result["corp_code"]["error"])
+        except Exception as exc:  # noqa: BLE001
+            result["errors"].append(f"고유번호 매핑 실패: {type(exc).__name__}")
+            log.exception("%s: 고유번호 매핑 실패 (%s)", CODE, stk_cd)
+
+        try:
+            mapped = bool(self.db.company_corp_codes([stk_cd]))
+        except Exception:  # noqa: BLE001 - 조회 실패는 낙관적으로 두고 아래에서 알아서 skip 되게 둔다
+            mapped = True
+        if not mapped:
+            result["errors"].append("DART 고유번호 매핑 없음(비상장/코드 불일치 가능) - 재무제표 조회 불가")
+            return result
+
+        try:
+            result["fetch"] = self.fetch_financials(
+                [target], today=today, force=force,
+                max_fetch=self.opts.max_fetch if max_fetch is None else max_fetch)
+        except Exception as exc:  # noqa: BLE001
+            result["errors"].append(f"재무제표 수집 실패: {type(exc).__name__}")
+            log.exception("%s: 재무제표 수집 실패 (%s)", CODE, stk_cd)
+            return result
+
+        try:
+            vals = self.compute_valuations([target], today)
+            result["valuation"] = vals[0] if vals else None
+        except Exception as exc:  # noqa: BLE001
+            result["errors"].append(f"밸류에이션 계산 실패: {type(exc).__name__}")
+            log.exception("%s: 밸류에이션 계산 실패 (%s)", CODE, stk_cd)
+        return result
+
+    # ================================================================== #
     # ④ Claude 리포트
     # ================================================================== #
     def make_reports(self, valuations: list[dict], *, today: _dt.date | None = None,

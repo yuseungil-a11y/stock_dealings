@@ -11,6 +11,10 @@
 * 매도·손절·청산 신호에는 **절대 관여하지 않는다**(코드·테스트로 강제).
 * 지표 토글을 전부 끄면(`use_per`~`use_debt` 모두 0) ma_cross_filter 의 단기>=장기 무력화와
   동일한 관용적 처리로 필터를 사실상 비활성화한다(DB 조회 없이 그대로 통과 + note 기록).
+* "데이터 없음/오래됨"으로 차단할 때는 그 종목을 `services.fundamentals_fetch.enqueue()`
+  로 온디맨드 재수집 큐(`company_fetch_request`)에 넣는다 — **DART 는 여기서 절대 호출하지
+  않는다**(빠른 INSERT 하나뿐). 실제 수집은 엔진의 `FetchRequestWorker` 가 백그라운드에서
+  그 종목 1개만 처리한다(임계값 위반 차단은 재수집 대상이 아니다 - `needs_fetch()` 참고).
 
 파라미터(seed.sql): use_per, per_max, use_pbr, pbr_max, use_roe, roe_min, use_debt,
 debt_ratio_max, stale_days, apply_to
@@ -22,6 +26,7 @@ import logging
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 
+from ..services.fundamentals_fetch import enqueue as enqueue_fetch
 from .base import KIND_AVG_DOWN, KIND_ENTRY, Algorithm, Signal
 from .registry import register
 
@@ -32,7 +37,8 @@ CODE = "fundamentals_filter"
 APPLY_ENTRY = "entry"
 APPLY_ENTRY_AND_AVG = "entry_and_avg"
 
-__all__ = ["CODE", "FundamentalsFilter", "FundamentalsOptions", "age_days", "check_indicators"]
+__all__ = ["CODE", "FundamentalsFilter", "FundamentalsOptions", "age_days", "check_indicators",
+           "check_valuation", "needs_fetch"]
 
 
 # ====================================================================== #
@@ -147,6 +153,23 @@ def check_indicators(row: dict, opts: FundamentalsOptions) -> tuple[bool, str]:
     return True, ""
 
 
+def needs_fetch(row: dict | None, opts: FundamentalsOptions,
+                now: _dt.datetime | None = None) -> bool:
+    """차단 사유가 온디맨드 재수집 대상("데이터 없음" 또는 "stale")인가.
+
+    `check_valuation` 의 앞 두 분기(행 없음 / stale)만 그대로 재현한다.
+    임계값 위반(행은 있고 최신인데 기준 초과)은 **재수집 대상이 아니다** — 이미
+    최신 데이터로 정당하게 차단된 것이라 다시 받아도 결과가 바뀌지 않는다.
+    기준일을 확인할 수 없는 경우(`age is None`)도 애매하므로 대상에서 뺀다.
+    """
+    if row is None:
+        return True
+    age = age_days(row.get("dt"), now)
+    if age is None:
+        return False
+    return age > opts.stale_days
+
+
 def check_valuation(row: dict | None, opts: FundamentalsOptions,
                     now: _dt.datetime | None = None) -> tuple[bool, str]:
     """평가행 + 옵션으로 통과 여부를 판단하는 순수 함수(DB 접근 없음).
@@ -190,7 +213,7 @@ class FundamentalsFilter(Algorithm):
             if not self._applies(sig, opts):
                 kept.append(sig)
                 continue
-            ok, reason = self._check(ctx, sig.stk_cd, opts)
+            ok, reason = self._check(ctx, sig, opts)
             if not ok:
                 self._block(ctx, sig, reason)
                 continue
@@ -211,13 +234,26 @@ class FundamentalsFilter(Algorithm):
             return opts.applies_to_avg_down
         return False
 
-    def _check(self, ctx, stk_cd: str, opts: FundamentalsOptions) -> tuple[bool, str]:
+    def _check(self, ctx, sig: Signal, opts: FundamentalsOptions) -> tuple[bool, str]:
+        stk_cd = sig.stk_cd
         try:
             row = ctx.db.latest_company_valuation(stk_cd)
         except Exception as exc:  # noqa: BLE001 - 조회 실패는 판단 불가 → 차단(fail-closed)
             log.warning("재무데이터 조회 실패 %s", stk_cd, exc_info=True)
             return False, f"재무데이터 조회 실패({type(exc).__name__}) - 차단(안전 우선)"
-        return check_valuation(row, opts, ctx.now)
+        ok, reason = check_valuation(row, opts, ctx.now)
+        if not ok and needs_fetch(row, opts, ctx.now):
+            # 데이터 없음/오래됨으로 차단됐을 때만 그 종목을 온디맨드 재수집 큐에 넣는다.
+            # **DART 를 여기서 직접 호출하지 않는다** - 빠른 INSERT 하나뿐이고, 실패해도
+            # (dedupe 조회 포함) 이 필터의 차단 판정에는 절대 영향을 주지 않는다.
+            self._enqueue_fetch(ctx, stk_cd, sig.stk_nm)
+        return ok, reason
+
+    def _enqueue_fetch(self, ctx, stk_cd: str, stk_nm: str | None) -> None:
+        try:
+            enqueue_fetch(ctx.db, stk_cd, stk_nm, source=self.code)
+        except Exception:  # noqa: BLE001 - 필터는 어떤 경우에도 이 호출 때문에 죽으면 안 된다
+            log.debug("%s: 온디맨드 재수집 요청 등록 실패(무시) %s", self.code, stk_cd, exc_info=True)
 
     def _block(self, ctx, sig: Signal, detail: str) -> None:
         log.info("%s 차단: %s %s", self.code, sig.stk_cd, detail)
