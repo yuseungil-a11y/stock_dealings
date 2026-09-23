@@ -53,6 +53,19 @@ function u(string $rel = ''): string
     return ($base === '' ? '' : $base) . '/' . $rel;
 }
 
+/**
+ * 정적 자산(CSS/JS) URL — 배포마다 캐시가 안 비워져 예전 스타일이 계속 보이던 문제 방지.
+ *
+ * `app.css`/`app.js`는 캐시 헤더(`max-age=300`)가 있는데 URL이 매번 같아서, 배포해도
+ * 브라우저가 새 파일을 가져오기까지 최대 5분(또는 브라우저가 재검증을 안 하면 더 오래)
+ * 예전 파일을 계속 쓴다. `?v=<웹 버전>` 쿼리스트링을 붙이면 배포(버전 올림)마다 URL 자체가
+ * 바뀌어 항상 새 파일을 받는다.
+ */
+function asset_url(string $rel): string
+{
+    return u($rel) . '?v=' . STOCK_WEB_VERSION;
+}
+
 /** 현재 페이지 URL 에 쿼리 파라미터를 덮어쓴 URL. */
 function url_with(array $params, string $script = 'index.php'): string
 {

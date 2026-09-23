@@ -11,7 +11,7 @@ if (!defined('STOCK_APP')) { http_response_code(404); exit('Not Found'); }
 <meta name="robots" content="noindex, nofollow">
 <title>로그인 · <?= h(APP_NAME) ?></title>
 <?= favicon_links() ?>
-<link rel="stylesheet" href="<?= h(u('assets/css/app.css')) ?>">
+<link rel="stylesheet" href="<?= h(asset_url('assets/css/app.css')) ?>">
 </head>
 <body class="loginpage" data-base="<?= h(u('')) ?>">
 <main class="loginbox">
@@ -46,6 +46,6 @@ if (!defined('STOCK_APP')) { http_response_code(404); exit('Not Found'); }
   <p class="login-ver">v<?= h(STOCK_WEB_VERSION) ?></p>
   <p class="login-note">로그인 시도는 기록되며, 연속 <?= (int)APP_MAX_FAILED ?>회 실패 시 <?= (int)APP_LOCK_MINUTES ?>분간 잠깁니다.</p>
 </main>
-<script src="<?= h(u('assets/js/app.js')) ?>"></script>
+<script src="<?= h(asset_url('assets/js/app.js')) ?>"></script>
 </body>
 </html>

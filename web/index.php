@@ -185,7 +185,7 @@ function render_standalone(array $tpl): void
     echo '<!doctype html><html lang="ko"><head><meta charset="utf-8">'
         . '<meta name="viewport" content="width=device-width, initial-scale=1">'
         . '<title>' . h($title) . ' · ' . h(APP_NAME) . '</title>'
-        . '<link rel="stylesheet" href="' . h(u('assets/css/app.css')) . '">'
+        . '<link rel="stylesheet" href="' . h(asset_url('assets/css/app.css')) . '">'
         . favicon_links() . '</head>'
         . '<body class="standalone"><main class="msg-box"><h1>' . h($title) . '</h1><p>' . h($message) . '</p>'
         . '<p><a class="btn" href="' . h(u('index.php')) . '">처음 화면으로</a></p></main></body></html>';

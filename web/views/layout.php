@@ -27,7 +27,7 @@ foreach ($statusRows as $srow) {
 <meta name="robots" content="noindex, nofollow">
 <title><?= h($route['title']) ?> · <?= h(APP_NAME) ?></title>
 <?= favicon_links() ?>
-<link rel="stylesheet" href="<?= h(u('assets/css/app.css')) ?>">
+<link rel="stylesheet" href="<?= h(asset_url('assets/css/app.css')) ?>">
 </head>
 <body data-base="<?= h(u('')) ?>" data-page="<?= h($page) ?>">
 <a class="skip" href="#main">본문 바로가기</a>
@@ -119,6 +119,6 @@ foreach ($statusRows as $srow) {
   <span>표시 시각 기준: KST (<?= h(date('Y-m-d H:i:s')) ?>)</span>
   <span>조회 전용 화면 — 트레이딩 설정은 서버 프로그램에서만 변경됩니다.</span>
 </footer>
-<script src="<?= h(u('assets/js/app.js')) ?>"></script>
+<script src="<?= h(asset_url('assets/js/app.js')) ?>"></script>
 </body>
 </html>
