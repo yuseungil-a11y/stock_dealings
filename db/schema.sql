@@ -599,4 +599,69 @@ CREATE TABLE IF NOT EXISTS trend_scan_request (
   KEY ix_tsr_status (status, requested_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='웹의 "지금 다시 조사" 버튼이 남기는 요청. 서버가 주기적으로 확인해 처리하고 상태를 갱신한다(웹은 Anthropic/키움 자격증명이 없어 직접 실행 불가)';
 
+-- =====================================================================
+-- 10. 기업 재무분석 (DART OpenAPI + Claude, 읽기 전용 참고 리포트)
+--   * 매매 신호·주문과 전혀 관계없다(algorithm/algorithm_selection 에 등록하지 않음).
+--   * 대상 종목은 universe_filter 와 동일한 시총 상위 종목(ETF 제외)을 재사용한다.
+--   * 재무제표(분기 공시)와 밸류에이션(주가 결합, 매일)은 갱신 빈도가 달라 테이블을 분리한다.
+-- =====================================================================
+CREATE TABLE IF NOT EXISTS company_corp_code (
+  stk_cd      VARCHAR(12) NOT NULL,
+  corp_code   VARCHAR(8) NOT NULL COMMENT 'DART 고유번호(8자리)',
+  corp_name   VARCHAR(120) NOT NULL,
+  updated_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (stk_cd),
+  KEY ix_ccc_corp (corp_code)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='종목코드 ↔ DART corp_code 매핑(OpenDART corpCode.xml 원본에서 추출, 주기적 갱신)';
+
+CREATE TABLE IF NOT EXISTS company_financial (
+  stk_cd              VARCHAR(12) NOT NULL,
+  bsns_year           SMALLINT NOT NULL COMMENT '사업연도',
+  reprt_code          VARCHAR(5) NOT NULL COMMENT 'DART 보고서코드: 11013=1분기,11012=반기,11014=3분기,11011=사업보고서',
+  revenue             BIGINT NULL COMMENT '매출액(원)',
+  operating_profit    BIGINT NULL COMMENT '영업이익',
+  net_profit          BIGINT NULL COMMENT '당기순이익',
+  total_assets        BIGINT NULL COMMENT '자산총계',
+  total_liabilities   BIGINT NULL COMMENT '부채총계',
+  total_equity        BIGINT NULL COMMENT '자본총계',
+  eps                 BIGINT NULL COMMENT '주당순이익(원)',
+  operating_cash_flow BIGINT NULL COMMENT '영업활동현금흐름',
+  shares_outstanding  BIGINT NULL COMMENT '발행주식수(BPS 계산용)',
+  fetched_at          DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (stk_cd, bsns_year, reprt_code)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='DART 단일회사 주요계정(분기/사업보고서 단위, 분기마다 갱신). 미공시·조회실패 항목은 NULL';
+
+CREATE TABLE IF NOT EXISTS company_valuation_daily (
+  stk_cd          VARCHAR(12) NOT NULL,
+  dt              DATE NOT NULL,
+  cur_prc         BIGINT NULL,
+  eps_ttm         BIGINT NULL COMMENT '최근 4개 분기 합산 EPS(TTM)',
+  bps             BIGINT NULL COMMENT '자본총계/발행주식수',
+  per             DECIMAL(12,2) NULL,
+  pbr             DECIMAL(12,4) NULL,
+  roe             DECIMAL(12,4) NULL COMMENT '%',
+  debt_ratio      DECIMAL(12,4) NULL COMMENT '%, 부채총계/자본총계x100',
+  financial_asof  VARCHAR(20) NULL COMMENT '계산에 쓴 재무데이터 기준(예: 2026Q2)',
+  PRIMARY KEY (stk_cd, dt)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='PER/PBR/ROE/부채비율 일별 계산(주가는 매일 갱신, 재무데이터는 최근 확정 분기 고정 사용)';
+
+CREATE TABLE IF NOT EXISTS company_analysis_report (
+  id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  stk_cd        VARCHAR(12) NOT NULL,
+  stk_nm        VARCHAR(60) NULL,
+  as_of_date    DATE NOT NULL,
+  model         VARCHAR(50) NOT NULL,
+  summary       VARCHAR(500) NULL COMMENT '한줄 요약',
+  report_text   TEXT NOT NULL COMMENT 'Claude 재무분석 전문(안정성/수익성/성장성/밸류에이션/위험요인) - 매매 신호와 무관, 참고용',
+  input_tokens  INT NULL,
+  output_tokens INT NULL,
+  latency_ms    INT NULL,
+  status        ENUM('ok','error') NOT NULL DEFAULT 'ok',
+  error_msg     VARCHAR(255) NULL,
+  created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_car (stk_cd, as_of_date),
+  KEY ix_car_stk (stk_cd, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='종목별 Claude 재무분석 리포트. algorithm 테이블에 등록되지 않으며 매매 파이프라인과 전혀 연결되지 않는다(순수 참고용)';
+
 SET FOREIGN_KEY_CHECKS = 1;
