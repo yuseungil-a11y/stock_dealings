@@ -25,16 +25,27 @@ REFRESH_DAYS = 30
 # 매핑이 빠진 종목이 있어도 하루에 한 번만 다시 내려받는다(28MB 다운로드 폭주 방지)
 MIN_DOWNLOAD_INTERVAL_DAYS = 1
 
-# 프로세스 안에서 마지막으로 corpCode.xml 을 내려받은 날짜
+# 프로세스 안에서 마지막으로 corpCode.xml 을 내려받은 날짜.
+# **버그 수정(2026-09-24)**: 이 상태가 프로세스 전역으로 딱 하나만 있어서, 온디맨드 재수집
+# 요청이 여러 건 몰리면(예: 배치 직후 momentum_screen 신호로 새 종목 여러 개가 한꺼번에
+# 큐에 들어올 때) **첫 요청만 실제로 다운로드·매칭되고 나머지는 "오늘 이미 내려받았다"는
+# 이유로 매칭 자체를 건너뛰어**, DART 에 실제로 있는 종목도 "매핑 없음"으로 잘못 기록되는
+# 문제가 있었다(실측: 027040·0010F0 모두 DART corpCode.xml 에 정상 존재하는데 이 사유로
+# 누락됨). 다운로드 시각뿐 아니라 **그날 받은 XML 원문도 그대로 캐시**해서, 이미 받은 날이면
+# 재다운로드 없이 캐시된 XML로 다시 매칭한다(대역폭도 아끼고 버그도 없앰).
 _STATE_LOCK = threading.Lock()
 _last_download_date: _dt.date | None = None
+_cached_xml_text: str | None = None
+_cached_xml_date: _dt.date | None = None
 
 
 def reset_state() -> None:
-    """마지막 다운로드 날짜 표시를 지운다(테스트/재설정용)."""
-    global _last_download_date
+    """마지막 다운로드 날짜·캐시를 지운다(테스트/재설정용)."""
+    global _last_download_date, _cached_xml_text, _cached_xml_date
     with _STATE_LOCK:
         _last_download_date = None
+        _cached_xml_text = None
+        _cached_xml_date = None
 
 
 def last_download_date() -> _dt.date | None:
@@ -42,10 +53,18 @@ def last_download_date() -> _dt.date | None:
         return _last_download_date
 
 
-def _mark_downloaded(day: _dt.date) -> None:
-    global _last_download_date
+def _mark_downloaded(day: _dt.date, xml_text: str) -> None:
+    global _last_download_date, _cached_xml_text, _cached_xml_date
     with _STATE_LOCK:
         _last_download_date = day
+        _cached_xml_text = xml_text
+        _cached_xml_date = day
+
+
+def _cached_xml_for(day: _dt.date) -> str | None:
+    """오늘(day) 이미 받아둔 XML 원문이 메모리에 있으면 돌려준다(없으면 None)."""
+    with _STATE_LOCK:
+        return _cached_xml_text if _cached_xml_date == day else None
 
 
 def _age_days(updated_at, today: _dt.date) -> int | None:
@@ -105,6 +124,24 @@ class CorpCodeSync:
             out["skipped"] = "대상 종목 없음"
             return out
 
+        # 오늘 이미 받아둔 XML 원문이 메모리에 있으면, 재다운로드 없이 그걸로 다시 매칭한다
+        # (같은 날 여러 온디맨드 요청이 순차로 들어와도 첫 요청 이후 것들이 그냥 스킵되지
+        # 않게 한다 - 위 모듈 docstring/주석의 버그 수정).
+        cached_xml = _cached_xml_for(today)
+        if cached_xml is not None and not force:
+            rows = corp_codes_for(cached_xml, wanted)
+            out["matched"] = len(rows)
+            out["missing"] = len(wanted) - len(rows)
+            try:
+                out["saved"] = self.db.upsert_company_corp_codes(rows)
+            except Exception as exc:  # noqa: BLE001
+                out["error"] = f"매핑 저장 실패: {type(exc).__name__}"
+                log.warning("corp_code 매핑 저장 실패(캐시 재매칭)", exc_info=True)
+                return out
+            log.info("DART 고유번호 매핑 갱신(캐시 재매칭): 대상 %d종목 중 %d건 매칭(미매칭 %d)",
+                     len(wanted), out["matched"], out["missing"])
+            return out
+
         reason = self.skip_reason(wanted, today, force=force)
         if reason:
             out["skipped"] = reason
@@ -118,8 +155,9 @@ class CorpCodeSync:
             log.error("corp_code 매핑 갱신 실패: %s", exc)
             return out
         # 다운로드에 성공한 시점에 '오늘 몫'을 소진한 것으로 본다(파싱/저장이 실패해도
-        # 같은 날 28MB 를 다시 받지 않는다)
-        _mark_downloaded(today)
+        # 같은 날 28MB 를 다시 받지 않는다) - 원문도 같이 캐시해서 이후 같은 날 요청은
+        # 재다운로드 없이 이 텍스트로 매칭한다.
+        _mark_downloaded(today, xml_text)
 
         rows = corp_codes_for(xml_text, wanted)
         out["matched"] = len(rows)

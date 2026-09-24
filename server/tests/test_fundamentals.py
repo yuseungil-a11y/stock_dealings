@@ -309,9 +309,12 @@ def test_corp_code_sync_skips_when_recent_and_complete(fake_db):
     assert sync.sync(["005930"], TODAY)["saved"] == 1
     fake_db.corp_codes_updated_at = _dt.datetime.combine(TODAY, _dt.time(9, 0))
 
-    # 같은 날 다시 → 하루 1회 제한에 걸린다
+    # 같은 날 다시(프로세스 재시작 없음) → 재다운로드는 안 하지만(캐시된 XML 재사용),
+    # 매칭 자체는 다시 수행해서 결과를 준다(버그 수정: 예전엔 이 경우 매칭조차 안 하고
+    # 그냥 "오늘 이미 받음"으로 skip 돼서, 이 호출 이후 들어온 다른 종목 요청들이 실제로는
+    # DART 에 있는데도 "매핑 없음"으로 잘못 기록됐다 - 온디맨드 요청이 몰릴 때 실제 발생).
     again = sync.sync(["005930"], TODAY)
-    assert again["skipped"] and dart.corp_calls == 1
+    assert not again["skipped"] and again["matched"] == 1 and dart.corp_calls == 1
 
     # 3일 뒤 → 월 1회 주기가 아직 안 됐고 누락 종목도 없으므로 생략
     ccs.reset_state()
@@ -322,6 +325,31 @@ def test_corp_code_sync_skips_when_recent_and_complete(fake_db):
     ccs.reset_state()
     fresh = sync.sync(["005930"], TODAY + _dt.timedelta(days=31))
     assert not fresh["skipped"] and dart.corp_calls == 2
+
+
+def test_corp_code_sync_second_ondemand_request_same_day_still_matches(fake_db):
+    """실측 버그 재현: 같은 날 서로 다른 종목 온디맨드 요청이 연달아 들어와도(재시작 없음),
+    두 번째 요청도 DART 원문에 실제로 있으면 정상 매칭돼야 한다(재다운로드는 안 하고
+    캐시로). 예전엔 첫 요청만 매칭되고 나머지는 그냥 "오늘 이미 받음"으로 skip 됐었다."""
+    dart = FakeDart(corp_xml([
+        ("00372873", "KTis", "058860", "20260528"),
+        ("00871587", "보원케미칼", "0010F0", "20260403"),
+        ("00130587", "서울전자통신", "027040", "20260720"),
+    ]))
+    sync = CorpCodeSync(fake_db, dart)
+    first = sync.sync(["058860"], TODAY)          # 첫 온디맨드 요청(예: KTis)
+    assert first["matched"] == 1 and dart.corp_calls == 1
+
+    second = sync.sync(["0010F0"], TODAY)          # 곧이어 들어온 두 번째 요청(보원케미칼)
+    assert not second["skipped"]
+    assert second["matched"] == 1 and second["missing"] == 0
+    assert dart.corp_calls == 1                    # 재다운로드 없이 캐시로 매칭됨
+    assert "0010F0" in fake_db.corp_codes
+
+    third = sync.sync(["027040"], TODAY)           # 세 번째 요청(서울전자통신)도 마찬가지
+    assert not third["skipped"] and third["matched"] == 1
+    assert dart.corp_calls == 1
+    assert "027040" in fake_db.corp_codes
 
 
 def test_corp_code_sync_refreshes_when_target_missing(fake_db):

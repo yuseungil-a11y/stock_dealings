@@ -22,6 +22,7 @@ import pytest
 from conftest import FakeDb
 from stock_svr.dart.client import REPRT_ANNUAL, REPRT_H1, REPRT_Q1, REPRT_Q3, DartError, DartNoData
 from stock_svr.services import fundamentals_fetch as ff
+from stock_svr.util import today_kst
 from test_fundamentals import (
     FORBIDDEN_SYMBOLS,
     SRC_DIR,
@@ -207,7 +208,12 @@ def test_worker_processes_request_successfully():
     assert out["status"] == "done"
     assert db.fetch_requests[0]["status"] == "done"
     assert db.fetch_requests[0]["error_msg"] is None
-    assert ("005930", TODAY) in db.valuations
+    # FetchRequestWorker.poll_once() 는 `now`/`today` 를 주입받지 않고 그대로
+    # FundamentalsService.fetch_one() 의 기본값(today_kst(), 실제 오늘 날짜)을 쓴다 —
+    # request_db(now=NOW) 의 NOW(stale 판정용 고정 시각)와는 별개다. 그래서 여기서는
+    # 고정된 TODAY 가 아니라 실제 오늘 날짜로 검증한다(테스트를 실행하는 날과 무관하게
+    # 항상 맞아야 함 - 날짜가 바뀌면서 TODAY 하드코딩이 깨졌던 문제를 고친 것).
+    assert ("005930", today_kst()) in db.valuations
     assert claude.calls == []          # Claude 는 절대 호출되지 않는다
 
 
