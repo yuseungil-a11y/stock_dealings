@@ -106,7 +106,7 @@ $resetKeys = ['status', 'sort', 'per_min', 'per_max', 'pbr_min', 'pbr_max',
       <thead><tr>
         <th>종목</th><th>리포트일</th><th>상태</th><th class="num">현재가</th>
         <th class="num">PER</th><th class="num">PBR</th><th class="num">ROE</th><th class="num">부채비율</th>
-        <th>요약</th><th>재무기준</th>
+        <th>요약 (재무기준)</th>
       </tr></thead>
       <tbody>
       <?php foreach ($res['rows'] as $r): ?>
@@ -131,9 +131,11 @@ $resetKeys = ['status', 'sort', 'per_min', 'per_max', 'pbr_min', 'pbr_max',
               <span class="llm-err"><?= ($r['error_msg'] ?? '') !== '' ? h($r['error_msg']) : '리포트 생성 실패' ?></span>
             <?php elseif (($r['summary'] ?? '') !== ''): ?>
               <?= h($r['summary']) ?>
-            <?php else: ?><span class="muted">요약 없음</span><?php endif; ?></td>
-          <td><?= ($r['financial_asof'] ?? '') !== '' ? h($r['financial_asof']) : '<span class="muted">-</span>' ?>
-            <?php if ($r['val_dt'] !== null): ?><span class="sub"><?= h(kst($r['val_dt'], 'Y-m-d')) ?> 계산</span><?php endif; ?></td>
+            <?php else: ?><span class="muted">요약 없음</span><?php endif; ?>
+            <?php if (($r['financial_asof'] ?? '') !== ''): ?>
+              <div class="algo-meta muted">재무기준 <?= h($r['financial_asof']) ?>
+                <?php if ($r['val_dt'] !== null): ?>· <?= h(kst($r['val_dt'], 'Y-m-d')) ?> 계산<?php endif; ?></div>
+            <?php endif; ?></td>
         </tr>
       <?php endforeach; ?>
       </tbody>

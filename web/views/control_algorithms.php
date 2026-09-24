@@ -40,31 +40,33 @@ $typeLabel = ['int' => '정수', 'decimal' => '소수', 'bool' => '예/아니오
     <div class="tablewrap">
       <table class="tbl">
         <thead><tr>
-          <th>사용</th><th class="num">우선순위</th><th>이름 [코드]</th><th>역할</th><th>설명</th>
-          <th>변경자 / 시각</th>
+          <th class="shrink">사용</th><th class="num shrink">우선순위</th><th class="shrink">이름 [코드]</th>
+          <th class="shrink">역할</th><th>설명 / 변경자·시각</th>
         </tr></thead>
         <tbody>
         <?php foreach ($algos as $a): $locked = (int)$a['is_locked'] === 1; $aid = (int)$a['id']; ?>
           <tr>
-            <td>
+            <td class="shrink">
               <input type="checkbox" name="sel[<?= $aid ?>][enabled]" value="1"
                 <?= ((int)$a['is_enabled'] === 1 || $locked) ? ' checked' : '' ?>
                 <?= $locked ? ' disabled' : '' ?>>
               <?= $locked ? ' ' . badge('상시 잠금', 'info',
                   '전역 리스크 한도 알고리즘은 항상 사용됩니다 — 이 화면에서 끌 수 없습니다.') : '' ?>
             </td>
-            <td class="num">
+            <td class="num shrink">
               <input class="numinput-sm" type="number" min="1" max="999"
                 name="sel[<?= $aid ?>][priority]" value="<?= (int)$a['priority'] ?>">
             </td>
-            <td>
+            <td class="shrink">
               <a href="<?= h(url_page('control.algorithms', ['algo' => $a['code']])) ?>#paramform">
                 <?= h($a['name']) ?></a>
               <span class="mono sub">[<?= h($a['code']) ?>]</span>
             </td>
-            <td><?= h($roleLabel[(string)$a['role']] ?? $a['role']) ?></td>
-            <td class="wrap-td"><?= h($a['description']) ?></td>
-            <td><?= h($a['updated_by'] ?? '-') ?><br><span class="muted"><?= h(kst($a['updated_at'], 'Y-m-d H:i')) ?></span></td>
+            <td class="shrink"><?= h($roleLabel[(string)$a['role']] ?? $a['role']) ?></td>
+            <td class="wrap-td"><?= h($a['description']) ?>
+              <div class="algo-meta muted"><?= h($a['updated_by'] ?? '-') ?> ·
+                <?= h(kst($a['updated_at'], 'Y-m-d H:i')) ?></div>
+            </td>
           </tr>
         <?php endforeach; ?>
         </tbody>

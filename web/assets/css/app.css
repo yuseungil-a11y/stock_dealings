@@ -153,6 +153,12 @@ a:hover { text-decoration: underline; }
    (알고리즘 설명의 "5/20, 20/60)" 류)이 셀 폭을 넘어 옆 칸(변경자/시각 등)과
    겹쳐 보이는 문제가 있었다. overflow-wrap 로 필요하면 글자 단위로 줄바꿈해 강제한다. */
 .wrap-td { white-space: normal; min-width: 180px; max-width: 460px; overflow-wrap: anywhere; word-break: break-word; line-height: 1.6; }
+/* 좁아야 하는 칸(체크박스·숫자·짧은 라벨 등)을 width:1% 로 내용 길이만큼만 차지하게
+   하고, 남는 폭은 전부 wrap-td 가 붙은 마지막 칸(설명 등)에 몰아준다 - table-layout
+   을 fixed 로 바꾸지 않고 기본(auto) 레이아웃에서 "내용만큼만 차지" 를 강제하는
+   표준 기법이다(브라우저들이 표 칸의 width:1% 를 "최소 내용 폭으로 축소" 로 해석함). */
+.shrink { width: 1%; white-space: nowrap; }
+.algo-meta { margin-top: 4px; font-size: 11px; }
 .mono { font-family: Consolas, "Courier New", monospace; font-size: 12px; }
 .stk-nm { font-weight: 600; }
 .stk-cd { color: var(--muted); font-size: 11px; font-family: Consolas, monospace; }
