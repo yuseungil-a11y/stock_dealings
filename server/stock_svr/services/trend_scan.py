@@ -55,7 +55,7 @@ from ..llm.trend_prompt import (
     validate_trend_output,
 )
 from ..llm.prompt import OutputSchemaError
-from ..util import mask_text, parse_hhmm
+from ..util import is_weekday, mask_text, parse_hhmm
 
 log = logging.getLogger(__name__)
 
@@ -274,6 +274,8 @@ class TrendScanService:
     def due_reason(self, ctx, p: TrendScanParams) -> str:
         """지금 실행하면 안 되는 이유(빈 문자열이면 실행 가능)."""
         today = ctx.now.date()
+        if not is_weekday(today):
+            return "주말(토·일) - 실행 생략"
         if last_scan_date() == today:
             return "오늘 이미 조사 완료"
         if p.scan_time is not None and ctx.now.time() < p.scan_time:

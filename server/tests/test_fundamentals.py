@@ -805,6 +805,14 @@ def test_due_reason_waits_for_run_hour(fake_db):
     assert svc.due_reason(NOW) == ""
 
 
+def test_due_reason_skips_weekend(fake_db):
+    """토요일(2026-09-26)·일요일(2026-09-27)에는 실행하지 않는다 - 거래가 없는 날 Claude 비용 낭비 방지."""
+    svc = _full_service(fake_db)
+    assert "주말" in svc.due_reason(_dt.datetime(2026, 9, 26, 17, 10))
+    assert "주말" in svc.due_reason(_dt.datetime(2026, 9, 27, 17, 10))
+    assert svc.run_if_due(_dt.datetime(2026, 9, 26, 17, 10)) is None
+
+
 def test_run_if_due_runs_once_per_day(fake_db):
     svc = _full_service(fake_db)
     assert svc.run_if_due(NOW) is not None

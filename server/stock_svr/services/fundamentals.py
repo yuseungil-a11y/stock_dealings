@@ -56,7 +56,7 @@ from ..llm.fundamental_prompt import (
     validate_fundamental_output,
 )
 from ..llm.prompt import OutputSchemaError
-from ..util import mask_text, now_kst, today_kst
+from ..util import is_weekday, mask_text, now_kst, today_kst
 
 log = logging.getLogger(__name__)
 
@@ -563,6 +563,8 @@ class FundamentalsService:
         now = now or now_kst()
         if not self.configured:
             return "[dart] apikey_file 미설정"
+        if not is_weekday(now.date()):
+            return "주말(토·일) - 실행 생략"
         if last_run_date() == now.date():
             return "오늘 이미 실행 완료"
         if now.hour < self.opts.run_hour:

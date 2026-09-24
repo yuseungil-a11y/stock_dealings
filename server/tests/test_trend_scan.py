@@ -249,6 +249,18 @@ def test_scan_time_이전에는_실행하지_않는다():
     assert ctx.market.theme_calls == []             # 키움 호출도 0
 
 
+def test_주말에는_실행하지_않는다():
+    """토요일(2026-09-19)에는 조사하지 않는다 - 거래가 없는 날 Claude 비용 낭비 방지."""
+    ctx = ctx_for(now=_dt.datetime(2026, 9, 19, 8, 40, 0))
+    client = fake_client(research_msg(), extract_msg({"candidates": [candidate()]}))
+    svc = service(ctx, client)
+    assert "주말" in svc.due_reason(ctx, tparams())
+    signals = svc.run_if_due(ctx, tparams())
+    assert signals == []
+    assert client.sdk.messages.calls == []
+    assert ctx.db.trend_runs == []
+
+
 def test_같은_날_두번째_사이클은_실행하지_않는다():
     ctx = ctx_for()
     client = fake_client(research_msg(), extract_msg({"candidates": [candidate()]}))
