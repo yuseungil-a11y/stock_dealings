@@ -8,6 +8,7 @@ from ..db import Database
 from ..kiwoom.parse import hhmmss_to_dt, norm_stk_cd, rows, side_from_code, to_int
 from ..kiwoom.rest import KiwoomRest
 from ..util import now_kst, today_kst
+from . import mail_notify
 
 log = logging.getLogger(__name__)
 
@@ -71,10 +72,34 @@ def map_status(text: str | None, oso_qty: int | None = None, filled: int | None 
 
 
 class OrderSyncService:
-    def __init__(self, db: Database, rest: KiwoomRest, account_id: int):
+    def __init__(self, db: Database, rest: KiwoomRest, account_id: int,
+                mail_cfg: dict | None = None):
         self.db = db
         self.rest = rest
         self.account_id = account_id
+        # 체결 완료 알림 메일 설정 (config/mail.local.json, 없으면 None=비활성). 생성 시 1회만
+        # 로드해 쓴다 - 체결마다 파일을 다시 읽지 않는다.
+        self.mail_cfg = mail_cfg
+
+    # -- 체결 알림 메일 중복방지 ----------------------------------------- #
+    def _execution_is_new(self, ord_no: str, cntr_no: str, cntr_qty: int, cntr_pric: int) -> bool:
+        """이 체결이 처음 보는 것인지 (같은 체결에 메일을 두 번 보내지 않기 위한 사전확인).
+
+        두 조건을 함께 본다 - `cntr_no` 정밀비교(같은 경로 재수신) **및** `ord_no+수량+가격`
+        비교(REST 는 실체결번호가 없어 결정적 키를 따로 만들므로, WS 가 먼저 기록한 같은
+        체결을 REST 가 나중에 재관측하는 교차 케이스는 cntr_no 만으로 못 잡는다).
+        조회 자체가 실패하면 **새 체결이 아닌 것으로** 본다(메일 생략) - 중복 발송을
+        절대 만들지 않는 것이 알림 1건을 놓치는 것보다 안전하다.
+        """
+        try:
+            if self.db.execution_exists(self.account_id, ord_no, cntr_no):
+                return False
+            if self.db.execution_exists_by_amount(self.account_id, ord_no, cntr_qty, cntr_pric):
+                return False
+            return True
+        except Exception:  # noqa: BLE001 - 확인 실패는 '이미 있음(=메일 생략)'으로 취급
+            log.debug("체결 중복확인 실패 - 알림 메일 생략: %s/%s", ord_no, cntr_no, exc_info=True)
+            return False
 
     # -- 주문 상태 변화 이력 (order_event) ------------------------------ #
     def _order_before(self, ord_no: str) -> dict | None:
@@ -201,6 +226,7 @@ class OrderSyncService:
                 # B2: 체결번호가 없는 REST 응답은 결정적 키를 만들어 WS(909) 건과
                 #     중복 저장되지 않게 한다. WS 가 정본, REST 는 보정 역할.
                 cntr_no = execution_key(ord_no, r.get("ord_tm"), cntr_pric, cntr_qty)
+                is_new_exec = self._execution_is_new(ord_no, cntr_no, cntr_qty, cntr_pric)
                 self.db.upsert_execution(
                     self.account_id, ord_no, cntr_no, stk_cd,
                     (r.get("stk_nm") or "").strip()[:60] or None, side, cntr_qty, cntr_pric,
@@ -208,6 +234,11 @@ class OrderSyncService:
                     cmsn=to_int(r.get("tdy_trde_cmsn")), tax=to_int(r.get("tdy_trde_tax")),
                     source="REST", only_if_absent=True,
                 )
+                if is_new_exec:
+                    mail_notify.send_trade_completed_mail(
+                        self.mail_cfg, side=side, stk_cd=stk_cd,
+                        stk_nm=(r.get("stk_nm") or "").strip()[:60] or None,
+                        qty=cntr_qty, price=cntr_pric, executed_at=executed_at)
                 status = map_status(r.get("ord_stt"), oso_qty, filled, ord_qty)
                 before = self._order_before(ord_no)
                 order_id = self.db.upsert_order_by_ordno(
@@ -266,6 +297,7 @@ class OrderSyncService:
                                price=cntr_pric or None, reject_reason=reject, source="WS")
         if cntr_qty > 0 and cntr_pric > 0:
             executed_at = hhmmss_to_dt(values.get("908"), today_kst()) or now_kst()
+            is_new_exec = self._execution_is_new(ord_no, cntr_no, cntr_qty, cntr_pric)
             self.db.upsert_execution(
                 self.account_id, ord_no, cntr_no, stk_cd, stk_nm, side,
                 cntr_qty, cntr_pric, executed_at,
@@ -278,6 +310,10 @@ class OrderSyncService:
                 except Exception:  # noqa: BLE001
                     log.debug("position_state 차감 실패", exc_info=True)
             log.info("체결 수신: %s %s %s주 @%s", stk_cd, side, cntr_qty, cntr_pric)
+            if is_new_exec:
+                mail_notify.send_trade_completed_mail(
+                    self.mail_cfg, side=side, stk_cd=stk_cd, stk_nm=stk_nm,
+                    qty=cntr_qty, price=cntr_pric, executed_at=executed_at)
 
     def on_balance(self, values: dict) -> None:
         """WS `04` 잔고 실시간 → holding 즉시 반영."""

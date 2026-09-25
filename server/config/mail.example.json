@@ -1,0 +1,11 @@
+{
+  "smtp": {
+    "host": "smtps.hiworks.com",
+    "port": 587,
+    "user": "",
+    "password": "",
+    "from_addr": "",
+    "from_name": "주식 자동매매 알림"
+  },
+  "to_addr": ""
+}

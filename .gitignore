@@ -5,6 +5,7 @@
 config.local.*
 *.local.ini
 *.local.php
+*.local.json
 .env
 .env.*
 *.pem

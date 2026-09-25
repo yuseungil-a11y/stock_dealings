@@ -6,8 +6,10 @@
 #   stock_svr.exe (GUI only - no CLI exe), _internal\, config\, logs\
 #
 # Notes  : - Redeploy keeps the run folder's config\ and logs\ (only exe + _internal are replaced).
-#          - -WithLocalConfig copies server\config\config.local.ini (contains DB password) into
-#            <RunDir>\config and restricts its ACL. Without it the existing run-folder config is kept.
+#          - -WithLocalConfig copies server\config\config.local.ini (contains DB password) and
+#            server\config\mail.local.json (contains SMTP password, for trade-completed email
+#            notifications) into <RunDir>\config and restricts both ACLs. Without it the existing
+#            run-folder config is kept.
 #          - Keys are read from the key-file paths written in config.local.ini (never bundled).
 #          - -StopRunning stops a stock_svr.exe running from <RunDir> before replacing files
 #            (without it the script aborts if the server is running).
@@ -68,7 +70,9 @@ robocopy $dist $RunDir /MIR /XD config logs /NFL /NDL /NJH /NJS /NP | Out-Null
 if ($LASTEXITCODE -ge 8) { throw "robocopy failed (exit $LASTEXITCODE)" }
 $global:LASTEXITCODE = 0
 Copy-Item (Join-Path $server 'config\config.example.ini') (Join-Path $RunDir 'config') -Force
+Copy-Item (Join-Path $server 'config\mail.example.json') (Join-Path $RunDir 'config') -Force
 $runCfg = Join-Path $RunDir 'config\config.local.ini'
+$runMailCfg = Join-Path $RunDir 'config\mail.local.json'
 if ($WithLocalConfig) {
   $local = Join-Path $server 'config\config.local.ini'
   if (Test-Path $local) {
@@ -76,8 +80,15 @@ if ($WithLocalConfig) {
     icacls $runCfg /inheritance:r /grant:r "${env:USERNAME}:(F)" 'BUILTIN\Administrators:(F)' 'NT AUTHORITY\SYSTEM:(F)' | Out-Null
     Write-Host '      config.local.ini copied (ACL restricted)'
   } else { Write-Warning 'server\config\config.local.ini not found - skipped' }
+  $localMail = Join-Path $server 'config\mail.local.json'
+  if (Test-Path $localMail) {
+    Copy-Item $localMail $runMailCfg -Force
+    icacls $runMailCfg /inheritance:r /grant:r "${env:USERNAME}:(F)" 'BUILTIN\Administrators:(F)' 'NT AUTHORITY\SYSTEM:(F)' | Out-Null
+    Write-Host '      mail.local.json copied (ACL restricted)'
+  } else { Write-Warning 'server\config\mail.local.json not found - skipped' }
 }
 if (-not (Test-Path $runCfg)) { Write-Warning "no config\config.local.ini in $RunDir - create it (see config.example.ini) or re-run with -WithLocalConfig" }
+if (-not (Test-Path $runMailCfg)) { Write-Warning "no config\mail.local.json in $RunDir - trade-completed email notifications disabled (see mail.example.json) or re-run with -WithLocalConfig" }
 
 Write-Host '[5/5] verify ...'
 $exe = Join-Path $RunDir 'stock_svr.exe'

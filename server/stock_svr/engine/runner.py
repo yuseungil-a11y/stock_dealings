@@ -30,6 +30,7 @@ from ..services.fundamentals import FundamentalsService
 from ..services.fundamentals_fetch import FETCH_REQUEST_POLL_SEC
 from ..services.fundamentals_fetch import FetchRequestWorker
 from ..services.housekeeping import HousekeepingService
+from ..services.mail_notify import load_mail_config
 from ..services.sync_account import AccountService
 from ..services.sync_market import MarketService
 from ..services.sync_orders import OrderSyncService
@@ -431,7 +432,9 @@ class Engine:
         log.info("계좌 확인: %s (account_id=%s)", mask_account_no(self.account_no), self.account_id)
 
         self.market = MarketService(self.db, self.rest)
-        self.orders = OrderSyncService(self.db, self.rest, self.account_id)
+        # 체결 완료 알림 메일 설정은 기동 시 1회만 읽는다(체결마다 파일을 다시 읽지 않음).
+        self.orders = OrderSyncService(self.db, self.rest, self.account_id,
+                                       mail_cfg=load_mail_config())
         self.house = HousekeepingService(self.db, self.rest, self.account_id)
         self.run_id = self.db.start_run(self.env, gate.can_send_order,
                                         note=f"gate: {gate.describe()}")

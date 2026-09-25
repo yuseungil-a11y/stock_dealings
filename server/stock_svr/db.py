@@ -1295,6 +1295,32 @@ class Database:
             "SELECT algo_code FROM orders WHERE account_id=%s AND ord_no=%s "
             "ORDER BY id DESC LIMIT 1", (account_id, ord_no))
 
+    def execution_exists(self, account_id: int, ord_no: str, cntr_no: str) -> bool:
+        """이 (계좌, 주문번호, 체결번호) 체결이 이미 저장돼 있는지 (체결 알림 메일 중복발송 방지용).
+
+        `upsert_execution` 의 `only_if_absent` 중복확인(ord_no+qty+pric)보다 더 정밀한
+        키(cntr_no 포함)로, **upsert 호출 전에** 먼저 확인해 '진짜 새 체결'만 알림을
+        내보내기 위한 것이다 (WS 재연결 재수신 / REST 재조회로 인한 중복 메일 방지).
+        """
+        return bool(self.scalar(
+            "SELECT COUNT(*) FROM executions WHERE account_id=%s AND ord_no=%s AND cntr_no=%s",
+            (account_id, ord_no, cntr_no or ""), default=0))
+
+    def execution_exists_by_amount(self, account_id: int, ord_no: str, cntr_qty: int,
+                                   cntr_pric: int) -> bool:
+        """`upsert_execution` 의 `only_if_absent` 중복확인과 완전히 같은 조건(ord_no+qty+pric).
+
+        REST(ka10076)는 실제 체결번호가 없어 결정적으로 만든 키(execution_key)를
+        `cntr_no` 자리에 쓰므로, WS(909, 실체결번호)가 먼저 기록한 같은 체결을 REST 가
+        나중에 재관측할 때는 `cntr_no` 값이 서로 다르다. `execution_exists()`(cntr_no
+        정밀비교) 만으로는 이 교차(WS↔REST) 중복을 못 잡으므로, 메일발송 여부 판단에는
+        이 조건도 함께 확인한다(둘 중 하나라도 있으면 '이미 있음').
+        """
+        return bool(self.scalar(
+            "SELECT COUNT(*) FROM executions WHERE account_id=%s AND ord_no=%s "
+            "AND cntr_qty=%s AND cntr_pric=%s",
+            (account_id, ord_no, cntr_qty, cntr_pric), default=0))
+
     def upsert_execution(self, account_id: int, ord_no: str, cntr_no: str, stk_cd: str, stk_nm: str | None,
                          side: str, cntr_qty: int, cntr_pric: int, executed_at: _dt.datetime,
                          cmsn: int | None = None, tax: int | None = None, source: str = "WS",

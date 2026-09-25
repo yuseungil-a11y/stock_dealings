@@ -191,6 +191,17 @@ class FakeDb:
         self.expired_unknown += n
         return n
 
+    def execution_exists(self, account_id, ord_no, cntr_no) -> bool:
+        self._maybe_fail("execution_exists")
+        key = (str(ord_no), str(cntr_no or ""))
+        return any((str(e.get("ord_no")), str(e.get("cntr_no") or "")) == key
+                   for e in self.executions)
+
+    def execution_exists_by_amount(self, account_id, ord_no, cntr_qty, cntr_pric) -> bool:
+        self._maybe_fail("execution_exists_by_amount")
+        return any(str(e.get("ord_no")) == str(ord_no) and e.get("cntr_qty") == cntr_qty
+                   and e.get("cntr_pric") == cntr_pric for e in self.executions)
+
     def upsert_execution(self, account_id, ord_no, cntr_no, stk_cd, stk_nm, side,
                          cntr_qty, cntr_pric, executed_at, cmsn=None, tax=None,
                          source="WS", only_if_absent=False):
