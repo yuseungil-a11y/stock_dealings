@@ -17,6 +17,11 @@
 
 
 
+
+## [1.16.0] - 2026-09-25
+### 변경
+- claude_advisor에 알고리즘별 검토 여부 파라미터(review_momentum_screen/review_macd_cross/review_volatility_breakout, 기존 review_averaging_down과 통합) 추가 - 어떤 진입 알고리즘의 매수 신호를 Claude가 검토할지 한 곳(claude_advisor)에서 일괄 제어. macd_cross 자체의 개별 on/off 스위치(claude_review_fundamentals, v1.15.0에서 추가)는 중복이라 제거하고 재무데이터 첨부는 검토 대상이면 항상 수행(신선도 검사만 유지).
+
 ## [1.15.0] - 2026-09-25
 ### 변경
 - MACD 알고리즘에 옵션 파라미터(claude_review_fundamentals, fundamentals_stale_days) 추가 - 켜져 있으면 macd_cross 매수 신호가 claude_advisor 심사로 넘어갈 때 DART 재무분석(PER/PBR/ROE/부채비율) 최신 데이터를 참고자료로 함께 제공(다른 진입 알고리즘의 Claude 검토에는 영향 없음)

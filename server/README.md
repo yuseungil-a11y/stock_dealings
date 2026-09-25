@@ -336,7 +336,12 @@ OHLCV 와 MA5/MA20, 신호 출처 알고리즘/점수/사유, 물타기면 평�
 | `max_calls_per_day` | 일 최대 호출 수 | int | 50회 | 1 ~ 500 | 초과 시 `fail_mode` 적용 |
 | `timeout_sec` | 응답 대기 시간 | int | 30초 | 5 ~ 120 | SDK 재시도까지 합쳐 이 시간을 넘지 않게 분배 |
 | `review_averaging_down` | 물타기도 검토 | bool | 1 | — | 0이면 신규 진입만 검토 |
+| `review_momentum_screen` | 모멘텀 스크리닝 신호 검토 | bool | 1 | — | 0이면 momentum_screen 매수 신호는 검토 없이 통과(risk_guard 등은 그대로 적용) |
+| `review_macd_cross` | MACD 골든크로스 신호 검토 | bool | 1 | — | 0이면 macd_cross 매수 신호는 검토 없이 통과(risk_guard 등은 그대로 적용) |
+| `review_volatility_breakout` | 변동성 돌파 신호 검토 | bool | 1 | — | 0이면 volatility_breakout 매수 신호는 검토 없이 통과(risk_guard 등은 그대로 적용) |
 
+어떤 진입 알고리즘의 매수 신호를 검토할지는 이 알고리즘(claude_advisor)의 `review_*` 파라미터로만
+한 곳에서 제어한다 — 매핑에 없는(향후 추가되는) 진입 알고리즘은 안전 쪽으로 기본 검토(True)한다.
 모델·파라미터는 매 사이클 DB 에서 다시 읽으므로 UI 편집이 즉시 반영된다.
 점검은 `python -m stock_svr --claude-check`.
 

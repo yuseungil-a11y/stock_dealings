@@ -71,6 +71,12 @@ CLAUDE_DEFS = [
      "default_value": "30", "min_value": "5", "max_value": "120"},
     {"param_key": "review_averaging_down", "label": "물타기도 검토", "value_type": "bool",
      "default_value": "1"},
+    {"param_key": "review_momentum_screen", "label": "모멘텀 스크리닝 신호 검토",
+     "value_type": "bool", "default_value": "1"},
+    {"param_key": "review_macd_cross", "label": "MACD 골든크로스 신호 검토",
+     "value_type": "bool", "default_value": "1"},
+    {"param_key": "review_volatility_breakout", "label": "변동성 돌파 신호 검토",
+     "value_type": "bool", "default_value": "1"},
 ]
 
 BARS = [{"dt": _dt.date(2026, 9, 1) + _dt.timedelta(days=i), "open_pric": 1000 + i,
@@ -173,7 +179,7 @@ def _clean_state():
 def test_sell_signals_are_never_reviewed(kind):
     sig = buy_sig(kind=kind)
     sig.side = "SELL"
-    assert ClaudeAdvisor.needs_review(sig) is False
+    assert advisor().needs_review(sig) is False
 
 
 def test_stop_loss_sell_passes_without_api_call():
@@ -189,8 +195,8 @@ def test_stop_loss_sell_passes_without_api_call():
 
 
 def test_buy_entry_is_reviewed():
-    assert ClaudeAdvisor.needs_review(buy_sig()) is True
-    assert ClaudeAdvisor.needs_review(buy_sig(kind=KIND_AVG_DOWN)) is True
+    assert advisor().needs_review(buy_sig()) is True
+    assert advisor().needs_review(buy_sig(kind=KIND_AVG_DOWN)) is True
 
 
 def test_averaging_down_skipped_when_disabled():
@@ -214,6 +220,48 @@ def test_averaging_down_reviewed_when_enabled():
     payload = json.loads(cli.sdk.messages.calls[0]["messages"][0]["content"])
     assert payload["averaging_down"]["step"] == 2
     assert payload["averaging_down"]["drop_from_avg_pct"] == pytest.approx(-16.6)
+
+
+# ====================================================================== #
+# 1-1. 진입 알고리즘별 검토 여부 토글(review_momentum_screen/review_macd_cross/
+#      review_volatility_breakout) - 한 곳(claude_advisor)에서 일괄 제어
+# ====================================================================== #
+@pytest.mark.parametrize("toggle_key,algo_code", [
+    ("review_momentum_screen", "momentum_screen"),
+    ("review_macd_cross", "macd_cross"),
+    ("review_volatility_breakout", "volatility_breakout"),
+])
+def test_entry_algo_toggle_off_skips_review(toggle_key, algo_code):
+    cli = fake_client(sdk_response(block_body()))
+    ok, _ = advisor(**{toggle_key: "0"}).review(
+        ctx_with(), buy_sig(algo=algo_code), client=cli)
+    assert ok is True
+    assert cli.sdk.messages.calls == []
+
+
+@pytest.mark.parametrize("toggle_key,algo_code,other_algo_code", [
+    ("review_momentum_screen", "momentum_screen", "macd_cross"),
+    ("review_macd_cross", "macd_cross", "momentum_screen"),
+    ("review_volatility_breakout", "volatility_breakout", "momentum_screen"),
+])
+def test_entry_algo_toggle_off_does_not_affect_other_algo(toggle_key, algo_code, other_algo_code):
+    cli = fake_client(sdk_response(block_body()))
+    ok, _ = advisor(**{toggle_key: "0"}).review(
+        ctx_with(), buy_sig(algo=other_algo_code), client=cli)
+    assert ok is False
+    assert len(cli.sdk.messages.calls) == 1
+
+
+def test_unknown_algo_code_defaults_to_reviewed():
+    """매핑에 없는(향후 추가될) 진입 알고리즘 신호는 안전 쪽으로 기본 검토한다."""
+    assert advisor().needs_review(buy_sig(algo="future_entry_algo")) is True
+
+
+def test_review_averaging_down_toggle_still_works_via_needs_review():
+    """물타기 검토 토글이 일반화된 메커니즘에서도 그대로 동작하는지(회귀)."""
+    sig = buy_sig(kind=KIND_AVG_DOWN, algo="averaging_down")
+    assert advisor(review_averaging_down="1").needs_review(sig) is True
+    assert advisor(review_averaging_down="0").needs_review(sig) is False
 
 
 # ====================================================================== #

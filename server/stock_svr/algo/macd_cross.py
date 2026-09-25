@@ -14,7 +14,7 @@
 파라미터(seed.sql): fast_period, slow_period, signal_period, top_n, use_kospi, use_kosdaq,
 use_etf, min_price, max_price, min_market_cap_eok, exclude_preferred, exclude_spac,
 exclude_warning, stale_days, buy_amount, max_new_per_day, order_type,
-claude_review_fundamentals, fundamentals_stale_days
+fundamentals_stale_days
 """
 from __future__ import annotations
 
@@ -23,7 +23,6 @@ import logging
 from ..llm.prompt import _round, register_context_provider
 from .base import KIND_ENTRY, Algorithm, Signal, qty_for_amount
 from .fundamentals_filter import age_days
-from .params import TRUE_SET
 from .registry import register
 from .universe_filter import APPLY_ENTRY, SCOPE_PER_MARKET, UniverseOptions, load_universe
 
@@ -111,26 +110,21 @@ def golden_cross(macd: list[float | None], signal: list[float | None]) -> bool:
 
 
 # ====================================================================== #
-# claude_advisor 컨텍스트 제공자 (DART 재무분석 - macd_cross 신호에만, 옵션이 켜져 있을 때만)
+# claude_advisor 컨텍스트 제공자 (DART 재무분석 - macd_cross 신호에만)
 # ====================================================================== #
 def _fundamentals_context(ctx, signal) -> dict | None:
     """claude_advisor 검토용 컨텍스트 provider.
 
-    macd_cross 가 낸 신호에만, 그리고 `claude_review_fundamentals` 파라미터가 켜져
-    있을 때만 DART 재무분석(`company_valuation_daily`)의 최신 행을 참고자료로 얹는다.
-    다른 알고리즘의 신호에는 절대 관여하지 않는다(맨 앞의 algo_code 검사가 그 보증이다).
+    macd_cross 가 낸 신호에만 DART 재무분석(`company_valuation_daily`)의 최신 행을
+    참고자료로 얹는다. 다른 알고리즘의 신호에는 절대 관여하지 않는다(맨 앞의 algo_code
+    검사가 그 보증이다). 이 신호가 Claude 검토를 받을지 여부 자체는 claude_advisor의
+    `review_macd_cross` 파라미터가 단일하게 결정한다 - 여기 도달했다는 것 자체가 검토
+    대상이라는 뜻이므로 이 함수에서 별도로 다시 켜짐/꺼짐을 확인하지 않는다.
     실패/미해당은 전부 None - 이 provider 의 오류가 Claude 검토 자체를 막으면 안 된다.
     """
     if signal.algo_code != CODE:
         return None
     try:
-        enabled_raw = ctx.db.scalar(
-            "SELECT v.value FROM algorithm_param_value v JOIN algorithm a ON a.id=v.algorithm_id "
-            "WHERE a.code=%s AND v.param_key='claude_review_fundamentals'", (CODE,))
-        # 값이 없으면(관리자가 아직 손댄 적 없음) seed.sql 기본값(1=사용)을 따른다.
-        enabled = True if enabled_raw is None else str(enabled_raw).strip().lower() in TRUE_SET
-        if not enabled:
-            return None
         stale_raw = ctx.db.scalar(
             "SELECT v.value FROM algorithm_param_value v JOIN algorithm a ON a.id=v.algorithm_id "
             "WHERE a.code=%s AND v.param_key='fundamentals_stale_days'", (CODE,))

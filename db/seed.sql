@@ -151,7 +151,10 @@ SELECT a.id, p.k, p.label, p.t, p.d, p.mn, p.mx, p.eo, p.u, p.ds, p.so FROM algo
  SELECT 'cache_minutes',     '결과 캐시 시간',     'int',    '30',   '0','240',  NULL,'분','같은 종목·방향·출처 알고리즘의 판단을 이 시간 동안 재사용(0이면 매번 호출)',5 UNION ALL
  SELECT 'max_calls_per_day', '일 최대 호출 수',    'int',    '50',   '1','500',  NULL,'회','당일 Claude 호출 상한. 초과하면 오류 시 처리(fail_mode)를 따른다',6 UNION ALL
  SELECT 'timeout_sec',       '응답 대기 시간',     'int',    '30',   '5','120',  NULL,'초','이 시간 안에 응답이 없으면 인프라 오류로 처리',7 UNION ALL
- SELECT 'review_averaging_down','물타기도 검토',   'bool',   '1',    NULL,NULL,  NULL,NULL,'1이면 분할매수(물타기) 추가매수 신호도 검토한다(0이면 신규 진입만 검토)',8
+ SELECT 'review_averaging_down','물타기도 검토',   'bool',   '1',    NULL,NULL,  NULL,NULL,'1이면 분할매수(물타기) 추가매수 신호도 검토한다(0이면 신규 진입만 검토)',8 UNION ALL
+ SELECT 'review_momentum_screen','모멘텀 스크리닝 신호 검토','bool','1', NULL,NULL,  NULL,NULL,'이 알고리즘이 낸 매수 신호를 Claude가 검토할지. 꺼도 risk_guard 등 다른 검증은 그대로 적용된다',9 UNION ALL
+ SELECT 'review_macd_cross','MACD 골든크로스 신호 검토','bool','1', NULL,NULL,  NULL,NULL,'이 알고리즘이 낸 매수 신호를 Claude가 검토할지. 꺼도 risk_guard 등 다른 검증은 그대로 적용된다',10 UNION ALL
+ SELECT 'review_volatility_breakout','변동성 돌파 신호 검토','bool','1', NULL,NULL,  NULL,NULL,'이 알고리즘이 낸 매수 신호를 Claude가 검토할지. 꺼도 risk_guard 등 다른 검증은 그대로 적용된다',11
 ) p ON a.code='claude_advisor'
 ON DUPLICATE KEY UPDATE label=VALUES(label), value_type=VALUES(value_type), default_value=VALUES(default_value),
   min_value=VALUES(min_value), max_value=VALUES(max_value), enum_options=VALUES(enum_options), unit=VALUES(unit),
@@ -215,8 +218,7 @@ SELECT a.id, p.k, p.label, p.t, p.d, p.mn, p.mx, p.eo, p.u, p.ds, p.so FROM algo
  SELECT 'buy_amount',        '1회 매수금액',        'int',    '100000','10000','100000000',NULL,'원','신규 진입 시 종목당 최초 매수금액',15 UNION ALL
  SELECT 'max_new_per_day',   '일 신규 진입 종목수', 'int',    '3',   '0','50',       NULL,'종목','하루에 새로 진입할 최대 종목 수 (0이면 신규진입 안 함)',16 UNION ALL
  SELECT 'order_type',        '주문 유형',           'enum',   '3',   NULL,NULL,      '3:시장가,0:지정가(보통),6:최유리지정가',NULL,'kt10000 trde_tp',17 UNION ALL
- SELECT 'claude_review_fundamentals','Claude 검토에 재무분석 첨부','bool','1', NULL,NULL,NULL,NULL,'매수 신호가 Claude 거부권 심사로 넘어갈 때 DART 재무분석(PER·PBR·ROE·부채비율)을 함께 참고자료로 제공할지',18 UNION ALL
- SELECT 'fundamentals_stale_days','재무데이터 허용 경과일','int','15','1','60',       NULL,'일','재무데이터가 이 기간(일)보다 오래됐으면 참고자료에서 제외(값이 없다고 판단)',19
+ SELECT 'fundamentals_stale_days','재무데이터 허용 경과일','int','15','1','60',       NULL,'일','재무데이터가 이 기간(일)보다 오래됐으면 참고자료에서 제외(값이 없다고 판단)',18
 ) p ON a.code='macd_cross'
 ON DUPLICATE KEY UPDATE label=VALUES(label), value_type=VALUES(value_type), default_value=VALUES(default_value),
   min_value=VALUES(min_value), max_value=VALUES(max_value), enum_options=VALUES(enum_options), unit=VALUES(unit),

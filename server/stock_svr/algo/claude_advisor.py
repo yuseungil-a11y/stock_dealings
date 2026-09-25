@@ -11,7 +11,8 @@
   검토가 pass 일 때만 Executor 로 진행한다.
 
 파라미터(seed.sql): model, effort, min_confidence, fail_mode, cache_minutes,
-max_calls_per_day, timeout_sec, review_averaging_down
+max_calls_per_day, timeout_sec, review_averaging_down, review_momentum_screen,
+review_macd_cross, review_volatility_breakout
 """
 from __future__ import annotations
 
@@ -37,6 +38,15 @@ FAIL_ALLOW = "allow"
 
 # 입력 요약(JSON) DB 저장 상한
 INPUT_SUMMARY_MAX = 20000
+
+# 매수 신호를 내는 진입(entry) 알고리즘 코드별 검토 여부 파라미터 키.
+# 여기에 없는 algo_code(향후 추가되는 진입 알고리즘 등)는 안전 쪽으로 항상 검토한다.
+_REVIEW_TOGGLE_PARAM = {
+    "momentum_screen": "review_momentum_screen",
+    "macd_cross": "review_macd_cross",
+    "volatility_breakout": "review_volatility_breakout",
+    "averaging_down": "review_averaging_down",
+}
 
 # 알고리즘 인스턴스는 평가 주기마다 새로 만들어지므로 캐시/클라이언트는 모듈 수준에 둔다.
 _CACHE: dict[tuple[str, str, str], tuple[float, bool, str]] = {}
@@ -115,10 +125,6 @@ class ClaudeAdvisor(Algorithm):
     def timeout_sec(self) -> float:
         return float(max(5, min(120, self.params.int("timeout_sec", 30))))
 
-    @property
-    def review_averaging_down(self) -> bool:
-        return self.params.bool("review_averaging_down", True)
-
     # ------------------------------------------------------------------ #
     def filter_signals(self, ctx, signals: list[Signal]) -> list[Signal]:
         """일반 필터 단계에서는 아무것도 하지 않는다.
@@ -128,10 +134,16 @@ class ClaudeAdvisor(Algorithm):
         return signals
 
     # ------------------------------------------------------------------ #
-    @staticmethod
-    def needs_review(signal: Signal) -> bool:
-        """검토 대상인지. 매도/손절/청산은 **어떤 경우에도** False."""
-        return signal.side == "BUY" and signal.kind in REVIEWABLE_KINDS
+    def needs_review(self, signal: Signal) -> bool:
+        """검토 대상인지. 매도/손절/청산은 어떤 경우에도 False.
+        알고리즘별 검토 여부 파라미터가 있으면 그 값을 따르고, 없으면(향후 추가되는
+        진입 알고리즘 등) 안전 쪽으로 기본 검토함(True)으로 본다."""
+        if not (signal.side == "BUY" and signal.kind in REVIEWABLE_KINDS):
+            return False
+        toggle_key = _REVIEW_TOGGLE_PARAM.get(signal.algo_code)
+        if toggle_key is None:
+            return True
+        return self.params.bool(toggle_key, True)
 
     # ------------------------------------------------------------------ #
     def review(self, ctx, signal: Signal, client=None) -> tuple[bool, str]:
@@ -146,8 +158,6 @@ class ClaudeAdvisor(Algorithm):
     # ------------------------------------------------------------------ #
     def _review(self, ctx, signal: Signal, client) -> tuple[bool, str]:
         if not self.needs_review(signal):
-            return True, ""
-        if signal.kind == KIND_AVG_DOWN and not self.review_averaging_down:
             return True, ""
 
         key = (signal.stk_cd, signal.side, signal.algo_code)

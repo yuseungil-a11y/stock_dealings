@@ -399,27 +399,17 @@ def db_with_valuation(*, dt, per="12.3", pbr="1.5", roe="8.2", debt_ratio="55.0"
     return db
 
 
-def test_fundamentals_context_enabled_with_fresh_data_is_attached(fundamentals_provider):
+def test_fundamentals_context_fresh_data_is_attached(fundamentals_provider):
     db = db_with_valuation(dt=NOW.date())
-    db.param_values[(CODE, "claude_review_fundamentals")] = "1"
     ctx = make_ctx(db, now=NOW)
     ctx_out = collect_context(ctx, macd_buy_signal())
     assert ctx_out == {"dart_fundamentals": {
         "as_of": str(NOW.date()), "per": 12.3, "pbr": 1.5, "roe": 8.2, "debt_ratio": 55.0}}
 
 
-def test_fundamentals_context_disabled_returns_none_even_with_fresh_data(fundamentals_provider):
-    db = db_with_valuation(dt=NOW.date())
-    db.param_values[(CODE, "claude_review_fundamentals")] = "0"
-    ctx = make_ctx(db, now=NOW)
-    assert _fundamentals_context(ctx, macd_buy_signal()) is None
-    assert collect_context(ctx, macd_buy_signal()) == {}
-
-
 def test_fundamentals_context_stale_data_returns_none(fundamentals_provider):
     old = NOW.date() - _dt.timedelta(days=30)
     db = db_with_valuation(dt=old)
-    db.param_values[(CODE, "claude_review_fundamentals")] = "1"
     db.param_values[(CODE, "fundamentals_stale_days")] = "15"
     ctx = make_ctx(db, now=NOW)
     assert _fundamentals_context(ctx, macd_buy_signal()) is None
@@ -427,7 +417,6 @@ def test_fundamentals_context_stale_data_returns_none(fundamentals_provider):
 
 def test_fundamentals_context_no_valuation_row_returns_none(fundamentals_provider):
     db = FakeDb()
-    db.param_values[(CODE, "claude_review_fundamentals")] = "1"
     ctx = make_ctx(db, now=NOW)
     assert _fundamentals_context(ctx, macd_buy_signal()) is None
 
@@ -436,7 +425,6 @@ def test_fundamentals_context_other_algo_signal_returns_none_regardless_of_param
         fundamentals_provider):
     """momentum_screen 신호는 macd_cross 자신의 파라미터 값과 무관하게 항상 None."""
     db = db_with_valuation(dt=NOW.date())
-    db.param_values[(CODE, "claude_review_fundamentals")] = "1"
     ctx = make_ctx(db, now=NOW)
     assert _fundamentals_context(ctx, other_algo_buy_signal()) is None
     assert collect_context(ctx, other_algo_buy_signal()) == {}
@@ -444,14 +432,6 @@ def test_fundamentals_context_other_algo_signal_returns_none_regardless_of_param
 
 def test_fundamentals_context_db_error_is_caught_and_returns_none(fundamentals_provider):
     db = db_with_valuation(dt=NOW.date())
-    db.param_values[(CODE, "claude_review_fundamentals")] = "1"
     db.fail_on.add("latest_company_valuation")
     ctx = make_ctx(db, now=NOW)
     assert _fundamentals_context(ctx, macd_buy_signal()) is None
-
-
-def test_fundamentals_context_default_enabled_when_param_never_overridden(fundamentals_provider):
-    """DB에 값 행이 없으면(관리자가 손댄 적 없음) seed.sql 기본값(사용=1)을 따른다."""
-    db = db_with_valuation(dt=NOW.date())
-    ctx = make_ctx(db, now=NOW)
-    assert _fundamentals_context(ctx, macd_buy_signal()) is not None
