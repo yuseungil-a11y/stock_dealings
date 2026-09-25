@@ -22,6 +22,7 @@ class FakeDb:
         self.orders: list[dict] = []
         self.signals: list[dict] = []
         self.position_states: dict[tuple[int, str], dict] = {}
+        self.position_exit_states: dict[tuple[int, str], dict] = {}
         self.open_order_codes: set[str] = set()
         self.last_order_times: dict[tuple[str, str], _dt.datetime] = {}
         self.orders_today = 0
@@ -269,6 +270,9 @@ class FakeDb:
 
     def bump_position_invest(self, account_id, stk_cd, amount, algo_code, price, avg_down):
         self._maybe_fail("bump_position_invest")
+        if not avg_down:
+            # 실제 Database 와 같이: 물타기가 아닌 신규 진입이면 이전 익절 추적 상태를 지운다
+            self.position_exit_states.pop((account_id, stk_cd), None)
         st = self.position_states.setdefault((account_id, stk_cd), {
             "entry_algo": algo_code, "avg_down_count": 0, "total_invested": 0,
             "last_buy_price": None, "stopped": 0})
@@ -282,6 +286,26 @@ class FakeDb:
             "entry_algo": None, "avg_down_count": 0, "total_invested": 0,
             "last_buy_price": None, "stopped": 0})
         st.update(fields)
+
+    # -- position_exit_state (take_profit) ------------------------------ #
+    def get_position_exit_state(self, account_id, stk_cd):
+        self._maybe_fail("get_position_exit_state")
+        row = self.position_exit_states.get((account_id, stk_cd))
+        return dict(row) if row else None
+
+    def upsert_position_exit_state(self, account_id, stk_cd, **fields):
+        self._maybe_fail("upsert_position_exit_state")
+        allowed = ("tp_stage", "tp_partial_qty", "tp_partial_at", "peak_price",
+                  "trail_started_at", "atr_value", "atr_date", "entry_pur_pric")
+        st = self.position_exit_states.setdefault((account_id, stk_cd), {
+            "tp_stage": 0, "tp_partial_qty": None, "tp_partial_at": None, "peak_price": None,
+            "trail_started_at": None, "atr_value": None, "atr_date": None,
+            "entry_pur_pric": None})
+        st.update({k: v for k, v in fields.items() if k in allowed})
+
+    def delete_position_exit_state(self, account_id, stk_cd):
+        self._maybe_fail("delete_position_exit_state")
+        self.position_exit_states.pop((account_id, stk_cd), None)
 
     # -- Claude 거부권 필터 --------------------------------------------- #
     def insert_llm_decision(self, **f):

@@ -395,6 +395,9 @@ class Database:
         """보유목록에 없는 종목의 투입금/물타기 회차를 초기화한다 (B4/S-13).
 
         `stopped`(손절 후 재진입 금지)는 **당일에만** 유지하고 익일 자동 해제한다.
+        더 이상 보유하지 않는 종목의 `position_exit_state`(익절 추적 상태)도 함께 지운다
+        (take_profit) - 그대로 두면 같은 날 재진입 시 이전 포지션의 tp_stage/peak_price를
+        이어받는다.
         """
         n = 0
         if held_codes:
@@ -404,10 +407,14 @@ class Database:
                 f"WHERE account_id=%s AND stk_cd NOT IN ({ph}) "
                 f"AND (total_invested<>0 OR avg_down_count<>0)",
                 [account_id] + list(held_codes))
+            self.execute(
+                f"DELETE FROM position_exit_state WHERE account_id=%s AND stk_cd NOT IN ({ph})",
+                [account_id] + list(held_codes))
         else:
             n = self.execute(
                 "UPDATE position_state SET total_invested=0, avg_down_count=0, last_buy_price=NULL "
                 "WHERE account_id=%s AND (total_invested<>0 OR avg_down_count<>0)", (account_id,))
+            self.execute("DELETE FROM position_exit_state WHERE account_id=%s", (account_id,))
         # 손절 표시는 하루가 지나면 해제
         self.execute(
             "UPDATE position_state SET stopped=0 "
@@ -422,6 +429,10 @@ class Database:
 
     def bump_position_invest(self, account_id: int, stk_cd: str, amount: int,
                              algo_code: str | None, price: int | None, avg_down: bool) -> None:
+        if not avg_down:
+            # 물타기가 아닌(=신규 진입) 매수 - 이전 익절(take_profit) 추적 상태가 새
+            # 포지션에 이어지지 않도록 초기화한다(같은 날 전량 익절 후 재진입 시나리오).
+            self.delete_position_exit_state(account_id, stk_cd)
         self.execute(
             "INSERT INTO position_state (account_id, stk_cd, entry_algo, first_buy_at, last_buy_price, "
             "avg_down_count, total_invested) VALUES (%s,%s,%s,%s,%s,%s,%s) "
@@ -431,6 +442,29 @@ class Database:
             (account_id, stk_cd, algo_code, now_kst(), price, 1 if avg_down else 0, int(amount),
              1 if avg_down else 0),
         )
+
+    # -- position_exit_state (take_profit: ATR 트레일링+부분매도 추적) -- #
+    def get_position_exit_state(self, account_id: int, stk_cd: str) -> dict | None:
+        return self.query_one(
+            "SELECT * FROM position_exit_state WHERE account_id=%s AND stk_cd=%s",
+            (account_id, stk_cd))
+
+    def upsert_position_exit_state(self, account_id: int, stk_cd: str, **fields) -> None:
+        allowed = ("tp_stage", "tp_partial_qty", "tp_partial_at", "peak_price",
+                  "trail_started_at", "atr_value", "atr_date", "entry_pur_pric")
+        sets = {k: v for k, v in fields.items() if k in allowed}
+        cols = ["account_id", "stk_cd"] + list(sets)
+        vals = [account_id, stk_cd] + list(sets.values())
+        upd = ", ".join(f"{k}=VALUES({k})" for k in sets) or "updated_at=CURRENT_TIMESTAMP"
+        self.execute(
+            f"INSERT INTO position_exit_state ({', '.join(cols)}) VALUES ({', '.join(['%s'] * len(cols))}) "
+            f"ON DUPLICATE KEY UPDATE {upd}",
+            vals,
+        )
+
+    def delete_position_exit_state(self, account_id: int, stk_cd: str) -> None:
+        self.execute(
+            "DELETE FROM position_exit_state WHERE account_id=%s AND stk_cd=%s", (account_id, stk_cd))
 
     # ================================================================== #
     # 종목 / 시세

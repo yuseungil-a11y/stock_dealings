@@ -124,6 +124,22 @@ CREATE TABLE IF NOT EXISTS position_state (
   CONSTRAINT fk_posstate_account FOREIGN KEY (account_id) REFERENCES account (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='종목별 전략 상태 (물타기 횟수·투입한도 추적)';
 
+CREATE TABLE IF NOT EXISTS position_exit_state (
+  account_id        INT UNSIGNED NOT NULL,
+  stk_cd            VARCHAR(12)  NOT NULL,
+  tp_stage          TINYINT NOT NULL DEFAULT 0 COMMENT '0=미실행, 1=부분익절 완료',
+  tp_partial_qty    INT NULL COMMENT '부분익절 매도 수량',
+  tp_partial_at     DATETIME NULL,
+  peak_price        BIGINT NULL COMMENT '추적 시작 이후 관측한 최고 현재가',
+  trail_started_at  DATETIME NULL,
+  atr_value         DECIMAL(18,4) NULL,
+  atr_date          DATE NULL COMMENT 'ATR 계산 기준일 (하루 1회 캐시)',
+  entry_pur_pric    BIGINT NULL COMMENT '추적 시작 시점 평단 (수정주가 불일치 감지용)',
+  updated_at        DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (account_id, stk_cd),
+  CONSTRAINT fk_posexit_account FOREIGN KEY (account_id) REFERENCES account (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='종목별 익절(take_profit) 추적 상태 - position_state 와 분리(ON UPDATE 충돌 방지)';
+
 -- ---------------------------------------------------------------------
 -- 3. 종목 / 시세   (API: ka10099, ka10001, ka10081)
 -- ---------------------------------------------------------------------

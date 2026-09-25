@@ -21,7 +21,7 @@ from typing import Callable
 from ..algo.base import KIND_AVG_DOWN, KIND_STOP_LOSS, Signal, amount_with_buffer
 from ..db import Database
 from ..kiwoom.errors import KiwoomError
-from ..util import mask_text
+from ..util import mask_text, now_kst
 from .context import BALANCE_STALE_SEC, EngineContext, OrderGateState  # noqa: F401
 
 log = logging.getLogger(__name__)
@@ -56,6 +56,7 @@ MAX_JSON_CHARS = 8000                      # signal_context / params_snapshot �
 MAX_VALUE_CHARS = 200                      # meta/파라미터 값 1개 상한
 MAX_META_ITEMS = 30                        # meta 항목 수 상한
 CLAUDE_ADVISOR_CODE = "claude_advisor"     # (import 체인을 늘리지 않으려고 문자열로 둔다)
+TAKE_PROFIT_CODE = "take_profit"           # (import 체인을 늘리지 않으려고 문자열로 둔다)
 
 # 이 단어가 들어간 키는 스냅샷에서 통째로 제외한다(비밀·계좌 식별자 차단)
 SECRET_KEY_WORDS = ("key", "secret", "token", "password", "passwd", "pwd",
@@ -376,6 +377,7 @@ class Executor:
         if not self._update_position_state(signal):
             ctx.halt(f"position_state 갱신 실패({signal.stk_cd}) - 한도 계산 신뢰 불가")
             self._raise_alarm(f"position_state 갱신 실패: {signal.stk_cd}")
+        self._update_exit_state(signal)
         return result
 
     # ------------------------------------------------------------------ #
@@ -692,6 +694,25 @@ class Executor:
             log.error("position_state 갱신 실패 (%s) - 이후 주문을 차단합니다",
                       signal.stk_cd, exc_info=True)
             return False
+
+    def _update_exit_state(self, signal: Signal) -> None:
+        """take_profit 신호 전송 성공 직후 `position_exit_state` 를 갱신한다.
+
+        1단계(부분매도)만 여기서 tp_stage 를 올린다 - **실제로 주문이 전송된 경우만**
+        (관찰모드/차단이면 이 메서드가 호출되지 않는다). 2단계(전량 트레일링 청산)는
+        별도로 기록할 필요가 없다 - 종목이 보유목록에서 빠지면 `reset_stale_positions`
+        가 `position_exit_state` 를 정리한다.
+        """
+        if signal.algo_code != TAKE_PROFIT_CODE or not signal.meta.get("stage"):
+            return
+        if signal.meta.get("stage") != 1:
+            return
+        try:
+            self.db.upsert_position_exit_state(
+                self.account_id, signal.stk_cd, tp_stage=1,
+                tp_partial_qty=int(signal.qty), tp_partial_at=now_kst())
+        except Exception:  # noqa: BLE001 - 기록 실패가 주문 처리 결과를 바꾸지 않는다
+            log.warning("position_exit_state 갱신 실패 (%s)", signal.stk_cd, exc_info=True)
 
     # ------------------------------------------------------------------ #
     def _duplicate_reason(self, ctx: EngineContext, signal: Signal) -> str:

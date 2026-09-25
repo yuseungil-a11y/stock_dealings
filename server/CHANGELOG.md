@@ -15,6 +15,11 @@
 
 
 
+
+## [1.14.0] - 2026-09-25
+### 변경
+- 익절(ATR 트레일링+단계별 부분매도) 알고리즘 신규 추가(take_profit, 기본 비활성), 손절과 동시조건 시 risk_guard 우선 보장, position_exit_state 신규 테이블
+
 ## [1.13.0] - 2026-09-25
 ### 변경
 - 체결(거래) 발생 시 siy@utinfo.co.kr 로 자동 이메일 알림 발송 추가(hiworks SMTP) - 설정은 별도 JSON 파일(config/mail.local.json)로 관리, 같은 체결번호(cntr_no)/체결금액(ord_no+수량+가격) 기준으로 중복 발송 방지

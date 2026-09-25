@@ -119,6 +119,7 @@ def _ensure_loaded() -> None:
         macd_cross,
         momentum_screen,
         risk_guard,
+        take_profit,
         universe_filter,
         volatility_breakout,
     )

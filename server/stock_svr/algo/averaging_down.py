@@ -12,10 +12,9 @@ from decimal import Decimal
 
 from .base import KIND_AVG_DOWN, KIND_STOP_LOSS, Algorithm, Signal, qty_for_amount
 from .registry import register
+from .risk_guard import stop_loss_pct as guard_stop_loss_pct
 
 log = logging.getLogger(__name__)
-
-DEFAULT_STOP_LOSS_PCT = Decimal("-15")
 
 
 @register
@@ -23,18 +22,6 @@ class AveragingDown(Algorithm):
     code = "averaging_down"
     role = "risk"
     name = "분할매수(물타기)"
-
-    def stop_loss_pct(self, ctx) -> Decimal:
-        """손절선은 risk_guard 파라미터를 따른다."""
-        try:
-            val = ctx.db.scalar(
-                "SELECT v.value FROM algorithm_param_value v JOIN algorithm a ON a.id=v.algorithm_id "
-                "WHERE a.code='risk_guard' AND v.param_key='stop_loss_pct'")
-            if val is not None:
-                return Decimal(str(val))
-        except Exception:  # noqa: BLE001
-            pass
-        return DEFAULT_STOP_LOSS_PCT
 
     # ------------------------------------------------------------------ #
     def evaluate(self, ctx) -> list[Signal]:
@@ -47,7 +34,7 @@ class AveragingDown(Algorithm):
         max_steps = self.params.int("max_steps", 3)
         cooldown_min = self.params.int("cooldown_min", 30)
         trde_tp = self.params.str("order_type", "3") or "3"
-        stop_pct = self.stop_loss_pct(ctx)
+        stop_pct = guard_stop_loss_pct(ctx)
 
         for stk_cd, h in ctx.holdings.items():
             qty_held = int(h.get("rmnd_qty") or 0)
@@ -87,6 +74,16 @@ class AveragingDown(Algorithm):
 
             threshold = Decimal(base_price) * (Decimal(1) - drop_pct / Decimal(100))
             if Decimal(cur) > threshold:
+                continue
+
+            # 이미 익절(take_profit) 부분매도 이상 진행된 포지션에는 물타기를 하지 않는다
+            # (하나는 손실 확대 방지, 하나는 이익 확정 - 두 전략이 같은 포지션에서 충돌한다)
+            try:
+                exit_st = ctx.db.get_position_exit_state(ctx.account_id, stk_cd)
+            except Exception:  # noqa: BLE001 - 조회 실패는 물타기를 막지 않는다(기존 동작 유지)
+                log.debug("position_exit_state 조회 실패(물타기 판단) %s", stk_cd, exc_info=True)
+                exit_st = None
+            if exit_st and int(exit_st.get("tp_stage") or 0) > 0:
                 continue
 
             if cooldown_min > 0:

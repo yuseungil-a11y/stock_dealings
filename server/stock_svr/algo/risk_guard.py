@@ -18,7 +18,28 @@ from .registry import register
 
 log = logging.getLogger(__name__)
 
-__all__ = ["RiskGuard", "SLIPPAGE_BUFFER", "effective_limit", "LimitPreview", "limit_preview"]
+__all__ = ["RiskGuard", "SLIPPAGE_BUFFER", "effective_limit", "LimitPreview", "limit_preview",
+          "stop_loss_pct", "DEFAULT_STOP_LOSS_PCT"]
+
+# averaging_down/take_profit 이 손절선 판단에 공유하는 기본값(DB 조회 실패 시 대체)
+DEFAULT_STOP_LOSS_PCT = Decimal("-15")
+
+
+def stop_loss_pct(ctx) -> Decimal:
+    """risk_guard.stop_loss_pct 파라미터 조회 (averaging_down/take_profit 공용).
+
+    동시조건(손절+익절) 처리를 위해 여러 알고리즘이 **같은 기준**으로 손절선을 읽어야
+    한다 - 각자 따로 쿼리를 복제하지 않고 여기 한 곳으로 모은다.
+    """
+    try:
+        val = ctx.db.scalar(
+            "SELECT v.value FROM algorithm_param_value v JOIN algorithm a ON a.id=v.algorithm_id "
+            "WHERE a.code='risk_guard' AND v.param_key='stop_loss_pct'")
+        if val is not None:
+            return Decimal(str(val))
+    except Exception:  # noqa: BLE001
+        pass
+    return DEFAULT_STOP_LOSS_PCT
 
 
 def effective_limit(abs_won: int, pct: Decimal, total_asset: int,

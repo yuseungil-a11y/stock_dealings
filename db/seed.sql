@@ -39,7 +39,9 @@ INSERT INTO algorithm (code, name, role, description, is_locked, sort_order) VAL
  ('fundamentals_filter', '재무 건전성 필터(PER·PBR·ROE·부채비율)', 'filter',
   '매매와 분리된 DART 재무분석 결과(company_valuation_daily)를 신규 매수 신호에 적용하는 필터. PER·PBR·ROE·부채비율 각각의 개별 기준값을 넘으면(개별 기준값 통과제) 매수를 차단한다. 재무데이터가 없거나 오래되면(stale_days) 매수를 차단한다(안전 우선, fail-closed). 매도·손절·청산에는 관여하지 않는다.', 0, 38),
  ('macd_cross',           'MACD 골든크로스',          'entry',
-  'universe_filter와 동일한 시총 상위 종목 로직(자체 파라미터)을 대상으로, MACD 라인이 Signal 라인을 아래에서 위로 교차(골든크로스)하는 순간만 매수 신호를 낸다. 제로선 필터 없음(단순 교차만). 이미 보유·거래불가 종목 제외, 일 신규진입 한도 적용.', 0, 12)
+  'universe_filter와 동일한 시총 상위 종목 로직(자체 파라미터)을 대상으로, MACD 라인이 Signal 라인을 아래에서 위로 교차(골든크로스)하는 순간만 매수 신호를 낸다. 제로선 필터 없음(단순 교차만). 이미 보유·거래불가 종목 제외, 일 신규진입 한도 적용.', 0, 12),
+ ('take_profit',          '익절(ATR 트레일링+부분매도)', 'risk',
+  '평단 대비 지정 수익률 도달 시 1차 부분매도 후, Wilder ATR 기반 트레일링 스탑(관측 최고가 - ATR x 배수)이 현재가를 하회하면 잔량을 전량 매도한다. 손절선(risk_guard.stop_loss_pct)에 동시에 도달한 종목은 risk_guard 가 전담하도록 이 알고리즘은 신호를 내지 않는다(손절 우선). 신규 알고리즘이라 기본은 비활성(is_enabled=0) - 웹에서 검토 후 켜야 한다.', 0, 31)
 ON DUPLICATE KEY UPDATE name=VALUES(name), role=VALUES(role), description=VALUES(description),
                         is_locked=VALUES(is_locked), sort_order=VALUES(sort_order);
 
@@ -214,6 +216,23 @@ SELECT a.id, p.k, p.label, p.t, p.d, p.mn, p.mx, p.eo, p.u, p.ds, p.so FROM algo
  SELECT 'max_new_per_day',   '일 신규 진입 종목수', 'int',    '3',   '0','50',       NULL,'종목','하루에 새로 진입할 최대 종목 수 (0이면 신규진입 안 함)',16 UNION ALL
  SELECT 'order_type',        '주문 유형',           'enum',   '3',   NULL,NULL,      '3:시장가,0:지정가(보통),6:최유리지정가',NULL,'kt10000 trde_tp',17
 ) p ON a.code='macd_cross'
+ON DUPLICATE KEY UPDATE label=VALUES(label), value_type=VALUES(value_type), default_value=VALUES(default_value),
+  min_value=VALUES(min_value), max_value=VALUES(max_value), enum_options=VALUES(enum_options), unit=VALUES(unit),
+  description=VALUES(description), sort_order=VALUES(sort_order);
+
+-- ---- 파라미터 정의: take_profit ---------------------------------------
+INSERT INTO algorithm_param_def (algorithm_id, param_key, label, value_type, default_value, min_value, max_value, enum_options, unit, description, sort_order)
+SELECT a.id, p.k, p.label, p.t, p.d, p.mn, p.mx, p.eo, p.u, p.ds, p.so FROM algorithm a JOIN (
+ SELECT 'partial_take_pct'    k,'부분익절 수익률'        label,'decimal' t,'12' d,'0' mn,'100' mx,NULL eo,'%' u,'평단 대비 이 수익률 이상이면 1차 부분매도. 0이면 부분익절 자체를 쓰지 않는다' ds,1 so UNION ALL
+ SELECT 'partial_sell_ratio',  '부분매도 비율',          'decimal','40',   '1','100',  NULL,'%','부분익절 시 매매가능수량 중 이 비율만큼 매도',2 UNION ALL
+ SELECT 'atr_period',          'ATR 기간',               'int',    '22',   '5','60',   NULL,'일','Wilder ATR 계산에 쓰는 일봉 기간',3 UNION ALL
+ SELECT 'atr_multiplier',      'ATR 배수',               'decimal','3.0',  '1.0','6.0',NULL,'배','트레일링 스탑 = 관측 최고가 - ATR x 이 배수',4 UNION ALL
+ SELECT 'min_atr_bars',        'ATR 최소 일봉 개수',     'int',    '23',   NULL,NULL,  NULL,'개','ATR 계산에 필요한 최소 일봉 개수 (atr_period 보다 커야 함)',5 UNION ALL
+ SELECT 'trail_activate_mode', '트레일링 활성 시점',     'enum',   'after_partial',NULL,NULL,'after_partial:부분익절 이후,profit_pct:지정 수익률 도달 시',NULL,'ATR 트레일링 스탑을 언제부터 적용할지',6 UNION ALL
+ SELECT 'trail_activate_pct',  '트레일링 활성 수익률',   'decimal','12',   NULL,NULL,  NULL,'%','트레일링 활성 시점=profit_pct 일 때만 사용',7 UNION ALL
+ SELECT 'trail_floor_breakeven','트레일링 손익분기 하한','bool',  '1',    NULL,NULL,  NULL,NULL,'1이면 부분익절 이후 트레일링 스탑이 평단(pur_pric) 아래로 내려가지 않게 한다',8 UNION ALL
+ SELECT 'scope',               '적용 대상',              'enum',   'engine',NULL,NULL, 'engine:시스템이 매수한 종목만,all:모든 보유종목',NULL,'engine이면 position_state.entry_algo가 있는(이 시스템이 진입한) 종목만 관리하고 수동매수 종목은 건너뛴다',9
+) p ON a.code='take_profit'
 ON DUPLICATE KEY UPDATE label=VALUES(label), value_type=VALUES(value_type), default_value=VALUES(default_value),
   min_value=VALUES(min_value), max_value=VALUES(max_value), enum_options=VALUES(enum_options), unit=VALUES(unit),
   description=VALUES(description), sort_order=VALUES(sort_order);
