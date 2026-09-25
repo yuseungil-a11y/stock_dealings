@@ -13,17 +13,23 @@
 
 파라미터(seed.sql): fast_period, slow_period, signal_period, top_n, use_kospi, use_kosdaq,
 use_etf, min_price, max_price, min_market_cap_eok, exclude_preferred, exclude_spac,
-exclude_warning, stale_days, buy_amount, max_new_per_day, order_type
+exclude_warning, stale_days, buy_amount, max_new_per_day, order_type,
+claude_review_fundamentals, fundamentals_stale_days
 """
 from __future__ import annotations
 
 import logging
 
+from ..llm.prompt import _round, register_context_provider
 from .base import KIND_ENTRY, Algorithm, Signal, qty_for_amount
+from .fundamentals_filter import age_days
+from .params import TRUE_SET
 from .registry import register
 from .universe_filter import APPLY_ENTRY, SCOPE_PER_MARKET, UniverseOptions, load_universe
 
 log = logging.getLogger(__name__)
+
+CODE = "macd_cross"
 
 # 일봉이 모자라 계산을 못 하는 상황을 피하려는 여유분 (slow+signal 만으로도 계산은 되지만
 # 직전값·최신값 비교(골든크로스 판정)까지 안정적으로 하려면 여유를 둔다).
@@ -105,9 +111,59 @@ def golden_cross(macd: list[float | None], signal: list[float | None]) -> bool:
 
 
 # ====================================================================== #
+# claude_advisor 컨텍스트 제공자 (DART 재무분석 - macd_cross 신호에만, 옵션이 켜져 있을 때만)
+# ====================================================================== #
+def _fundamentals_context(ctx, signal) -> dict | None:
+    """claude_advisor 검토용 컨텍스트 provider.
+
+    macd_cross 가 낸 신호에만, 그리고 `claude_review_fundamentals` 파라미터가 켜져
+    있을 때만 DART 재무분석(`company_valuation_daily`)의 최신 행을 참고자료로 얹는다.
+    다른 알고리즘의 신호에는 절대 관여하지 않는다(맨 앞의 algo_code 검사가 그 보증이다).
+    실패/미해당은 전부 None - 이 provider 의 오류가 Claude 검토 자체를 막으면 안 된다.
+    """
+    if signal.algo_code != CODE:
+        return None
+    try:
+        enabled_raw = ctx.db.scalar(
+            "SELECT v.value FROM algorithm_param_value v JOIN algorithm a ON a.id=v.algorithm_id "
+            "WHERE a.code=%s AND v.param_key='claude_review_fundamentals'", (CODE,))
+        # 값이 없으면(관리자가 아직 손댄 적 없음) seed.sql 기본값(1=사용)을 따른다.
+        enabled = True if enabled_raw is None else str(enabled_raw).strip().lower() in TRUE_SET
+        if not enabled:
+            return None
+        stale_raw = ctx.db.scalar(
+            "SELECT v.value FROM algorithm_param_value v JOIN algorithm a ON a.id=v.algorithm_id "
+            "WHERE a.code=%s AND v.param_key='fundamentals_stale_days'", (CODE,))
+        stale_days = int(stale_raw) if stale_raw is not None else 15
+        row = ctx.db.latest_company_valuation(signal.stk_cd)
+    except Exception:  # noqa: BLE001 - 부가 정보 실패가 Claude 검토를 막지 않게
+        log.debug("macd_cross 재무데이터 컨텍스트 조회 실패", exc_info=True)
+        return None
+    if not row:
+        return None
+    dt = row.get("dt")
+    age = age_days(dt, getattr(ctx, "now", None))
+    if age is not None and age > stale_days:
+        return None
+    return {
+        "as_of": str(dt) if dt else None,
+        "per": _round(row.get("per")),
+        "pbr": _round(row.get("pbr")),
+        "roe": _round(row.get("roe")),
+        "debt_ratio": _round(row.get("debt_ratio")),
+    }
+
+
+# 모듈 임포트 시(= registry._ensure_loaded 가 이 모듈을 불러올 때) 단 한 번 등록된다.
+# register_context_provider 자체가 동일 이름을 먼저 지우고(clear_context_provider) 다시
+# 넣으므로, 테스트 등에서 모듈이 재임포트돼도 중복 등록되지 않는다.
+register_context_provider("dart_fundamentals", _fundamentals_context)
+
+
+# ====================================================================== #
 @register
 class MacdCross(Algorithm):
-    code = "macd_cross"
+    code = CODE
     role = "entry"
     name = "MACD 골든크로스"
 

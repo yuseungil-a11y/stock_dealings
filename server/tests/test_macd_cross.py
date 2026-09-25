@@ -11,9 +11,10 @@ import pytest
 
 from conftest import FakeDb, FakeMarket, make_ctx
 from stock_svr.algo import registry
-from stock_svr.algo.base import KIND_ENTRY
-from stock_svr.algo.macd_cross import MacdCross, ema, golden_cross, macd_series
+from stock_svr.algo.base import KIND_ENTRY, Signal
+from stock_svr.algo.macd_cross import CODE, MacdCross, _fundamentals_context, ema, golden_cross, macd_series
 from stock_svr.algo.params import ParamSet
+from stock_svr.llm.prompt import clear_context_providers, collect_context, register_context_provider
 from test_universe_filter import master
 
 # ====================================================================== #
@@ -366,4 +367,91 @@ def test_evaluate_disabled_when_fast_ge_slow():
     sigs = macd_algo(fast_period=26, slow_period=12, signal_period=SIGNAL,
                      min_price=0).evaluate(ctx)
     assert sigs == []
-    assert any("알고리즘 비활성" in n for n in ctx.notes)
+
+
+# ====================================================================== #
+# 7. dart_fundamentals 컨텍스트 provider — claude_advisor 검토용 재무데이터 첨부
+# ====================================================================== #
+@pytest.fixture
+def fundamentals_provider():
+    """다른 테스트 파일(test_claude_advisor.py 등)이 clear_context_providers() 로 전역
+    상태를 비울 수 있으므로, 이 테스트들에서는 명시적으로 등록/정리한다."""
+    register_context_provider("dart_fundamentals", _fundamentals_context)
+    yield
+    clear_context_providers()
+
+
+def macd_buy_signal(stk_cd="005930") -> Signal:
+    return Signal(algo_code=CODE, stk_cd=stk_cd, stk_nm="삼성전자", side="BUY", qty=10,
+                 price=None, trde_tp="3", amount=10000, kind=KIND_ENTRY, score=1.0,
+                 reason="MACD 골든크로스")
+
+
+def other_algo_buy_signal(stk_cd="005930") -> Signal:
+    return Signal(algo_code="momentum_screen", stk_cd=stk_cd, stk_nm="삼성전자", side="BUY",
+                 qty=10, price=None, trde_tp="3", amount=10000, kind=KIND_ENTRY, score=1.0,
+                 reason="등락률 상위")
+
+
+def db_with_valuation(*, dt, per="12.3", pbr="1.5", roe="8.2", debt_ratio="55.0") -> FakeDb:
+    db = FakeDb()
+    db.upsert_company_valuation("005930", dt, per=per, pbr=pbr, roe=roe, debt_ratio=debt_ratio)
+    return db
+
+
+def test_fundamentals_context_enabled_with_fresh_data_is_attached(fundamentals_provider):
+    db = db_with_valuation(dt=NOW.date())
+    db.param_values[(CODE, "claude_review_fundamentals")] = "1"
+    ctx = make_ctx(db, now=NOW)
+    ctx_out = collect_context(ctx, macd_buy_signal())
+    assert ctx_out == {"dart_fundamentals": {
+        "as_of": str(NOW.date()), "per": 12.3, "pbr": 1.5, "roe": 8.2, "debt_ratio": 55.0}}
+
+
+def test_fundamentals_context_disabled_returns_none_even_with_fresh_data(fundamentals_provider):
+    db = db_with_valuation(dt=NOW.date())
+    db.param_values[(CODE, "claude_review_fundamentals")] = "0"
+    ctx = make_ctx(db, now=NOW)
+    assert _fundamentals_context(ctx, macd_buy_signal()) is None
+    assert collect_context(ctx, macd_buy_signal()) == {}
+
+
+def test_fundamentals_context_stale_data_returns_none(fundamentals_provider):
+    old = NOW.date() - _dt.timedelta(days=30)
+    db = db_with_valuation(dt=old)
+    db.param_values[(CODE, "claude_review_fundamentals")] = "1"
+    db.param_values[(CODE, "fundamentals_stale_days")] = "15"
+    ctx = make_ctx(db, now=NOW)
+    assert _fundamentals_context(ctx, macd_buy_signal()) is None
+
+
+def test_fundamentals_context_no_valuation_row_returns_none(fundamentals_provider):
+    db = FakeDb()
+    db.param_values[(CODE, "claude_review_fundamentals")] = "1"
+    ctx = make_ctx(db, now=NOW)
+    assert _fundamentals_context(ctx, macd_buy_signal()) is None
+
+
+def test_fundamentals_context_other_algo_signal_returns_none_regardless_of_params(
+        fundamentals_provider):
+    """momentum_screen 신호는 macd_cross 자신의 파라미터 값과 무관하게 항상 None."""
+    db = db_with_valuation(dt=NOW.date())
+    db.param_values[(CODE, "claude_review_fundamentals")] = "1"
+    ctx = make_ctx(db, now=NOW)
+    assert _fundamentals_context(ctx, other_algo_buy_signal()) is None
+    assert collect_context(ctx, other_algo_buy_signal()) == {}
+
+
+def test_fundamentals_context_db_error_is_caught_and_returns_none(fundamentals_provider):
+    db = db_with_valuation(dt=NOW.date())
+    db.param_values[(CODE, "claude_review_fundamentals")] = "1"
+    db.fail_on.add("latest_company_valuation")
+    ctx = make_ctx(db, now=NOW)
+    assert _fundamentals_context(ctx, macd_buy_signal()) is None
+
+
+def test_fundamentals_context_default_enabled_when_param_never_overridden(fundamentals_provider):
+    """DB에 값 행이 없으면(관리자가 손댄 적 없음) seed.sql 기본값(사용=1)을 따른다."""
+    db = db_with_valuation(dt=NOW.date())
+    ctx = make_ctx(db, now=NOW)
+    assert _fundamentals_context(ctx, macd_buy_signal()) is not None

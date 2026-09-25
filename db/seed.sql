@@ -214,7 +214,9 @@ SELECT a.id, p.k, p.label, p.t, p.d, p.mn, p.mx, p.eo, p.u, p.ds, p.so FROM algo
  SELECT 'stale_days',        '종목마스터 허용 경과일','int',  '5',   '1','30',       NULL,'일','종목마스터 갱신이 이 일수보다 오래되면 신규 매수 차단',14 UNION ALL
  SELECT 'buy_amount',        '1회 매수금액',        'int',    '100000','10000','100000000',NULL,'원','신규 진입 시 종목당 최초 매수금액',15 UNION ALL
  SELECT 'max_new_per_day',   '일 신규 진입 종목수', 'int',    '3',   '0','50',       NULL,'종목','하루에 새로 진입할 최대 종목 수 (0이면 신규진입 안 함)',16 UNION ALL
- SELECT 'order_type',        '주문 유형',           'enum',   '3',   NULL,NULL,      '3:시장가,0:지정가(보통),6:최유리지정가',NULL,'kt10000 trde_tp',17
+ SELECT 'order_type',        '주문 유형',           'enum',   '3',   NULL,NULL,      '3:시장가,0:지정가(보통),6:최유리지정가',NULL,'kt10000 trde_tp',17 UNION ALL
+ SELECT 'claude_review_fundamentals','Claude 검토에 재무분석 첨부','bool','1', NULL,NULL,NULL,NULL,'매수 신호가 Claude 거부권 심사로 넘어갈 때 DART 재무분석(PER·PBR·ROE·부채비율)을 함께 참고자료로 제공할지',18 UNION ALL
+ SELECT 'fundamentals_stale_days','재무데이터 허용 경과일','int','15','1','60',       NULL,'일','재무데이터가 이 기간(일)보다 오래됐으면 참고자료에서 제외(값이 없다고 판단)',19
 ) p ON a.code='macd_cross'
 ON DUPLICATE KEY UPDATE label=VALUES(label), value_type=VALUES(value_type), default_value=VALUES(default_value),
   min_value=VALUES(min_value), max_value=VALUES(max_value), enum_options=VALUES(enum_options), unit=VALUES(unit),

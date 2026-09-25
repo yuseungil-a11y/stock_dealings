@@ -16,6 +16,11 @@
 
 
 
+
+## [1.15.0] - 2026-09-25
+### 변경
+- MACD 알고리즘에 옵션 파라미터(claude_review_fundamentals, fundamentals_stale_days) 추가 - 켜져 있으면 macd_cross 매수 신호가 claude_advisor 심사로 넘어갈 때 DART 재무분석(PER/PBR/ROE/부채비율) 최신 데이터를 참고자료로 함께 제공(다른 진입 알고리즘의 Claude 검토에는 영향 없음)
+
 ## [1.14.0] - 2026-09-25
 ### 변경
 - 익절(ATR 트레일링+단계별 부분매도) 알고리즘 신규 추가(take_profit, 기본 비활성), 손절과 동시조건 시 risk_guard 우선 보장, position_exit_state 신규 테이블

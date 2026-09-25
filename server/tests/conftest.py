@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime as _dt
+import re
 import sys
 from pathlib import Path
 
@@ -790,6 +791,12 @@ class FakeDb:
     def scalar(self, sql: str, args=None, default=None):
         if "stop_loss_pct" in sql:
             return self.param_values.get(("risk_guard", "stop_loss_pct"), "-15")
+        # 일반화: "... a.code=%s AND v.param_key='<key>'" 형태(macd_cross 의
+        # dart_fundamentals 컨텍스트 provider 등)를 흉내낸다. args[0] 이 algo code.
+        if "algorithm_param_value" in sql and args:
+            m = re.search(r"param_key='(\w+)'", sql)
+            if m:
+                return self.param_values.get((str(args[0]), m.group(1)), default)
         return default
 
     def query(self, sql: str, args=None):
