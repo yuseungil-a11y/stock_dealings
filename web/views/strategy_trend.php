@@ -292,8 +292,8 @@ $rescanLocked = ($cooldownLeft > 0 || $manualRecent !== null);
         <div class="tablewrap">
           <table class="tbl">
             <thead><tr>
-              <th>지역</th><th>테마</th><th>근거</th><th class="num">확신도</th>
-              <th>매칭 종목</th><th>매칭방식</th><th>매수신호</th>
+              <th class="shrink">지역</th><th>테마</th><th>근거</th><th class="num shrink">확신도</th>
+              <th>매칭 종목</th><th class="shrink">매칭방식</th><th>매수신호</th>
             </tr></thead>
             <tbody>
             <?php foreach ($rows as $c): ?>
@@ -304,14 +304,14 @@ $rescanLocked = ($cooldownLeft > 0 || $manualRecent !== null);
               $sigDay = $c['signal_time'] !== null ? substr((string)$c['signal_time'], 0, 10) : null;
               ?>
               <tr class="<?= $ms === 'unmatched' ? 'row-dry' : '' ?>">
-                <td><?= trend_region_badge((string)$c['region']) ?></td>
+                <td class="shrink"><?= trend_region_badge((string)$c['region']) ?></td>
                 <td class="wrap-td"><span class="stk-nm"><?= h($c['theme']) ?></span>
                   <?php if (($c['kiwoom_theme_nm'] ?? '') !== ''): ?>
                     <span class="sub">키움테마 <?= h($c['kiwoom_theme_nm']) ?>
                       <?= ($c['kiwoom_theme_cd'] ?? '') !== '' ? '(' . h($c['kiwoom_theme_cd']) . ')' : '' ?></span>
                   <?php endif; ?></td>
-                <td class="wrap-td"><?= ($c['rationale'] ?? '') !== '' ? h($c['rationale']) : '<span class="muted">-</span>' ?></td>
-                <td class="num"><?= $c['confidence'] === null ? '-' : h(nfmt($c['confidence']) . '%') ?></td>
+                <td class="clamp-2" title="<?= h((string)($c['rationale'] ?? '')) ?>"><?= ($c['rationale'] ?? '') !== '' ? h($c['rationale']) : '<span class="muted">-</span>' ?></td>
+                <td class="num shrink"><?= $c['confidence'] === null ? '-' : h(nfmt($c['confidence']) . '%') ?></td>
                 <td class="wrap-td">
                   <?php if (($c['stk_cd'] ?? '') !== ''): ?>
                     <span class="stk-nm"><?= h($c['stk_nm']) ?></span> <span class="stk-cd"><?= h($c['stk_cd']) ?></span>
@@ -320,7 +320,7 @@ $rescanLocked = ($cooldownLeft > 0 || $manualRecent !== null);
                     <span class="sub"><?= h(trend_unmatched_note($c)) ?></span>
                   <?php endif; ?>
                 </td>
-                <td><?= trend_match_badge($ms) ?></td>
+                <td class="shrink"><?= trend_match_badge($ms) ?></td>
                 <td class="wrap-td">
                   <?php if ($sid === null): ?>
                     <span class="muted">신호 없음</span>

@@ -152,12 +152,23 @@ a:hover { text-decoration: underline; }
 /* max-width 는 table-layout:auto(기본값)에서 강제되지 않아, 공백 없이 긴 문자열
    (알고리즘 설명의 "5/20, 20/60)" 류)이 셀 폭을 넘어 옆 칸(변경자/시각 등)과
    겹쳐 보이는 문제가 있었다. overflow-wrap 로 필요하면 글자 단위로 줄바꿈해 강제한다. */
-.wrap-td { white-space: normal; min-width: 180px; max-width: 460px; overflow-wrap: anywhere; word-break: break-word; line-height: 1.6; }
+/* white-space 는 !important 로 강제한다 - ".tbl th, .tbl td" 규칙이 클래스(.tbl)+요소(td)
+   복합 선택자라 상세도가 (0,1,1)로, 단일 클래스 선택자인 ".wrap-td"(0,1,0)보다 높아 그냥
+   두면 항상 기본값인 nowrap 이 이겨 줄바꿈이 전혀 되지 않는다(실측 확인, 2026-09-25). */
+.wrap-td { white-space: normal !important; min-width: 180px; max-width: 460px; overflow-wrap: anywhere; word-break: break-word; line-height: 1.6; }
 /* 좁아야 하는 칸(체크박스·숫자·짧은 라벨 등)을 width:1% 로 내용 길이만큼만 차지하게
    하고, 남는 폭은 전부 wrap-td 가 붙은 마지막 칸(설명 등)에 몰아준다 - table-layout
    을 fixed 로 바꾸지 않고 기본(auto) 레이아웃에서 "내용만큼만 차지" 를 강제하는
    표준 기법이다(브라우저들이 표 칸의 width:1% 를 "최소 내용 폭으로 축소" 로 해석함). */
 .shrink { width: 1%; white-space: nowrap; }
+/* AI 근거 문장처럼 아주 길어질 수 있는 칸은 가로 스크롤 대신 정확히 2줄까지만 보여주고
+   나머지는 "..." 로 자른다(전체 문장은 title 속성 툴팁으로 여전히 볼 수 있다). */
+/* white-space 도 같은 이유로 !important 필요 (위 .wrap-td 주석 참고). */
+.clamp-2 {
+  white-space: normal !important; overflow-wrap: anywhere; word-break: break-word;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+  overflow: hidden; text-overflow: ellipsis; line-height: 1.5;
+}
 .algo-meta { margin-top: 4px; font-size: 11px; }
 .mono { font-family: Consolas, "Courier New", monospace; font-size: 12px; }
 .stk-nm { font-weight: 600; }
