@@ -399,6 +399,38 @@ function research_disclaimer(): string
         . '투자 판단의 책임은 본인에게 있습니다.</strong></p>';
 }
 
+/**
+ * 매매와 무관함을 명시하는 공통 면책 안내(거래 종합분석 리포트, Claude, 참고용).
+ * research_disclaimer() 와 같은 어조 — 고정 문구만 포함하며 사용자 입력이 섞이지 않는다.
+ */
+function trade_report_disclaimer(): string
+{
+    return '<p class="note"><strong>참고용 리포트입니다.</strong> '
+        . '이 화면의 종합분석은 과거 거래 기록(당일매매일지 · 신호 · 주문 · 체결)을 Claude 가'
+        . ' <strong>사후에 해설</strong>한 것이며, 실시간 매매 신호 · 주문 · 알고리즘 파이프라인과'
+        . ' <strong>전혀 연결되어 있지 않습니다.</strong> 이 리포트는 매수 · 매도를 추천하지 않고'
+        . ' 향후 수익률을 예측하지도 않습니다. <strong>투자 판단의 책임은 본인에게 있습니다.</strong></p>';
+}
+
+/** 거래 종합분석 리포트 상태 배지 (정상 / 오류). */
+function tarep_status_badge(string $status): string
+{
+    return badge(
+        match ($status) { 'ok' => '정상', 'error' => '오류', default => ($status === '' ? '-' : $status) },
+        match ($status) { 'ok' => 'ok', 'error' => 'err', default => 'muted' },
+        $status === 'error' ? '리포트 생성이 실패한 기록입니다. 오류 메시지를 확인하세요.' : ''
+    );
+}
+
+/** 요청 상태 배지 (pending / processing). */
+function tarep_request_status_badge(string $status): string
+{
+    return badge(
+        match ($status) { 'pending' => '대기', 'processing' => '처리 중', default => $status },
+        match ($status) { 'pending' => 'muted', 'processing' => 'info', default => 'muted' }
+    );
+}
+
 /** 분석 리포트 상태 배지 (정상 / 오류). */
 function fin_status_badge(string $status): string
 {

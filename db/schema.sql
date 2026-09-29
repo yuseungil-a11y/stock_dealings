@@ -725,4 +725,53 @@ CREATE TABLE IF NOT EXISTS auto_trading_command (
   KEY idx_status (status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='웹(관리자 전용, REAL 재확인)의 자동거래 시작/중지 요청. 엔진이 폴링해 start_auto_trading()/stop_auto_trading() 을 그대로 호출한다';
 
+-- =====================================================================
+-- 13. 거래 종합분석 리포트 (Claude, 참고용, 2026-09-29)
+--   * 기간(기본 최근 7일, 사용자가 선택)의 daily_trade_summary(ka10170 당일매매일지)를
+--     v_trade_analysis(신호→주문→체결→Claude 판단)로 보강해 Claude 가 "왜 이겼는지/졌는지"를
+--     설명하는 참고용 리포트를 만든다. trend_scan_request 와 동일한 큐 패턴이다 —
+--     웹(stock_web)은 자격증명이 없어 pending 행만 INSERT 하고, 엔진이 폴링해 처리한다.
+--   * 매매 신호·주문과 전혀 관계없다(algorithm/algorithm_selection 에 등록하지 않음,
+--     signal_log/orders/risk_guard 어디에도 쓰지 않는다 - 읽기만 한다).
+-- =====================================================================
+CREATE TABLE IF NOT EXISTS trade_analysis_request (
+  id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  account_id    INT UNSIGNED NOT NULL,
+  period_start  DATE NOT NULL,
+  period_end    DATE NOT NULL,
+  requested_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  requested_by  VARCHAR(50) NOT NULL,
+  status        ENUM('pending','processing','done','error') NOT NULL DEFAULT 'pending',
+  report_id     BIGINT UNSIGNED NULL,
+  error_msg     VARCHAR(255) NULL,
+  processed_at  DATETIME NULL,
+  PRIMARY KEY (id),
+  KEY ix_tar_status (status, requested_at),
+  CONSTRAINT fk_tar_account FOREIGN KEY (account_id) REFERENCES account (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='웹의 거래 종합분석 요청(Claude, 참고용) - 서버가 폴링해 처리';
+
+CREATE TABLE IF NOT EXISTS trade_analysis_report (
+  id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  account_id    INT UNSIGNED NOT NULL,
+  period_start  DATE NOT NULL,
+  period_end    DATE NOT NULL,
+  requested_by  VARCHAR(50) NOT NULL,
+  model         VARCHAR(50) NOT NULL,
+  trade_count   INT NOT NULL DEFAULT 0,
+  win_count     INT NOT NULL DEFAULT 0,
+  loss_count    INT NOT NULL DEFAULT 0,
+  total_pl_amt  BIGINT NULL,
+  win_rate      DECIMAL(6,2) NULL,
+  summary       TEXT NULL COMMENT '한 줄~수줄 핵심 요약',
+  report_text   TEXT NULL COMMENT 'Claude 종합분석 전문(참고용)',
+  input_tokens  INT NULL,
+  output_tokens INT NULL,
+  status        ENUM('ok','error') NOT NULL DEFAULT 'ok',
+  error_msg     VARCHAR(255) NULL,
+  created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  KEY ix_tarep_period (account_id, period_start, period_end),
+  CONSTRAINT fk_tarep_account FOREIGN KEY (account_id) REFERENCES account (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='거래 종합분석 리포트(Claude, 참고용) - 매매 신호/주문과 무관, algorithm 미등록';
+
 SET FOREIGN_KEY_CHECKS = 1;

@@ -34,6 +34,8 @@ from ..services.mail_notify import load_mail_config
 from ..services.sync_account import AccountService
 from ..services.sync_market import MarketService
 from ..services.sync_orders import OrderSyncService
+from ..services.trade_analysis import REQUEST_POLL_SEC as TRADE_ANALYSIS_POLL_SEC
+from ..services.trade_analysis import TradeAnalysisWorker
 from ..services.trend_scan import REQUEST_POLL_SEC as TREND_REQUEST_POLL_SEC
 from ..services.trend_scan import TrendRequestWorker
 from ..services.trend_scan import link_signal as link_trend_signal
@@ -174,6 +176,9 @@ class Engine:
         # fundamentals_filter 의 온디맨드 재수집 요청 큐 처리기(종목 1개만, 신호 없음,
         # Claude 미호출). 자동거래·주문 게이트와 무관하게 동작한다.
         self.fetch_requests: FetchRequestWorker | None = None
+        # 웹의 "거래 종합분석 요청" 큐 처리기. **매매와 무관한 읽기 전용 참고 리포트**이며
+        # 주문 게이트·자동거래 상태를 읽지도 쓰지도 않는다(company_fundamentals 와 같은 원칙).
+        self.trade_analysis: TradeAnalysisWorker | None = None
         self.run_id: int | None = None
         self._master_synced_date = None
 
@@ -464,6 +469,13 @@ class Engine:
         # 기동 시 1회: 처리 중이던 채로 죽은 요청 정리(다음 요청이 영영 막히지 않게)
         self._safe("온디맨드 재수집 요청 정리", self.fetch_requests.cleanup_stale)
 
+        # 웹의 "거래 종합분석 요청" 처리기. company_fundamentals 와 같은 Anthropic 설정을
+        # 재사용하고, signal_log/orders/게이트 어디에도 쓰지 않는다(읽기만 한다).
+        self.trade_analysis = TradeAnalysisWorker(self.db, account_id=self.account_id,
+                                                  anthropic_cfg=self.cfg.anthropic)
+        # 기동 시 1회: 처리 중이던 채로 죽은 요청 정리(다음 요청이 영영 막히지 않게)
+        self._safe("거래 종합분석 요청 정리", self.trade_analysis.cleanup_stale)
+
         # 웹의 자동거래 시작/중지 명령 큐. 기동 시 1회: 처리 중이던 채로 죽은 명령 정리
         # (다음 명령이 영영 막히지 않게) - 다른 워커들의 stale 정리와 같은 지점.
         self._safe("자동거래 명령 정리", lambda: self.db.expire_stale_auto_trading_commands())
@@ -497,6 +509,7 @@ class Engine:
         last_trend_req = 0.0
         last_fundamentals = 0.0
         last_fetch_req = 0.0
+        last_trade_analysis_req = 0.0
         last_cmd_poll = 0.0
         while not self._stop.is_set():
             now_mono = time.monotonic()
@@ -543,6 +556,13 @@ class Engine:
                     and now_mono - last_fetch_req >= FETCH_REQUEST_POLL_SEC:
                 last_fetch_req = now_mono
                 self._safe("온디맨드 재무데이터 재수집", self.fetch_requests.poll_once)
+
+            # 웹의 "거래 종합분석 요청" — **자동거래·주문 게이트와 무관하게** 항상 확인한다
+            # (엔진이 돌고 있으면 된다). 읽기 전용 참고 리포트라 신호/주문은 만들어지지 않는다.
+            if self.trade_analysis is not None \
+                    and now_mono - last_trade_analysis_req >= TRADE_ANALYSIS_POLL_SEC:
+                last_trade_analysis_req = now_mono
+                self._safe("거래 종합분석 요청 처리", self.trade_analysis.poll_once)
 
             # 웹의 자동거래 시작/중지 명령 — **auto_trading_active 여부·장 상태와 무관하게**
             # 항상 폴링한다(이게 바로 그 상태를 바꾸는 명령이므로).

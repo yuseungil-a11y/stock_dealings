@@ -66,6 +66,13 @@ class FakeDb:
         self.fetch_requests: list[dict] = []
         # 웹의 자동거래 시작/중지 명령 큐
         self.auto_trading_commands: list[dict] = []
+        # 거래 종합분석 리포트 (Claude, 참고용) - daily_trade_summary/v_trade_analysis 대역
+        self.daily_trade_summaries: list[dict] = []
+        self.trade_analysis_v_rows: list[dict] = []
+        self.trade_analysis_requests: list[dict] = []
+        self.trade_analysis_reports: list[dict] = []
+        self._tarid = 0
+        self._tarepid = 0
         self._carid = 0
         self._taid = 0
         self._trid = 0
@@ -786,6 +793,116 @@ class FakeDb:
                           "handled_at": cutoff})
                 n += 1
         return n
+
+    # -- 거래 종합분석 리포트 (Claude, 참고용) --------------------------- #
+    def daily_trade_summary_range(self, account_id, start, end) -> list[dict]:
+        self._maybe_fail("daily_trade_summary_range")
+        return [dict(r) for r in self.daily_trade_summaries
+                if r["account_id"] == account_id and start <= r["base_dt"] <= end]
+
+    def trade_analysis_context(self, start, end, stk_cds) -> list[dict]:
+        self._maybe_fail("trade_analysis_context")
+        wanted = {str(c) for c in stk_cds if c}
+        out = []
+        for r in self.trade_analysis_v_rows:
+            if str(r.get("stk_cd")) not in wanted:
+                continue
+            when = r.get("order_time") or r.get("signal_time")
+            if when is None:
+                continue
+            d = when.date() if hasattr(when, "date") else when
+            if start <= d <= end:
+                out.append(dict(r))
+        return out
+
+    def add_trade_analysis_request(self, account_id=1, period_start=None, period_end=None,
+                                   requested_by="admin", requested_at=None) -> dict:
+        """테스트 헬퍼 — 웹이 INSERT 하는 pending 행 흉내."""
+        self._tarid += 1
+        row = {"id": self._tarid, "account_id": account_id,
+               "period_start": period_start or _dt.date(2026, 9, 22),
+               "period_end": period_end or _dt.date(2026, 9, 29),
+               "requested_by": requested_by, "status": "pending",
+               "requested_at": requested_at or _dt.datetime(2026, 9, 29, 9, 0),
+               "report_id": None, "error_msg": None, "processed_at": None}
+        self.trade_analysis_requests.append(row)
+        return row
+
+    def pending_trade_analysis_request(self):
+        self._maybe_fail("pending_trade_analysis_request")
+        rows = [r for r in self.trade_analysis_requests if r["status"] == "pending"]
+        rows.sort(key=lambda r: (r["requested_at"], r["id"]))
+        return dict(rows[0]) if rows else None
+
+    def count_processing_trade_analysis_requests(self) -> int:
+        self._maybe_fail("count_processing_trade_analysis_requests")
+        return sum(1 for r in self.trade_analysis_requests if r["status"] == "processing")
+
+    def claim_trade_analysis_request(self, max_tries: int = 5):
+        """실제 Database 와 같은 '영향 행 수로 승자 판정' 방식."""
+        self._maybe_fail("claim_trade_analysis_request")
+        for _ in range(max(1, int(max_tries))):
+            row = self.pending_trade_analysis_request()
+            if row is None:
+                return None
+            won = 0
+            for r in self.trade_analysis_requests:
+                if r["id"] == row["id"] and r["status"] == "pending":
+                    r["status"] = "processing"
+                    won = 1
+            if won:
+                out = dict(row)
+                out["status"] = "processing"
+                return out
+        return None
+
+    def finish_trade_analysis_request(self, request_id, *, status, report_id=None,
+                                      error_msg=None) -> int:
+        self._maybe_fail("finish_trade_analysis_request")
+        from stock_svr.db import _trim_masked
+
+        for r in self.trade_analysis_requests:
+            if r["id"] == request_id:
+                r.update({"status": status, "report_id": report_id,
+                          "error_msg": _trim_masked(error_msg, 255),
+                          "processed_at": self.now_for_stale or _dt.datetime(2026, 9, 29, 9, 5)})
+                return 1
+        return 0
+
+    def expire_stale_trade_analysis_requests(self, minutes=10,
+                                             reason="서버 재시작으로 중단") -> int:
+        self._maybe_fail("expire_stale_trade_analysis_requests")
+        cutoff = (self.now_for_stale or _dt.datetime(2026, 9, 29, 9, 0)) \
+            - _dt.timedelta(minutes=max(1, int(minutes)))
+        n = 0
+        for r in self.trade_analysis_requests:
+            if r["status"] == "processing" and r["requested_at"] < cutoff:
+                r.update({"status": "error", "error_msg": reason, "processed_at": cutoff})
+                n += 1
+        return n
+
+    def insert_trade_analysis_report(self, account_id, period_start, period_end, *,
+                                     requested_by, model, trade_count=0, win_count=0,
+                                     loss_count=0, total_pl_amt=None, win_rate=None,
+                                     summary=None, report_text=None, input_tokens=None,
+                                     output_tokens=None, status="ok", error_msg=None) -> int:
+        self._maybe_fail("insert_trade_analysis_report")
+        from stock_svr.db import TRADE_ANALYSIS_TEXT_MAX, _trim_masked
+
+        self._tarepid += 1
+        row = {"id": self._tarepid, "account_id": account_id, "period_start": period_start,
+               "period_end": period_end, "requested_by": _trim_masked(requested_by, 50) or "-",
+               "model": str(model)[:50], "trade_count": int(trade_count),
+               "win_count": int(win_count), "loss_count": int(loss_count),
+               "total_pl_amt": None if total_pl_amt is None else int(total_pl_amt),
+               "win_rate": None if win_rate is None else float(win_rate),
+               "summary": _trim_masked(summary, 500),
+               "report_text": _trim_masked(report_text, TRADE_ANALYSIS_TEXT_MAX),
+               "input_tokens": input_tokens, "output_tokens": output_tokens,
+               "status": status if status in ("ok", "error") else "error",
+               "error_msg": _trim_masked(error_msg, 255)}
+        self.trade_analysis_reports.append(row)
+        return self._tarepid
 
     # -- 기타 ---------------------------------------------------------- #
     def scalar(self, sql: str, args=None, default=None):

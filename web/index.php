@@ -113,6 +113,44 @@ if ($method === 'POST') {
         }
         header('Location: ' . url_page('strategy.trend', ['rq' => $ok ? 'ok' : 'err']), true, 303);
         exit;
+    } elseif ($action === 'trade_report_request') {
+        /* 거래 종합분석 리포트(Claude, 참고용) 요청만 기록한다(관리자 전용).
+         * trend_rescan 과 동일한 패턴 — trade_analysis_request 에 행 하나를 넣는 것이 전부이며,
+         * 주문 · 설정 · 알고리즘 파라미터 등 다른 어떤 것도 바꾸지 않는다.
+         * 실제 분석(Claude 호출)은 서버 모듈이 요청을 확인한 뒤 수행한다. */
+        if ($user === null || !auth_is_admin()) {
+            http_response_code(403);
+            render_standalone(['title' => '접근 권한 없음',
+                'message' => '종합분석 요청은 관리자만 할 수 있습니다.']);
+            exit;
+        }
+        $reqAccounts = repo_accounts();
+        $reqAccount = repo_resolve_account($reqAccounts);
+        $reqAccountId = $reqAccount !== null ? (int)$reqAccount['id'] : 0;
+        $periodStart = clean_date($_POST['period_start'] ?? null);
+        $periodEnd = clean_date($_POST['period_end'] ?? null);
+        if ($reqAccountId <= 0 || $periodStart === null || $periodEnd === null || $periodStart > $periodEnd) {
+            header('Location: ' . url_page('trade.report', ['rq' => 'err']), true, 303);
+            exit;
+        }
+        $rangeDays = (int)((strtotime($periodEnd) - strtotime($periodStart)) / 86400);
+        if ($rangeDays > TAREP_MAX_RANGE_DAYS) {
+            header('Location: ' . url_page('trade.report', ['rq' => 'range']), true, 303);
+            exit;
+        }
+        $lastReq = (int)($_SESSION['tarep_req_at'] ?? 0);
+        $busy = ($lastReq > 0 && (time() - $lastReq) < TAREP_REQUEST_COOLDOWN_SEC)
+            || repo_tarep_pending($reqAccountId) !== null;
+        if ($busy) {
+            header('Location: ' . url_page('trade.report', ['rq' => 'busy']), true, 303);
+            exit;
+        }
+        $ok = repo_tarep_request_insert($reqAccountId, $periodStart, $periodEnd, $user['username']);
+        if ($ok) {
+            $_SESSION['tarep_req_at'] = time();
+        }
+        header('Location: ' . url_page('trade.report', ['rq' => $ok ? 'ok' : 'err']), true, 303);
+        exit;
     } elseif ($action === 'algo_selection_save') {
         /* 알고리즘 사용여부 · 우선순위 저장(관리자 전용).
          * risk_guard(is_locked=1) 는 폼 값과 무관하게 repo_update_algorithm_selection() 안에서

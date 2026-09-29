@@ -17,6 +17,9 @@ function app_routes(): array
         'trade.ledger' => ['view' => 'trade_ledger', 'title' => '거래내역', 'group' => 'trade', 'account' => true],
         'trade.daily' => ['view' => 'trade_daily', 'title' => '매매일지', 'group' => 'trade', 'account' => true],
         'trade.analysis' => ['view' => 'trade_analysis', 'title' => '거래 분석', 'group' => 'trade'],
+        /* Claude 종합분석 리포트(참고용) — 기간(기본 최근 7일) 매매 기록의 손익 원인을 설명한다.
+         * 조회는 누구나, "종합분석 요청"(admin) 만 트리거 가능(트렌드 스캔과 같은 분리). */
+        'trade.report' => ['view' => 'trade_report', 'title' => '종합분석 리포트', 'group' => 'trade', 'account' => true],
         'strategy.algorithms' => ['view' => 'strategy_algorithms', 'title' => '알고리즘 현황', 'group' => 'strategy'],
         'strategy.params' => ['view' => 'strategy_params', 'title' => '파라미터 · 변경이력', 'group' => 'strategy'],
         'strategy.signals' => ['view' => 'strategy_signals', 'title' => '신호 기록', 'group' => 'strategy'],
@@ -53,6 +56,7 @@ function app_menu(): array
             'trade.ledger' => '거래내역',
             'trade.daily' => '매매일지',
             'trade.analysis' => '거래 분석',
+            'trade.report' => '종합분석 리포트',
         ]],
         'strategy' => ['label' => '전략', 'items' => [
             'strategy.algorithms' => '알고리즘 현황',

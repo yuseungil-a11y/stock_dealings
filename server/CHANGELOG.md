@@ -18,6 +18,11 @@
 
 
 
+
+## [1.17.0] - 2026-09-29
+### 변경
+- 거래 종합분석 리포트 기능 신규 추가 - 기간 선택(기본 최근 7일) 매매 기록을 daily_trade_summary/v_trade_analysis 기반으로 Claude가 분석해 거래별 손익 원인과 패턴을 참고용 리포트로 생성. 웹의 요청 → 서버 폴링 처리(trend_scan_request와 동일한 패턴) → 리포트 저장/조회. algorithm 미등록, 매매 파이프라인과 완전 분리.
+
 ## [1.16.0] - 2026-09-25
 ### 변경
 - claude_advisor에 알고리즘별 검토 여부 파라미터(review_momentum_screen/review_macd_cross/review_volatility_breakout, 기존 review_averaging_down과 통합) 추가 - 어떤 진입 알고리즘의 매수 신호를 Claude가 검토할지 한 곳(claude_advisor)에서 일괄 제어. macd_cross 자체의 개별 on/off 스위치(claude_review_fundamentals, v1.15.0에서 추가)는 중복이라 제거하고 재무데이터 첨부는 검토 대상이면 항상 수행(신선도 검사만 유지).

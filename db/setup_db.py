@@ -136,6 +136,8 @@ def main() -> int:
             cur.execute(f"GRANT SELECT ON `{DBNAME}`.`{t}` TO 'stock_web'@'{host}'")
         cur.execute(f"GRANT INSERT ON `{DBNAME}`.`app_login_log` TO 'stock_web'@'{host}'")
         cur.execute(f"GRANT INSERT ON `{DBNAME}`.`trend_scan_request` TO 'stock_web'@'{host}'")
+        # 웹의 거래 종합분석 요청(Claude, 참고용) — trend_scan_request 와 동일한 큐 패턴
+        cur.execute(f"GRANT INSERT ON `{DBNAME}`.`trade_analysis_request` TO 'stock_web'@'{host}'")
         cur.execute(f"GRANT UPDATE (failed_count, locked_until, last_login_at, password_hash) "
                     f"ON `{DBNAME}`.`app_user` TO 'stock_web'@'{host}'")
         # 웹의 자동거래 시작/중지 (관리자 전용 + REAL 재확인) — 엔진이 폴링해 처리

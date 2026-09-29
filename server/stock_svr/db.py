@@ -63,6 +63,9 @@ TREND_TEXT_MAX = 8000
 # company_analysis_report.report_text(TEXT) 저장 상한
 COMPANY_REPORT_TEXT_MAX = 16000
 
+# trade_analysis_report.report_text(TEXT) 저장 상한
+TRADE_ANALYSIS_TEXT_MAX = 16000
+
 
 def _trim_masked(text: str | None, limit: int) -> str | None:
     """DB 저장 전 마스킹 + 길이 제한. 빈 값은 NULL."""
@@ -1151,6 +1154,111 @@ class Database:
             "result_message=%s, handled_at=%s "
             "WHERE status='processing' AND requested_at < (NOW() - INTERVAL %s MINUTE)",
             ("서버 재시작으로 중단", now_kst(), max(1, int(max_minutes))))
+
+    # ================================================================== #
+    # 거래 종합분석 리포트 (Claude, 참고용, 2026-09-29)
+    #
+    # 매매 신호·주문과 전혀 관계없다(algorithm/algorithm_selection 에 등록하지 않는다).
+    # 웹은 Anthropic 자격증명이 없어 `trade_analysis_request` 에 pending 행만 INSERT 하고,
+    # 엔진이 폴링해 원자적으로 claim 한 뒤 실제 분석을 수행한다
+    # (`trend_scan_request` 와 동일한 claim/finish/stale 정리 패턴).
+    # ================================================================== #
+    def daily_trade_summary_range(self, account_id: int, start: _dt.date,
+                                  end: _dt.date) -> list[dict]:
+        """기간 내 종목별 일 손익(ka10170 당일매매일지). "왜 이겼는지/졌는지" 분석의 1차 근거."""
+        return self.query(
+            "SELECT * FROM daily_trade_summary WHERE account_id=%s AND base_dt BETWEEN %s AND %s "
+            "ORDER BY base_dt, stk_cd", (int(account_id), start, end))
+
+    def trade_analysis_context(self, start: _dt.date, end: _dt.date,
+                               stk_cds: Sequence[str]) -> list[dict]:
+        """`v_trade_analysis`(신호→주문→체결→Claude 판단)를 종목+기간으로 조회한다.
+
+        `daily_trade_summary` 행(종목, 날짜)의 정성적 맥락(어느 알고리즘의 신호였는지,
+        슬리피지, Claude 사전 의견)을 보강할 때 쓴다.
+        """
+        codes = [str(c) for c in stk_cds if c]
+        if not codes:
+            return []
+        holes = ",".join(["%s"] * len(codes))
+        return self.query(
+            f"SELECT * FROM v_trade_analysis WHERE stk_cd IN ({holes}) "
+            "AND DATE(COALESCE(order_time, signal_time)) BETWEEN %s AND %s "
+            "ORDER BY COALESCE(order_time, signal_time)",
+            tuple(codes) + (start, end))
+
+    # -- 요청 큐 (웹이 INSERT, 서버만 갱신) ------------------------------ #
+    def pending_trade_analysis_request(self) -> dict | None:
+        """가장 오래된 pending 요청 1건(claim 전 조회)."""
+        return self.query_one(
+            "SELECT * FROM trade_analysis_request WHERE status='pending' "
+            "ORDER BY requested_at, id LIMIT 1")
+
+    def count_processing_trade_analysis_requests(self) -> int:
+        return int(self.scalar(
+            "SELECT COUNT(*) AS n FROM trade_analysis_request WHERE status='processing'",
+            default=0) or 0)
+
+    def claim_trade_analysis_request(self, max_tries: int = 5) -> dict | None:
+        """pending 요청 1건을 **원자적으로** claim 한다. 못 잡으면 None.
+
+        `UPDATE ... WHERE id=%s AND status='pending'` 의 **영향 행 수**로 승자를 가린다
+        (0이면 남이 가져간 것 → 다음 건으로) - trend_scan_request 와 동일한 방식.
+        """
+        for _ in range(max(1, int(max_tries))):
+            row = self.pending_trade_analysis_request()
+            if row is None:
+                return None
+            won = self.execute(
+                "UPDATE trade_analysis_request SET status='processing' "
+                "WHERE id=%s AND status='pending'", (int(row["id"]),))
+            if won:
+                out = dict(row)
+                out["status"] = "processing"
+                return out
+        return None
+
+    def finish_trade_analysis_request(self, request_id: int, *, status: str,
+                                      report_id: int | None = None,
+                                      error_msg: str | None = None) -> int:
+        return self.execute(
+            "UPDATE trade_analysis_request SET status=%s, report_id=%s, error_msg=%s, "
+            "processed_at=%s WHERE id=%s",
+            (status if status in ("pending", "processing", "done", "error") else "error",
+             None if report_id is None else int(report_id), _trim_masked(error_msg, 255),
+             now_kst(), int(request_id)))
+
+    def expire_stale_trade_analysis_requests(self, minutes: int = 10,
+                                             reason: str = "서버 재시작으로 중단") -> int:
+        """`processing` 인 채 오래 멈춰 있는 요청을 `error` 로 정리한다(서버가 처리 중 죽은 경우)."""
+        return self.execute(
+            "UPDATE trade_analysis_request SET status='error', error_msg=%s, processed_at=%s "
+            "WHERE status='processing' AND requested_at < (NOW() - INTERVAL %s MINUTE)",
+            (_trim_masked(reason, 255), now_kst(), max(1, int(minutes))))
+
+    # -- 리포트 저장 (매 요청마다 새 행 - append) ------------------------- #
+    def insert_trade_analysis_report(self, account_id: int, period_start: _dt.date,
+                                     period_end: _dt.date, *, requested_by: str, model: str,
+                                     trade_count: int = 0, win_count: int = 0,
+                                     loss_count: int = 0, total_pl_amt: int | None = None,
+                                     win_rate: float | None = None, summary: str | None = None,
+                                     report_text: str | None = None,
+                                     input_tokens: int | None = None,
+                                     output_tokens: int | None = None,
+                                     status: str = "ok", error_msg: str | None = None) -> int:
+        return self.insert(
+            "INSERT INTO trade_analysis_report (account_id, period_start, period_end, "
+            "requested_by, model, trade_count, win_count, loss_count, total_pl_amt, win_rate, "
+            "summary, report_text, input_tokens, output_tokens, status, error_msg) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (int(account_id), period_start, period_end, _trim_masked(requested_by, 50) or "-",
+             str(model)[:50], int(trade_count), int(win_count), int(loss_count),
+             None if total_pl_amt is None else int(total_pl_amt),
+             None if win_rate is None else float(win_rate),
+             _trim_masked(summary, 500),
+             _trim_masked(report_text, TRADE_ANALYSIS_TEXT_MAX),
+             input_tokens, output_tokens,
+             status if status in ("ok", "error") else "error", _trim_masked(error_msg, 255)))
 
     # ================================================================== #
     # 주문 / 체결 / 거래내역

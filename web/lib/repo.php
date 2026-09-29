@@ -1154,6 +1154,97 @@ function repo_trend_today(): ?array
     ];
 }
 
+/* ------------------------------------- 거래 종합분석 리포트 (Claude, 참고용) */
+
+/** 리포트 이력 목록의 한 페이지 크기. */
+const TAREP_PAGE_SIZE = 20;
+/** 같은 브라우저 세션에서 종합분석 요청을 다시 받기까지의 최소 간격(초). */
+const TAREP_REQUEST_COOLDOWN_SEC = 120;
+/** 기간 선택 상한(일) - 과도하게 넓은 기간으로 프롬프트·비용이 폭증하지 않게. */
+const TAREP_MAX_RANGE_DAYS = 90;
+/** 기본 조회 기간(최근 N일). */
+const TAREP_DEFAULT_DAYS = 7;
+
+/** 요청 큐 표를 읽을 수 있는지(있으면 pending/processing 상태를 직접 보여줄 수 있다). */
+function repo_tarep_request_available(): bool
+{
+    return repo_can_read('trade_analysis_request');
+}
+
+/** 리포트 표를 읽을 수 있는지. */
+function repo_tarep_report_available(): bool
+{
+    return repo_can_read('trade_analysis_report');
+}
+
+/** 이 계좌의 가장 최근 pending/processing 요청(있으면 "처리 중" 배너로 보여준다). */
+function repo_tarep_pending(int $accountId): ?array
+{
+    if (!repo_tarep_request_available()) {
+        return null;
+    }
+    try {
+        return db_row(
+            'SELECT id, period_start, period_end, requested_by, status, requested_at
+               FROM trade_analysis_request
+              WHERE account_id = ? AND status IN (\'pending\', \'processing\')
+              ORDER BY requested_at DESC, id DESC LIMIT 1',
+            [$accountId]
+        );
+    } catch (Throwable $e) {
+        return null;
+    }
+}
+
+/**
+ * 종합분석 "요청"만 기록한다. 웹이 하는 유일한 업무성 쓰기이며
+ * 주문 · 설정 · 알고리즘 파라미터 등 다른 어떤 것도 바꾸지 않는다(실제 분석은 서버 모듈이 수행).
+ * stock_web 계정은 이 표에 INSERT 권한만 있다(trend_scan_request 와 동일한 최소권한 설계).
+ */
+function repo_tarep_request_insert(int $accountId, string $periodStart, string $periodEnd, string $username): bool
+{
+    try {
+        db_exec(
+            'INSERT INTO trade_analysis_request (account_id, period_start, period_end, requested_by)
+             VALUES (?, ?, ?, ?)',
+            [$accountId, $periodStart, $periodEnd, mb_substr($username, 0, 50)]
+        );
+        return true;
+    } catch (Throwable $e) {
+        @error_log('[stock-web] tarep_request_insert_failed :: ' . $e->getMessage());
+        return false;
+    }
+}
+
+/** 이 계좌의 리포트 이력(최신순). 기간 필터는 리포트의 조회 기간과 겹치는 것만 남긴다. */
+function repo_tarep_reports(int $accountId, ?string $from, ?string $to, int $page): array
+{
+    if (!repo_tarep_report_available()) {
+        return ['rows' => [], 'total' => 0, 'page' => 1, 'pages' => 1, 'size' => TAREP_PAGE_SIZE];
+    }
+    $w = '';
+    $p = [$accountId];
+    if ($from !== null) {
+        $w .= ' AND period_end >= ?';
+        $p[] = $from;
+    }
+    if ($to !== null) {
+        $w .= ' AND period_start <= ?';
+        $p[] = $to;
+    }
+    $base = ' FROM trade_analysis_report WHERE account_id = ?' . $w;
+    return repo_paginate(
+        'SELECT id, account_id, period_start, period_end, requested_by, model, trade_count,'
+        . ' win_count, loss_count, total_pl_amt, win_rate, summary, report_text, input_tokens,'
+        . ' output_tokens, status, error_msg, created_at' . $base
+        . ' ORDER BY created_at DESC, id DESC',
+        'SELECT COUNT(*)' . $base,
+        $p,
+        $page,
+        TAREP_PAGE_SIZE
+    );
+}
+
 /* --------------------------------------------------------- 거래 분석 (읽기 전용) */
 
 /**
@@ -1166,7 +1257,7 @@ function repo_can_read(string $object): bool
     if (!in_array($object, ['v_trade_analysis', 'order_event', 'event_archive', 'api_error_log',
         'trend_scan_run', 'trend_scan_candidate', 'trend_scan_attempt',
         'company_corp_code', 'company_financial', 'company_valuation_daily', 'company_analysis_report',
-        'auto_trading_command'], true)) {
+        'auto_trading_command', 'trade_analysis_request', 'trade_analysis_report'], true)) {
         return false;
     }
     if (isset($cache[$object])) {
