@@ -8,9 +8,12 @@ websockets==17.1
 anthropic==1.7.0
 # 자동거래 시작 확인창의 아이디/비밀번호 재확인(app_user, 웹과 공유) - bcrypt 해시 검증
 bcrypt==5.0.0
+# 로그인 게이트 통과 후 창을 시스템 트레이로 최소화(공용 서버 화면 보호) - 트레이 아이콘/메뉴
+pystray==0.19.5
 
 # 테스트
 pytest==9.1.1
 
-# 아이콘 생성(tools/make_icon.py)·아이콘 테스트 전용 (런타임 불필요)
+# 아이콘 생성(tools/make_icon.py)·아이콘 테스트, 그리고 pystray 트레이 아이콘 이미지(PIL.Image)
+# 로딩에 런타임에도 필요하다.
 Pillow==12.3.0

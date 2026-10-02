@@ -20,6 +20,13 @@ hidden = ['pymysql', 'httpx', 'websockets', 'tkinter', 'tkinter.ttk',
 hidden += [m for m in collect_submodules('anthropic') if not m.startswith(_SKIP_ANTHROPIC)]
 for pkg in ('pydantic', 'pydantic_core', 'anyio', 'httpx2', 'httpcore2'):
     hidden += collect_submodules(pkg)
+# 트레이 최소화(로그인 게이트 통과 후 창 숨김) - 백엔드가 플랫폼별로 동적 선택(from . import
+# _win32 등)되므로 win32 전용 서브모듈(pystray._win32, pystray._util.win32)이 정적 분석으로
+# 누락되지 않도록 전체 서브모듈을 명시적으로 포함한다.
+hidden += collect_submodules('pystray')
+# pystray 트레이 아이콘 이미지 로딩에 PIL.Image 가 실제로 필요하다(과거엔 아이콘 생성
+# 도구 전용이라 excludes 에 있었지만, 이제 런타임 의존성이라 아래 excludes 에서 제외한다).
+hidden += ['PIL', 'PIL.Image']
 
 datas = collect_data_files('certifi')
 # 서버 프로그램 아이콘(창/작업표시줄용) — tools/make_icon.py 로 생성
@@ -36,7 +43,9 @@ a = Analysis(
     excludes=[
         'pytest', '_pytest', 'unittest', 'pydoc', 'stock_svr.kiwoom.fake',
         # anthropic 의 MCP/에이전트 도구 계열 선택 의존성 (이 서버는 쓰지 않는다)
-        'mcp', 'uvicorn', 'starlette', 'numpy', 'PIL', 'jsonschema',
+        # PIL 은 과거엔 아이콘 생성 도구 전용이라 제외했지만, 이제 pystray 트레이 아이콘
+        # 이미지 로딩에 런타임 의존성이라 여기서 제외하지 않는다(위 hiddenimports 참고).
+        'mcp', 'uvicorn', 'starlette', 'numpy', 'jsonschema',
         'jsonschema_specifications', 'referencing', 'rpds', 'yaml',
         'pydantic_settings', 'python_multipart', 'httpx_sse', 'requests',
         'cryptography', 'setuptools', 'click', 'rich', 'markdown_it', 'mdurl',

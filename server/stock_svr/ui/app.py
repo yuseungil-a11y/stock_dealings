@@ -4,6 +4,7 @@ from __future__ import annotations
 import datetime as _dt
 import logging
 import sys
+import threading
 import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, ttk
@@ -16,6 +17,7 @@ from .algo_tab import AlgoTab
 from .auto_trade_dialog import AutoTradeStartDialog, collect_start_info
 from .dashboard_tab import DashboardTab
 from .log_tab import LogTab
+from .login_dialog import LoginDialog
 from .settings_tab import SettingsTab
 from .widgets import StatusLight, Tooltip
 
@@ -64,9 +66,16 @@ def smoke_auto_approval(gate_open: bool) -> tuple[bool, str]:
 
 
 class App(tk.Tk):
+    def report_callback_exception(self, exc, val, tb) -> None:
+        """Tk 콜백(after/bind 등) 안에서 난 예외는 기본적으로 stderr 로만 나가는데, 이 앱은
+        콘솔 없는 windowed 빌드라 그대로 사라진다 - 로그 파일에 남도록 오버라이드한다."""
+        log.exception("Tkinter 콜백 오류", exc_info=(exc, val, tb))
+
     def __init__(self, cfg: AppConfig, db: Database, autostart: bool = False,
                  smoke_seconds: float | None = None):
         super().__init__()
+        # 공용 서버 화면 보호: 로그인 통과 전까지는 창을 아예 보이지 않는다(Part 1).
+        self.withdraw()
         self.cfg = cfg
         self.db = db
         self.engine = Engine(cfg, db)
@@ -74,6 +83,12 @@ class App(tk.Tk):
         self._closing = False
         self._dash_tick = 0
         self._auto_confirm = False   # 스모크에서만 True (확인창 자동 승인)
+        # 트레이 최소화(Part 2) - pystray.Icon 인스턴스(없으면 None), 실행 스레드 시작 여부
+        self._tray_icon = None
+        self._tray_thread_started = False
+        # 트레이 '열기' 클릭으로 뜬 로그인 다이얼로그를 wait_window() 로 기다리는 중인지
+        # - 재진입(연타) 시 두 번째 LoginDialog 가 중복 생성되는 것을 막는다.
+        self._login_dialog_open = False
 
         self.title(f"stock_svr v{__version__} — 키움 자동매매 서버")
         apply_window_icon(self)
@@ -94,11 +109,15 @@ class App(tk.Tk):
         if autostart:
             self.after(600, self.start_engine)
         if smoke_seconds:
-            # 스모크: 확인창을 자동 승인하고 자동거래 시작 → 중지 토글을 검증한다.
+            # 스모크: 무인 실행이라 로그인 게이트를 건너뛰고 바로 보여준다. 확인창은
+            # 자동 승인하고 자동거래 시작 → 중지 토글을 검증한다.
             self._auto_confirm = True
             self.after(int(smoke_seconds * 1000 * 0.35), self._smoke_start_auto)
             self.after(int(smoke_seconds * 1000 * 0.70), self._smoke_stop_auto)
             self.after(int(smoke_seconds * 1000), self._smoke_exit)
+            self.after(50, self.deiconify)
+        else:
+            self.after(50, self._require_login_or_exit)
 
     # ================================================================== #
     def _build_statusbar(self) -> None:
@@ -140,6 +159,15 @@ class App(tk.Tk):
         self.cancel_btn.pack(side="left", padx=(8, 0))
         Tooltip(self.cancel_btn, "미체결 주문을 조회해 전량 취소합니다(주문 게이트·확인 필요).")
 
+        self.tray_btn = tk.Button(
+            bar, text="🔽 트레이로 이동", command=self.minimize_to_tray,
+            font=("맑은 고딕", 10), bg="#8d6e63", fg="white",
+            activebackground="#6d4c41", activeforeground="white", cursor="hand2")
+        self.tray_btn.pack(side="left", padx=(8, 0))
+        Tooltip(self.tray_btn,
+                "창을 시스템 트레이로 숨깁니다. 엔진·자동거래는 계속 동작하며, "
+                "트레이 아이콘에서 창을 다시 열려면 로그인이 필요합니다.")
+
         self.auto_state_var = tk.StringVar(value="중지됨")
         self.auto_state_label = tk.Label(bar, textvariable=self.auto_state_var,
                                          font=("맑은 고딕", 11, "bold"), fg="#666666")
@@ -168,6 +196,37 @@ class App(tk.Tk):
         self.logs.load_from_db()
         self.dashboard.refresh()
         self._refresh_status()
+
+    # ================================================================== #
+    # 화면 잠금(Part 1) — 공용 서버라 시작 시 로그인 없이는 화면을 보여주지 않는다.
+    # ================================================================== #
+    def _require_login_or_exit(self) -> None:
+        """시작 시 로그인 게이트. 성공하면 창을 보여주고, 실패/취소면 조용히 종료한다."""
+        log.info("시작 로그인 게이트: _require_login_or_exit 진입")
+        # master(self) 는 이 시점까지 self.withdraw() 이후 한 번도 화면에 매핑된 적이 없다
+        # - transient(master) 를 걸면 Windows 에서 이 다이얼로그가 영원히 viewable 이 되지
+        # 않는 문제가 있어(login_dialog.py 의 use_transient 설명 참조) False 로 호출한다.
+        dlg = LoginDialog(self, self.db, use_transient=False)
+        log.info("시작 로그인 게이트: LoginDialog 생성됨, wait_window 진입")
+        self.wait_window(dlg)
+        log.info("시작 로그인 게이트: wait_window 종료 (result=%s)", dlg.result)
+        if dlg.result:
+            self.deiconify()
+        else:
+            self._shutdown_silent_and_exit()
+
+    def _shutdown_silent_and_exit(self) -> None:
+        """로그인 실패/취소 시 화면을 한 번도 보여주지 않고 종료한다.
+
+        이 시점에는 아직 `start_engine()`이 호출되지 않았다 - `Engine(cfg, db)`(생성자)는
+        단순 객체 구성일 뿐 스레드/연결을 시작하지 않으므로, 엔진 정지 처리 없이 바로
+        창을 파괴하면 된다(정지할 대상 자체가 없다).
+        """
+        self._closing = True
+        try:
+            self.destroy()
+        except Exception:  # noqa: BLE001
+            pass
 
     # ================================================================== #
     def account_id(self) -> int | None:
@@ -328,6 +387,113 @@ class App(tk.Tk):
             + ("\n" + "\n".join(result["errors"][:5]) if result["errors"] else ""),
             parent=self)
         self._refresh_status()
+
+    # ================================================================== #
+    # 트레이 최소화(Part 2) — 창만 숨긴다. 엔진/자동거래 상태는 절대 건드리지 않는다.
+    # ================================================================== #
+    def minimize_to_tray(self) -> None:
+        """창을 시스템 트레이로 숨긴다. 엔진·자동거래는 계속 그대로 동작한다."""
+        log.info("트레이로 최소화 요청")
+        self.withdraw()
+        if self._tray_icon is None:
+            import pystray
+            from PIL import Image
+
+            ico = _asset_path("stock_svr.ico")
+            png = _asset_path("stock_svr.png")
+            image_path = ico if ico.exists() else png
+            try:
+                image = Image.open(image_path)
+            except Exception:  # noqa: BLE001
+                log.exception("트레이 아이콘 이미지 로드 실패 - 트레이 최소화를 취소합니다")
+                self.deiconify()
+                return
+            # pystray 콜백은 트레이 전용 스레드에서 실행된다 - Tk/DB/engine 은 항상
+            # self.after(0, ...) 로 Tk 스레드로 넘긴 뒤에만 건드린다.
+            try:
+                menu = pystray.Menu(
+                    pystray.MenuItem("열기", lambda icon, item: self.after(
+                        0, self._tray_restore_clicked), default=True),
+                    pystray.MenuItem("종료", lambda icon, item: self.after(
+                        0, self._tray_quit_clicked)))
+                self._tray_icon = pystray.Icon(
+                    "stock_svr", image, f"stock_svr v{__version__} — 키움 자동매매 서버", menu)
+            except Exception:  # noqa: BLE001
+                log.exception("트레이 아이콘 생성 실패 - 트레이 최소화를 취소합니다")
+                self._tray_icon = None
+                self.deiconify()
+                return
+        if not self._tray_thread_started:
+            def _tray_setup(icon: "pystray.Icon") -> None:
+                """pystray 백엔드(win32) 초기화가 끝난 뒤 별도 스레드에서 호출된다.
+
+                커스텀 setup 콜백을 넘기면 pystray 기본 동작(visible=True 자동 설정)이
+                생략되므로, 여기서 직접 visible=True 를 설정하지 않으면 아이콘이
+                생성만 되고 화면에는 끝내 표시되지 않는다(pystray 0.19.5
+                Icon.run/run_detached docstring: "If you specify a custom setup
+                function, you must explicitly set this attribute.").
+                """
+                try:
+                    icon.visible = True
+                    log.info("트레이 아이콘 준비 완료")
+                except Exception:  # noqa: BLE001
+                    log.exception("트레이 아이콘 표시(visible=True) 실패")
+
+            def _tray_run() -> None:
+                """pystray Icon.run() 은 blocking 이며, 내부에서 예외가 나면 기본
+                threading.excepthook 이 sys.stderr 로 출력한다. 이 앱은 콘솔이 없는
+                windowed PyInstaller 빌드라 stderr 가 보이지 않아 예외가 완전히
+                사라진다 - 반드시 여기서 직접 잡아 로그 파일에 남긴다."""
+                try:
+                    self._tray_icon.run(setup=_tray_setup)
+                except Exception:  # noqa: BLE001
+                    log.exception("트레이 아이콘 실행 스레드 오류")
+
+            threading.Thread(target=_tray_run, daemon=True).start()
+            self._tray_thread_started = True
+
+    def _tray_restore_clicked(self) -> None:
+        """트레이에서 '열기' 선택(이미 self.after 로 Tk 스레드에서 실행 중). 재로그인 필요.
+
+        self(App)가 withdraw 상태인 동안은 "이전에 한 번 보였던 적이 있는지"와 무관하게
+        transient(master) 를 걸면 Windows 에서 이 다이얼로그가 영원히 viewable 이 되지
+        않는 것으로 실측 확인됨(2026-09-30 '열기' 연타 4회 모두 wait_visibility() 에서
+        무한 대기 - 시작 로그인 게이트와 동일한 hang 로그 패턴). 시작 로그인 게이트
+        (`_require_login_or_exit`)와 동일하게 use_transient=False 로 호출한다.
+        """
+        if self._login_dialog_open:
+            # 이전 클릭의 wait_window() 가 아직 끝나지 않았는데 다시 호출된 경우(연타) -
+            # 두 번째 LoginDialog 를 또 띄우지 않는다.
+            log.info("트레이 복원 클릭 무시 - 이미 로그인 다이얼로그 대기 중")
+            return
+        self._login_dialog_open = True
+        try:
+            dlg = LoginDialog(self, self.db, use_transient=False)
+            self.wait_window(dlg)
+        finally:
+            self._login_dialog_open = False
+        if not dlg.result:
+            # 실패/취소 - 창은 계속 숨김, 트레이 아이콘도 계속 유지, 아무것도 종료하지 않는다.
+            return
+        self.deiconify()
+        self.lift()
+        self.focus_force()
+        if self._tray_icon is not None:
+            self._tray_icon.stop()
+            self._tray_icon = None
+            self._tray_thread_started = False
+
+    def _tray_quit_clicked(self) -> None:
+        """트레이에서 '종료' 선택(이미 self.after 로 Tk 스레드에서 실행 중).
+
+        트레이 메뉴에서 '종료'를 직접 고른 것은 명확한 종료 의사표시이므로(창의 X 버튼과
+        달리 오조작 가능성이 낮음) 별도 확인창 없이 바로 `_shutdown()`을 호출한다.
+        """
+        if self._tray_icon is not None:
+            self._tray_icon.stop()
+            self._tray_icon = None
+            self._tray_thread_started = False
+        self._shutdown(confirm=False)
 
     # -- 스모크 전용 ---------------------------------------------------- #
     def _smoke_start_auto(self) -> None:
