@@ -18,6 +18,10 @@ $defaultEnd = date('Y-m-d');
 $defaultStart = date('Y-m-d', strtotime('-' . (TAREP_DEFAULT_DAYS - 1) . ' days'));
 $from = clean_date($_GET['from'] ?? null) ?? $defaultStart;
 $to = clean_date($_GET['to'] ?? null) ?? $defaultEnd;
+if ($from > $to) {
+    // 시작일 > 종료일로 조회하면(입력 실수) 조용히 빈 결과를 보여주는 대신 서로 교체해 적용한다.
+    [$from, $to] = [$to, $from];
+}
 $pageNo = clean_int($_GET['page'] ?? 1, 1, 1, 100000);
 // 종합분석 요청 결과 배너(리다이렉트로 전달, 화이트리스트).
 $rq = clean_enum($_GET['rq'] ?? '', ['ok', 'busy', 'err', 'range'], '');
@@ -39,6 +43,16 @@ $requestLocked = ($cooldownLeft > 0 || $pending !== null);
   <?= empty_note('선택된 계좌가 없습니다.', '계좌를 먼저 등록해야 종합분석 리포트를 조회 · 요청할 수 있습니다.') ?>
 <?php else: ?>
 
+<section class="panel">
+  <div class="panel-h"><h2>조회 기간</h2></div>
+  <p class="note">기본값은 최근 <?= h(nfmt(TAREP_DEFAULT_DAYS)) ?>일입니다. 기간을 바꾸면 아래 리포트
+    이력도 그 기간과 겹치는 것만 보이고, 관리자의 종합분석 요청도 이 기간으로 접수됩니다.</p>
+  <?= filter_form_open('trade.report') ?>
+    <?= filter_field_date('from', '시작일', $from) ?>
+    <?= filter_field_date('to', '종료일', $to) ?>
+  <?= filter_form_close() ?>
+</section>
+
 <?php if ($isAdmin): ?>
 <section class="panel">
   <div class="panel-h"><h2>종합분석 요청</h2><span class="muted">관리자 전용</span></div>
@@ -55,7 +69,7 @@ $requestLocked = ($cooldownLeft > 0 || $pending !== null);
     <p class="alert alert-err">종합분석 요청을 접수하지 못했습니다. 기간을 확인하고 잠시 후 다시 시도해 주세요.</p>
   <?php endif; ?>
 
-  <div class="rescanbox">
+  <div class="rescanbox" id="tarep-rescanbox" data-from="<?= h($from) ?>" data-to="<?= h($to) ?>">
     <div class="rescanbox-h">
       <h3>선택한 기간(<?= h($from) ?> ~ <?= h($to) ?>)으로 종합분석 요청</h3>
       <form class="rescanform" method="post" action="<?= h(u('index.php')) ?>">
@@ -63,7 +77,7 @@ $requestLocked = ($cooldownLeft > 0 || $pending !== null);
         <input type="hidden" name="action" value="trade_report_request">
         <input type="hidden" name="period_start" value="<?= h($from) ?>">
         <input type="hidden" name="period_end" value="<?= h($to) ?>">
-        <button class="btn btn-primary" type="submit"<?= $requestLocked ? ' disabled' : '' ?>>종합분석 요청</button>
+        <button class="btn btn-primary" type="submit" id="tarep-req-btn"<?= $requestLocked ? ' disabled' : '' ?>>종합분석 요청</button>
       </form>
     </div>
     <?php if ($requestLocked): ?>
@@ -77,8 +91,10 @@ $requestLocked = ($cooldownLeft > 0 || $pending !== null);
         <?php endif; ?>
       </p>
     <?php else: ?>
-      <p class="rescanbox-s">위 "조회 기간" 에서 기간을 바꾼 뒤 요청하면 그 기간으로 분석합니다
-        (최대 <?= h(nfmt(TAREP_MAX_RANGE_DAYS)) ?>일).</p>
+      <p class="rescanbox-s" id="tarep-stale-hint" hidden>위 "조회 기간" 입력칸을 바꾸고 아직 [조회]를
+        누르지 않았습니다. [조회]로 적용한 뒤 요청해야 그 기간으로 분석됩니다.</p>
+      <p class="rescanbox-s" id="tarep-hint-default">위 "조회 기간" 에서 기간을 바꾼 뒤 [조회]를 누르고
+        요청하면 그 기간으로 분석합니다(최대 <?= h(nfmt(TAREP_MAX_RANGE_DAYS)) ?>일).</p>
     <?php endif; ?>
     <p class="note">이 버튼은 <strong>종합분석 요청만 기록</strong>합니다(<span class="mono">trade_analysis_request</span>).
       주문 · 알고리즘 · 설정은 전혀 바뀌지 않으며, 실제 분석(Claude 호출)은 서버 모듈이 요청을 확인한 뒤
@@ -95,16 +111,6 @@ $requestLocked = ($cooldownLeft > 0 || $pending !== null);
     요청자 <?= h((string)$pending['requested_by']) ?></p>
 </section>
 <?php endif; ?>
-
-<section class="panel">
-  <div class="panel-h"><h2>조회 기간</h2></div>
-  <p class="note">기본값은 최근 <?= h(nfmt(TAREP_DEFAULT_DAYS)) ?>일입니다. 기간을 바꾸면 아래 리포트
-    이력도 그 기간과 겹치는 것만 보이고, 관리자의 종합분석 요청도 이 기간으로 접수됩니다.</p>
-  <?= filter_form_open('trade.report') ?>
-    <?= filter_field_date('from', '시작일', $from) ?>
-    <?= filter_field_date('to', '종료일', $to) ?>
-  <?= filter_form_close() ?>
-</section>
 
 <section class="panel">
   <div class="panel-h"><h2>종합분석 리포트 이력</h2><span class="muted">최신순</span></div>

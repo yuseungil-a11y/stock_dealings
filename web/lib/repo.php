@@ -2050,6 +2050,17 @@ function repo_dashboard(?int $accountId): array
         ? (int)db_val('SELECT COUNT(*) FROM orders WHERE account_id = ? AND created_at >= ?', [$accountId, $today . ' 00:00:00'], 0)
         : 0;
     $todaySignals = (int)db_val('SELECT COUNT(*) FROM signal_log WHERE created_at >= ?', [$today . ' 00:00:00'], 0);
+    // 전체 기간 실현손익(이미 청산된 종목 포함) + 현재 보유종목 평가손익 합산.
+    $allTimeRealizedPl = $accountId !== null
+        ? (float)db_val('SELECT COALESCE(SUM(pl_amt),0) FROM daily_trade_summary WHERE account_id = ?', [$accountId], 0)
+        : 0.0;
+    $allTimeRealizedBuyAmt = $accountId !== null
+        ? (float)db_val('SELECT COALESCE(SUM(buy_amt),0) FROM daily_trade_summary WHERE account_id = ?', [$accountId], 0)
+        : 0.0;
+    $combinedPl = $allTimeRealizedPl + (float)$totals['evltv_prft'];
+    $combinedBuyAmt = $allTimeRealizedBuyAmt + (float)$totals['pur_amt'];
+    // 분모(전체 매수금액)가 0 이면 비율 표기를 생략하도록 null 을 반환한다.
+    $combinedRate = $combinedBuyAmt > 0 ? ($combinedPl / $combinedBuyAmt) * 100 : null;
     return [
         'balance' => $balance,
         'holding_totals' => $totals,
@@ -2059,5 +2070,12 @@ function repo_dashboard(?int $accountId): array
         'llm' => repo_llm_summary(),
         'trend' => repo_trend_today(),
         'fail_24h' => repo_recent_order_failures($accountId, 24),
+        'lifetime' => [
+            'realized_pl' => $allTimeRealizedPl,
+            'realized_buy_amt' => $allTimeRealizedBuyAmt,
+            'combined_pl' => $combinedPl,
+            'combined_buy_amt' => $combinedBuyAmt,
+            'combined_rate' => $combinedRate,
+        ],
     ];
 }

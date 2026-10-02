@@ -267,6 +267,33 @@
     setInterval(updateStatus, 30000);
   }
 
+  /* ------------------------------------------------ 거래 종합분석 요청: "조회 기간" 입력칸을
+   * 바꿔놓고 아직 [조회]를 누르지 않은 상태에서는 요청 제목/hidden 필드가 여전히 마지막으로
+   * 적용된(서버가 검증한) 기간을 가리킨다 — 입력칸과 달라 보여 혼동되므로 안내하고 버튼을
+   * 잠깐 막는다. hidden 필드 값(적용된 기간) 자체는 건드리지 않는다. */
+  var tarepBox = document.getElementById('tarep-rescanbox');
+  var tarepFrom = document.getElementById('f_from');
+  var tarepTo = document.getElementById('f_to');
+  if (tarepBox && tarepFrom && tarepTo) {
+    var tarepBtn = document.getElementById('tarep-req-btn');
+    var tarepStaleHint = document.getElementById('tarep-stale-hint');
+    var tarepDefaultHint = document.getElementById('tarep-hint-default');
+    var tarepAppliedFrom = tarepBox.getAttribute('data-from');
+    var tarepAppliedTo = tarepBox.getAttribute('data-to');
+    // 쿨다운 · 처리중으로 버튼이 이미 잠겨 있었다면(서버 렌더링) 건드리지 않는다.
+    var tarepWasLocked = !tarepBtn || tarepBtn.disabled;
+    var tarepCheckStale = function () {
+      if (tarepWasLocked) { return; }
+      var stale = (tarepFrom.value !== tarepAppliedFrom) || (tarepTo.value !== tarepAppliedTo);
+      tarepBtn.disabled = stale;
+      if (tarepStaleHint) { tarepStaleHint.hidden = !stale; }
+      if (tarepDefaultHint) { tarepDefaultHint.hidden = stale; }
+    };
+    tarepFrom.addEventListener('input', tarepCheckStale);
+    tarepTo.addEventListener('input', tarepCheckStale);
+    tarepCheckStale();
+  }
+
   /* ------------------------------------------------ 자동거래 제어: 아이디·비밀번호 재확인 모달
    * 서버 GUI(stock_svr) 와 동일한 방향 — 고정 문구("REAL") 대신 로그인 아이디+비밀번호 재입력을
    * 요구한다. 실제 검증은 index.php 의 auto_trading_start 핸들러가 password_verify 로 다시

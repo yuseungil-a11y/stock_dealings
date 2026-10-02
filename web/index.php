@@ -129,9 +129,14 @@ if ($method === 'POST') {
         $reqAccountId = $reqAccount !== null ? (int)$reqAccount['id'] : 0;
         $periodStart = clean_date($_POST['period_start'] ?? null);
         $periodEnd = clean_date($_POST['period_end'] ?? null);
-        if ($reqAccountId <= 0 || $periodStart === null || $periodEnd === null || $periodStart > $periodEnd) {
+        if ($reqAccountId <= 0 || $periodStart === null || $periodEnd === null) {
             header('Location: ' . url_page('trade.report', ['rq' => 'err']), true, 303);
             exit;
+        }
+        if ($periodStart > $periodEnd) {
+            // 화면이 정상 사용 시엔 이미 정렬된 값을 보내지만, 직접 POST 등 방어적으로 교체해 적용한다
+            // (trade_report.php 의 조회 기간 처리와 동일한 방식).
+            [$periodStart, $periodEnd] = [$periodEnd, $periodStart];
         }
         $rangeDays = (int)((strtotime($periodEnd) - strtotime($periodStart)) / 86400);
         if ($rangeDays > TAREP_MAX_RANGE_DAYS) {

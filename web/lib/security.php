@@ -47,7 +47,12 @@ function app_send_security_headers(bool $json = false): void
     header('Content-Type: ' . ($json ? 'application/json; charset=utf-8' : 'text/html; charset=utf-8'));
 }
 
-/** 세션 시작: HttpOnly / Secure(HTTPS) / SameSite=Strict / path=앱 기준경로. */
+/** 세션 시작: HttpOnly / Secure(HTTPS) / SameSite=Lax / path=앱 기준경로.
+ *  SameSite는 의도적으로 Strict가 아닌 Lax 사용: 사파리가 리버스 프록시 HTTPS 환경에서
+ *  신규 SameSite=Strict 쿠키를 첫 same-origin POST(첫 로그인 시도)에 누락해 CSRF 토큰
+ *  검증(403 "보안 토큰이 유효하지 않습니다")이 실패하는 문제 회피. Lax도 크로스사이트
+ *  POST는 그대로 차단하며, 상태 변경 요청은 별도 csrf_valid() 검증이 항상 병행되므로
+ *  보안 저하는 없음. */
 function app_start_session(): void
 {
     if (session_status() === PHP_SESSION_ACTIVE) {
@@ -68,7 +73,7 @@ function app_start_session(): void
         'domain' => '',
         'secure' => app_is_https(),
         'httponly' => true,
-        'samesite' => 'Strict',
+        'samesite' => 'Lax',
     ]);
     session_start();
 }
