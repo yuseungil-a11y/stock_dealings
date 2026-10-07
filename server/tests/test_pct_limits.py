@@ -105,8 +105,10 @@ def test_total_pct_limit_blocks():
 
 
 def test_total_limit_counts_existing_positions():
-    positions = {"000660": {"total_invested": 45_000}}
-    ctx = ctx_with_asset(1_000_000, positions=positions)
+    """기존 투입액은 실제 보유현황(holding.pur_amt) 기준(2026-10)."""
+    holdings = {"000660": {"stk_cd": "000660", "stk_nm": "SK하이닉스", "rmnd_qty": 1,
+                           "cur_prc": 45_000, "pur_amt": 45_000}}
+    ctx = ctx_with_asset(1_000_000, holdings=holdings)
     ok, why = guard(max_total_invest_pct="5").check(ctx, limit_buy(6_000))
     assert ok is False and "총 비중 한도" in why
 

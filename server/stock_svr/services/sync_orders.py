@@ -320,17 +320,44 @@ class OrderSyncService:
         stk_cd = norm_stk_cd(values.get("9001"))
         if not stk_cd:
             return
-        qty = to_int(values.get("930"), 0) or 0
-        if qty <= 0:
+        # 보유수량(930)도 부분 갱신 메시지에서 빠질 수 있다. '필드 없음/숫자 아님'(None)을
+        # '실제 0(전량 매도)'과 같이 보면 아직 보유 중인 종목의 행이 통째로 지워져
+        # 중복 매수(이미 보유 검사 통과)·손절 스캔 누락·투입 한도 누락이 생긴다.
+        # → None 이면 이 메시지로는 holding 을 전혀 건드리지 않는다(다음 REST 동기화가 바로잡음).
+        #   실제로 0 이 내려온 경우에만 전량 청산으로 보고 삭제한다.
+        #   음수는 정상 신호가 아니므로 삭제(위험한 방향)하지 않고 무시한다.
+        qty = to_int(values.get("930"))
+        if qty is None:
+            log.debug("잔고 실시간 %s: 보유수량(930) 없음 - holding 갱신 생략", stk_cd)
+            return
+        if qty < 0:
+            log.warning("잔고 실시간 %s: 보유수량(930)이 음수(%s) - 무시", stk_cd, qty)
+            return
+        if qty == 0:
             self.db.execute("DELETE FROM holding WHERE account_id=%s AND stk_cd=%s",
                             (self.account_id, stk_cd))
             return
+        # 매입단가(931)·종목명(302)도 같은 이유로, 필드가 없으면 기존 값을 유지한다(COALESCE).
+        # 종목명을 종목코드로 덮어쓰면 '(폐)' 표기(거래불가 판정 근거)가 사라진다.
+        # stk_nm 은 NOT NULL 이라 INSERT 값은 새 행용 대체값(종목코드)을 쓰고, UPDATE 는
+        # 실제 수신한 이름(없으면 None → 기존 값 유지)으로만 갱신한다.
+        pur_pric_raw = to_int(values.get("931"))
+        pur_pric = abs(pur_pric_raw) if pur_pric_raw is not None else None
+        nm_raw = values.get("302")
+        stk_nm = (str(nm_raw).strip()[:60] if nm_raw is not None else "") or None
+        # 현재가(10)는 부분 갱신 메시지(수량 변동 등)에서 빠질 수 있다. 필드가 없으면 0 이 아니라
+        # None(=모름)으로 두고, DB 의 기존 값을 덮어쓰지 않는다(COALESCE). 0 으로 쓰면 정상 종목이
+        # '거래불가(현재가 0)'로 오판돼 손절 스캔·투입 한도 계산(_base_invested)에서 빠진다.
+        # 실제로 '0' 이 내려온 경우는 그대로 0 으로 기록한다.
+        cur_prc_raw = to_int(values.get("10"))
+        cur_prc = abs(cur_prc_raw) if cur_prc_raw is not None else None
         self.db.execute(
             "INSERT INTO holding (account_id, stk_cd, stk_nm, rmnd_qty, trde_able_qty, pur_pric, cur_prc) "
             "VALUES (%s,%s,%s,%s,%s,%s,%s) "
             "ON DUPLICATE KEY UPDATE rmnd_qty=VALUES(rmnd_qty), trde_able_qty=VALUES(trde_able_qty), "
-            "pur_pric=VALUES(pur_pric), cur_prc=VALUES(cur_prc), stk_nm=VALUES(stk_nm)",
-            (self.account_id, stk_cd, (str(values.get("302", "")) or stk_cd).strip()[:60], qty,
-             to_int(values.get("933")), abs(to_int(values.get("931"), 0) or 0),
-             abs(to_int(values.get("10"), 0) or 0)),
+            "pur_pric=COALESCE(VALUES(pur_pric), pur_pric), cur_prc=COALESCE(VALUES(cur_prc), cur_prc), "
+            "stk_nm=COALESCE(%s, stk_nm)",
+            (self.account_id, stk_cd, stk_nm or stk_cd, qty,
+             to_int(values.get("933")), pur_pric,
+             cur_prc, stk_nm),
         )

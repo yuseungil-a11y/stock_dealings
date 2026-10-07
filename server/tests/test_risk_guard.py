@@ -86,13 +86,30 @@ def test_daily_loss_within_limit_passes():
 
 
 def test_block_total_invest_limit():
-    db = FakeDb()
-    positions = {"000660": {"total_invested": 950_000, "avg_down_count": 0}}
-    ok, reason = guard().check(make_ctx(db, positions=positions), buy(qty=10, price=10000))
+    """기존 투입액은 실제 보유현황(holding.pur_amt) 기준이다(2026-10)."""
+    holdings = {"000660": {"stk_cd": "000660", "stk_nm": "SK하이닉스", "rmnd_qty": 5,
+                           "cur_prc": 190_000, "pur_amt": 950_000}}
+    ok, reason = guard().check(make_ctx(FakeDb(), holdings=holdings), buy(qty=10, price=10000))
     assert not ok and "총 절대 한도" in reason
+    assert "기존 950,000" in reason
 
 
 def test_block_per_stock_limit():
+    holdings = {"005930": {"stk_cd": "005930", "stk_nm": "삼성전자", "rmnd_qty": 5,
+                           "cur_prc": 59_000, "pur_amt": 295_000}}
+    ok, reason = guard().check(make_ctx(FakeDb(), holdings=holdings), buy(qty=10, price=10000))
+    assert not ok and "종목당 절대 한도" in reason
+    assert "기존 295,000" in reason
+
+
+def test_block_total_invest_limit_counts_sent_but_unsynced_buy():
+    """전송됐지만 아직 잔고에 안 잡힌 매수(position_state 에만 있음)도 한도에 계속 포함한다."""
+    positions = {"000660": {"total_invested": 950_000, "avg_down_count": 0}}
+    ok, reason = guard().check(make_ctx(FakeDb(), positions=positions), buy(qty=10, price=10000))
+    assert not ok and "총 절대 한도" in reason
+
+
+def test_block_per_stock_limit_counts_sent_but_unsynced_buy():
     positions = {"005930": {"total_invested": 295_000, "avg_down_count": 1}}
     ok, reason = guard().check(make_ctx(FakeDb(), positions=positions), buy(qty=10, price=10000))
     assert not ok and "종목당 절대 한도" in reason

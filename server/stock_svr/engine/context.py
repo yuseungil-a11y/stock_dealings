@@ -290,23 +290,54 @@ class EngineContext:
                     continue
         return 0
 
+    @staticmethod
+    def _to_won(value: Any) -> int:
+        try:
+            return max(0, int(value or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def _base_invested(self, stk_cd: str) -> int:
+        """종목 1개의 기존 투입액(이번 사이클 승인분 제외). 투입 한도 검사 전용.
+
+        기준은 **실제 보유현황(holding.pur_amt, 키움 동기화)** 이다. 예전엔
+        position_state.total_invested(이 프로그램이 스스로 누적한 값)만 썼는데, 수동 매수 등
+        추적하지 못한 보유분이 0원으로 빠져 한도가 실제보다 느슨해지는 문제가 있었다(2026-10 수정).
+
+        다만 position_state 는 **주문 전송 시점**에 늘어나므로, 전송은 됐지만 아직 체결·잔고
+        동기화(약 60초 주기)가 안 된 매수분을 담고 있다. 이를 놓치지 않도록 두 값 중 **큰 쪽**을
+        쓴다(보수적). 보유하지 않게 된 종목의 position_state 는 계좌 동기화 때
+        reset_stale_positions 가 0 으로 되돌리므로 계속 쌓이지 않는다.
+
+        거래불가(상장폐지·정리매매 등, R-06) 종목은 0 으로 본다 - 사실상 회수 불가능한 돈이
+        투입 한도를 영구히 차지하지 않게 한다(판정은 다른 알고리즘과 같은 untradable_reason).
+        """
+        h = self.holdings.get(stk_cd)
+        held = self._to_won(h.get("pur_amt")) if h else 0
+        tracked = self._to_won(self.position(stk_cd).get("total_invested"))
+        base = max(held, tracked)
+        if base <= 0:
+            return 0
+        if h:
+            # 보유종목: risk_guard.evaluate() 의 손절 스캔과 같은 호출(같은 캐시)이다.
+            if self.untradable_reason(stk_cd, h.get("stk_nm")):
+                return 0
+        elif self._detect_untradable(stk_cd, None):
+            # 미보유(전송됐지만 아직 잔고 미반영): 종목명을 모르므로 캐시에 남기지 않는다 -
+            # 나중에 같은 종목 신호가 '(폐)' 종목명으로 검사될 때 빈 판정이 재사용되지 않게.
+            return 0
+        return base
+
     def total_invested(self) -> int:
-        """position_state 기준 알고리즘 누적 투입금 + 이번 사이클 승인분."""
+        """기존 투입액(보유현황 기준, 거래불가 제외 - `_base_invested`) 합계 + 이번 사이클 승인분."""
         total = int(self.cycle_invested)
-        for st in self.position_states.values():
-            try:
-                total += int(st.get("total_invested") or 0)
-            except (TypeError, ValueError):
-                pass
+        for stk_cd in set(self.holdings) | set(self.position_states):
+            total += self._base_invested(stk_cd)
         return total
 
     def invested_in(self, stk_cd: str) -> int:
-        st = self.position(stk_cd)
-        try:
-            base = int(st.get("total_invested") or 0)
-        except (TypeError, ValueError):
-            base = 0
-        return base + int(self.cycle_invested_by_stock.get(stk_cd, 0))
+        """이 종목의 기존 투입액(`_base_invested`) + 이번 사이클 승인분."""
+        return self._base_invested(stk_cd) + int(self.cycle_invested_by_stock.get(stk_cd, 0))
 
     def record_cycle_invest(self, stk_cd: str, amount: int) -> None:
         """Executor 가 매수를 승인할 때 사이클 누적 투입액을 반영한다(S-10-②).

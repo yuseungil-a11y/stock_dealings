@@ -71,13 +71,16 @@ class AccountService:
                 code = norm_stk_cd(r.get("stk_cd"))
                 if not code:
                     continue
+                # 현재가는 WS 경로(sync_orders.on_balance)와 같이 부호를 떼어 기록한다(방어적).
+                # 부호가 붙어 음수로 읽히면 정상 종목이 '거래불가(현재가 <= 0)'로 오판된다.
+                cur_prc = to_int(r.get("cur_prc"))
                 holdings.append({
                     "stk_cd": code,
                     "stk_nm": (r.get("stk_nm") or "").strip()[:60],
                     "rmnd_qty": to_int(r.get("rmnd_qty"), 0) or 0,
                     "trde_able_qty": to_int(r.get("trde_able_qty")),
                     "pur_pric": to_int(r.get("pur_pric")),
-                    "cur_prc": to_int(r.get("cur_prc")),
+                    "cur_prc": abs(cur_prc) if cur_prc is not None else None,
                     "pur_amt": to_int(r.get("pur_amt")),
                     "evlt_amt": to_int(r.get("evlt_amt")),
                     "evltv_prft": to_int(r.get("evltv_prft")),
