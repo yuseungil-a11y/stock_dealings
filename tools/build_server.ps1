@@ -6,10 +6,15 @@
 #   stock_svr.exe (GUI only - no CLI exe), _internal\, config\, logs\
 #
 # Notes  : - Redeploy keeps the run folder's config\ and logs\ (only exe + _internal are replaced).
-#          - -WithLocalConfig copies server\config\config.local.ini (contains DB password) and
-#            server\config\mail.local.json (contains SMTP password, for trade-completed email
-#            notifications) into <RunDir>\config and restricts both ACLs. Without it the existing
+#          - -WithLocalConfig copies server\config\config.local.ini (contains DB password) into
+#            <RunDir>\config (always overwritten) and restricts its ACL. Without it the existing
 #            run-folder config is kept.
+#          - -WithLocalConfig also seeds server\config\mail.local.json (contains SMTP password, for
+#            trade-completed email notifications) into <RunDir>\config, but only ONCE - only if it
+#            does not already exist there - and restricts its ACL when seeded. It is no longer
+#            overwritten on later deploys because the running app's "설정" tab lets the user edit
+#            mail settings live in the deployed copy; always-overwriting would silently revert
+#            those UI-saved changes back to the dev-tree values on every redeploy.
 #          - Keys are read from the key-file paths written in config.local.ini (never bundled).
 #          - -StopRunning stops a stock_svr.exe running from <RunDir> before replacing files
 #            (without it the script aborts if the server is running).
@@ -81,7 +86,9 @@ if ($WithLocalConfig) {
     Write-Host '      config.local.ini copied (ACL restricted)'
   } else { Write-Warning 'server\config\config.local.ini not found - skipped' }
   $localMail = Join-Path $server 'config\mail.local.json'
-  if (Test-Path $localMail) {
+  if (Test-Path $runMailCfg) {
+    Write-Host '      mail.local.json already exists in run folder - left untouched (seed-once; may hold UI-saved settings)'
+  } elseif (Test-Path $localMail) {
     Copy-Item $localMail $runMailCfg -Force
     icacls $runMailCfg /inheritance:r /grant:r "${env:USERNAME}:(F)" 'BUILTIN\Administrators:(F)' 'NT AUTHORITY\SYSTEM:(F)' | Out-Null
     Write-Host '      mail.local.json copied (ACL restricted)'

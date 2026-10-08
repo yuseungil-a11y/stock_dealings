@@ -113,7 +113,8 @@ class AlgoTab(ttk.Frame):
                 chk.state(["disabled"])
             pv = tk.StringVar(value=str(a["priority"]))
             self._priority_vars[a["id"]] = pv
-            ttk.Spinbox(row, from_=1, to=999, textvariable=pv, width=5).pack(side="left", padx=(0, 6))
+            self._wheel_scrolls_only(ttk.Spinbox(row, from_=1, to=999, textvariable=pv, width=5)).pack(
+                side="left", padx=(0, 6))
             missing = "" if a["code"] in known else "  (구현 없음)"
             lock = " 🔒" if a["is_locked"] else ""
             # 좌측 목록 폭이 좁아 "이름 [code]"를 다 쓰면 잘리는 경우가 있었다(특히 이름이
@@ -291,6 +292,15 @@ class AlgoTab(ttk.Frame):
         UniversePreviewDialog(self.winfo_toplevel(), db, opts)
 
     # ------------------------------------------------------------------ #
+    def _wheel_scrolls_only(self, widget):
+        """콤보박스/스핀박스 위 휠은 값 변경 없이 폼 스크롤만 하게 한다(위젯 반환, settings_tab 과 동일).
+
+        ttk 콤보박스/스핀박스의 내장 휠 바인딩이 값을 바꾸므로, 위젯 레벨에서 스크롤만 처리하고
+        "break" 로 클래스(값 변경)·bind_all 전파를 끊는다.
+        """
+        widget.bind("<MouseWheel>", lambda e: (self._on_wheel(e), "break")[1])
+        return widget
+
     def _on_wheel(self, event) -> None:
         """마우스 휠: 포인터가 파라미터 폼 위에 있고 이 탭이 보일 때만 폼을 스크롤한다."""
         c = self.canvas
@@ -330,7 +340,8 @@ class AlgoTab(ttk.Frame):
             choices = enum_choices(d)
             labels = [f"{v} - {lab}" if lab != v else v for v, lab in choices]
             var = tk.StringVar(value=str(value))
-            combo = ttk.Combobox(self.form, values=labels, state="readonly", width=26)
+            combo = self._wheel_scrolls_only(
+                ttk.Combobox(self.form, values=labels, state="readonly", width=26))
             cur = str(value)
             idx = next((i for i, (v, _) in enumerate(choices) if v == cur), 0)
             if labels:
