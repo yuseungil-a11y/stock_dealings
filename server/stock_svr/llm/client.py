@@ -40,8 +40,12 @@ MAX_OUTPUT_TOKENS = 1024
 # 서버측 웹 검색 도구. 결과 블록은 `web_search_tool_result` 로 돌아오고,
 # 검색 자체가 실패해도 HTTP 는 200 이며 블록 안에 오류 객체가 담긴다(치명적이지 않다).
 WEB_SEARCH_TOOL = "web_search_20260209"
-# 조사(1단계) 응답은 보고서 형식이라 길다
-RESEARCH_MAX_OUTPUT_TOKENS = 8000
+# 조사(1단계) 응답은 보고서 형식이라 길다. 기존 8000 에서 "조사 응답이 max_tokens 에서
+# 잘림" 오류가 실제로 발생해(2026-10-08) 상향했다 - 서버측 웹 검색 도구의
+# server_tool_use/web_search_tool_result 블록도 같은 max_tokens 예산을 공유하므로,
+# 비슷한 보고서형 출력(`fundamental_prompt.REPORT_MAX_OUTPUT_TOKENS` = 16000, 웹검색 없이도
+# 6000 토큰에서 잘린 전례가 있음)보다 더 넉넉히 둔다.
+RESEARCH_MAX_OUTPUT_TOKENS = 20000
 # 구조화 추출(2단계) 응답은 후보 JSON 하나
 EXTRACT_MAX_OUTPUT_TOKENS = 4096
 # 서버측 도구 루프가 10회를 넘으면 stop_reason='pause_turn' 으로 끊긴다 → 이어받기 상한
