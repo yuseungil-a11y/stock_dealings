@@ -338,8 +338,9 @@ function status_label(?string $s): string
  * 서버 사이드 SVG 라인 차트 (외부 라이브러리·인라인 스크립트 없음).
  * @param array<int,array{label:string,value:float}> $points
  * @param int $dec y축 라벨·값 표시 소수 자릿수(PER/PBR 처럼 소수가 의미 있는 지표에서 사용)
+ * @param string $suffix y축 라벨·값 뒤에 붙이는 단위 접미사(예: 수익률 '%'). 기본값 ''(기존 동작 유지).
  */
-function svg_line_chart(array $points, string $title = '', int $w = 720, int $h = 220, int $dec = 0): string
+function svg_line_chart(array $points, string $title = '', int $w = 720, int $h = 220, int $dec = 0, string $suffix = ''): string
 {
     $dec = max(0, min($dec, 4));
     $n = count($points);
@@ -382,7 +383,7 @@ function svg_line_chart(array $points, string $title = '', int $w = 720, int $h 
         $y = round($yOf($vy), 1);
         $svg .= '<line class="grid" x1="' . $padL . '" y1="' . $y . '" x2="' . ($w - $padR) . '" y2="' . $y . '"/>';
         $svg .= '<text class="axis" x="' . ($padL - 6) . '" y="' . ($y + 4) . '" text-anchor="end">'
-            . h(number_format($vy, $dec)) . '</text>';
+            . h(number_format($vy, $dec) . $suffix) . '</text>';
     }
     // x축 라벨(처음/중간/끝)
     $labelIdx = $n === 1 ? [0] : array_unique([0, intdiv($n - 1, 2), $n - 1]);
@@ -395,7 +396,7 @@ function svg_line_chart(array $points, string $title = '', int $w = 720, int $h 
     $svg .= '<polyline class="series" points="' . implode(' ', $pts) . '"/>';
     foreach ($points as $i => $p) {
         $svg .= '<circle class="dot" cx="' . round($xOf($i), 1) . '" cy="' . round($yOf((float)$p['value']), 1)
-            . '" r="2.5"><title>' . h($p['label'] . ' : ' . number_format((float)$p['value'], $dec)) . '</title></circle>';
+            . '" r="2.5"><title>' . h($p['label'] . ' : ' . number_format((float)$p['value'], $dec) . $suffix) . '</title></circle>';
     }
     $svg .= '</svg>';
     return $svg;

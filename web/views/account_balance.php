@@ -8,13 +8,17 @@ $series = $accountId !== null ? repo_balance_series($accountId, $days) : [];
 $latest = $accountId !== null ? repo_latest_balance($accountId) : null;
 $history = $accountId !== null ? repo_balance_history($accountId, 100) : [];
 
-$metric = clean_enum($_GET['metric'] ?? '', ['tot_evlt_amt', 'entr', 'prsm_dpst_aset_amt', 'tot_evlt_pl'], 'tot_evlt_amt');
+$metric = clean_enum($_GET['metric'] ?? '', ['tot_evlt_amt', 'entr', 'prsm_dpst_aset_amt', 'tot_evlt_pl', 'tot_prft_rt'], 'tot_prft_rt');
 $metricLabel = [
     'tot_evlt_amt' => '총 평가금액',
     'entr' => '예수금',
     'prsm_dpst_aset_amt' => '추정예탁자산',
     'tot_evlt_pl' => '평가손익',
+    'tot_prft_rt' => '수익률',
 ][$metric];
+$metricIsRate = $metric === 'tot_prft_rt';
+$metricDec = $metricIsRate ? 2 : 0;
+$metricSuffix = $metricIsRate ? '%' : '';
 
 $points = [];
 foreach ($series as $s) {
@@ -42,12 +46,12 @@ foreach ($series as $s) {
 
 <section class="panel">
   <div class="panel-h">
-    <h2><?= h($metricLabel) ?> 추이 (최근 <?= (int)$days ?>일)</h2>
+    <h2><?= h($metricLabel) ?><?= $metricIsRate ? ' (%)' : '' ?> 추이 (최근 <?= (int)$days ?>일)</h2>
     <form class="filters filters-inline" method="get" action="<?= h(u('index.php')) ?>">
       <input type="hidden" name="p" value="account.balance">
       <?php if ($account !== null): ?><input type="hidden" name="account_id" value="<?= h($account['id']) ?>"><?php endif; ?>
       <?= filter_field_select('metric', '지표', [
-          'tot_evlt_amt' => '총 평가금액', 'entr' => '예수금',
+          'tot_prft_rt' => '수익률', 'tot_evlt_amt' => '총 평가금액', 'entr' => '예수금',
           'prsm_dpst_aset_amt' => '추정예탁자산', 'tot_evlt_pl' => '평가손익'], $metric) ?>
       <?= filter_field_select('days', '기간', ['7' => '7일', '30' => '30일', '90' => '90일', '180' => '180일', '365' => '1년'], (string)$days) ?>
       <span class="fld fld-btns"><button class="btn btn-primary btn-sm" type="submit">적용</button></span>
@@ -56,7 +60,7 @@ foreach ($series as $s) {
   <?php if ($points === []): ?>
     <?= empty_note('추이를 그릴 스냅샷 데이터가 없습니다.', '서버 모듈이 잔고를 주기적으로 기록하면 표시됩니다.') ?>
   <?php else: ?>
-    <div class="chartwrap"><?= svg_line_chart($points, $metricLabel . ' 추이') ?></div>
+    <div class="chartwrap"><?= svg_line_chart($points, $metricLabel . ' 추이', 720, 220, $metricDec, $metricSuffix) ?></div>
   <?php endif; ?>
 </section>
 
