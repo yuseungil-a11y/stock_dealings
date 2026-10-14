@@ -225,6 +225,89 @@ def test_send_trade_completed_mail_thread_swallows_exception(monkeypatch):
 
 
 # ====================================================================== #
+# 매매 사유(algo_code/reason) - 체결 메일 본문에 "왜 이 거래를 했는지" 포함
+# ====================================================================== #
+def test_build_message_includes_reason_and_algo_label():
+    """reason 이 있으면 그대로, algo_code 는 레지스트리의 한글 이름과 함께 표시된다."""
+    msg = mail_notify._build_message(
+        VALID_CFG, side="SELL", stk_cd="005930", stk_nm="삼성전자", qty=5, price=61000,
+        executed_at=_dt.datetime(2026, 9, 25, 9, 30, 15),
+        algo_code="take_profit",
+        reason="ATR 트레일링 청산 (peak 7,010 - ATR 437.87x3 = 5,696 >= 현재 5,670)")
+    body = msg.get_content()
+    assert "매매 사유: ATR 트레일링 청산 (peak 7,010 - ATR 437.87x3 = 5,696 >= 현재 5,670)" in body
+    assert "알고리즘: take_profit(익절(ATR 트레일링+부분매도))" in body
+
+
+def test_build_message_reason_none_shows_placeholder():
+    """reason 이 없으면(수동 주문 등) 자리표시 문구가 들어가고, 알고리즘 줄은 생략된다."""
+    msg = mail_notify._build_message(
+        VALID_CFG, side="BUY", stk_cd="005930", stk_nm="삼성전자", qty=10, price=60000,
+        executed_at=_dt.datetime(2026, 9, 25, 10, 0, 0))
+    body = msg.get_content()
+    assert "매매 사유: (사유 정보 없음 - 수동 주문이거나 조회 실패)" in body
+    assert "알고리즘:" not in body
+
+
+def test_build_message_unknown_algo_code_falls_back_to_raw_code():
+    """레지스트리에 없는(미등록) algo_code 는 한글 이름 없이 코드만 표시된다."""
+    msg = mail_notify._build_message(
+        VALID_CFG, side="BUY", stk_cd="005930", stk_nm="삼성전자", qty=10, price=60000,
+        executed_at=_dt.datetime(2026, 9, 25, 10, 0, 0),
+        algo_code="no_such_algo", reason="수동 테스트")
+    body = msg.get_content()
+    assert "알고리즘: no_such_algo\n" in body
+
+
+def test_build_message_long_reason_with_newlines_is_passed_through():
+    """reason 에 줄바꿈/긴 숫자가 섞여 있어도 그대로 출력된다(DB 저장값을 신뢰)."""
+    long_reason = (
+        "등락률 8.84% + 거래량급증 310.05% 교집합 (현재가 5,110)\n"
+        "2차 확인: 20일 평균대비 312.456789% 초과, 직전 저점 4,998 대비 +2.24%"
+    )
+    msg = mail_notify._build_message(
+        VALID_CFG, side="BUY", stk_cd="005930", stk_nm="삼성전자", qty=10, price=60000,
+        executed_at=_dt.datetime(2026, 9, 25, 10, 0, 0),
+        algo_code="volatility_breakout", reason=long_reason)
+    body = msg.get_content()
+    assert long_reason in body
+
+
+def test_send_sync_passes_reason_and_algo_code_through(monkeypatch):
+    """`_send_sync` 가 받은 algo_code/reason 이 실제 발송되는 메일 본문까지 전달된다."""
+    monkeypatch.setattr(mail_notify.smtplib, "SMTP", FakeSmtp)
+    mail_notify._send_sync(
+        VALID_CFG, side="SELL", stk_cd="005930", stk_nm="삼성전자", qty=5, price=61000,
+        executed_at=_dt.datetime(2026, 9, 25, 9, 30, 15),
+        algo_code="take_profit", reason="ATR 트레일링 청산")
+    sent = FakeSmtp.instances[0].sent[0]
+    body = sent.get_content()
+    assert "매매 사유: ATR 트레일링 청산" in body
+    assert "알고리즘: take_profit" in body
+
+
+def test_send_trade_completed_mail_defaults_reason_and_algo_code_to_none(monkeypatch):
+    """키워드 생략(기존 호출부와의 하위호환) 시 algo_code/reason 은 None 으로 처리된다."""
+    monkeypatch.setattr(mail_notify.smtplib, "SMTP", FakeSmtp)
+    real_thread = mail_notify.threading.Thread
+    captured_threads = []
+
+    def spy_thread(*args, **kwargs):
+        t = real_thread(*args, **kwargs)
+        captured_threads.append(t)
+        return t
+
+    monkeypatch.setattr(mail_notify.threading, "Thread", spy_thread)
+    mail_notify.send_trade_completed_mail(
+        VALID_CFG, side="BUY", stk_cd="005930", stk_nm="삼성전자", qty=10, price=60000,
+        executed_at=_dt.datetime(2026, 9, 25, 10, 0, 0))
+    captured_threads[0].join(timeout=5)
+    assert len(FakeSmtp.instances) == 1
+    body = FakeSmtp.instances[0].sent[0].get_content()
+    assert "매매 사유: (사유 정보 없음 - 수동 주문이거나 조회 실패)" in body
+
+
+# ====================================================================== #
 # save_mail_config (설정 탭 저장 - 검증 실패는 ValueError 로 드러낸다)
 # ====================================================================== #
 def test_save_mail_config_writes_pretty_json_and_roundtrips(tmp_path):

@@ -1437,6 +1437,20 @@ class Database:
             "SELECT algo_code FROM orders WHERE account_id=%s AND ord_no=%s "
             "ORDER BY id DESC LIMIT 1", (account_id, ord_no))
 
+    def order_reason_info(self, account_id: int, ord_no: str) -> dict | None:
+        """체결 알림 메일에 넣을 '왜 이 주문을 냈는지' 정보(algo_code/reason).
+
+        `order_algo_code()` 와 같은 정렬 기준(재시도로 같은 ord_no 에 여러 행이 있을
+        수 있어 `ORDER BY id DESC LIMIT 1`)이다. 수동/외부 주문이라 orders 테이블에
+        없으면 None(예외를 던지지 않는다 - 호출 측이 메일 발송 자체를 막으면 안 됨).
+        """
+        row = self.query_one(
+            "SELECT algo_code, reason FROM orders WHERE account_id=%s AND ord_no=%s "
+            "ORDER BY id DESC LIMIT 1", (account_id, ord_no))
+        if not row:
+            return None
+        return {"algo_code": row.get("algo_code"), "reason": row.get("reason")}
+
     def execution_exists(self, account_id: int, ord_no: str, cntr_no: str) -> bool:
         """이 (계좌, 주문번호, 체결번호) 체결이 이미 저장돼 있는지 (체결 알림 메일 중복발송 방지용).
 

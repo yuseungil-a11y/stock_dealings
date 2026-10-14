@@ -81,6 +81,19 @@ class OrderSyncService:
         # 로드해 쓴다 - 체결마다 파일을 다시 읽지 않는다.
         self.mail_cfg = mail_cfg
 
+    # -- 체결 알림 메일 사유 조회 ------------------------------------------ #
+    def _order_reason_info(self, ord_no: str) -> dict:
+        """메일 본문용 algo_code/reason (조회 실패/수동주문이면 둘 다 None).
+
+        조회 실패가 메일 발송 자체를 막으면 안 되므로 예외를 삼킨다.
+        """
+        try:
+            info = self.db.order_reason_info(self.account_id, ord_no)
+        except Exception:  # noqa: BLE001 - 사유 조회 실패가 메일 발송에 영향을 주면 안 됨
+            log.debug("체결 알림 메일용 사유 조회 실패: %s", ord_no, exc_info=True)
+            return {"algo_code": None, "reason": None}
+        return info or {"algo_code": None, "reason": None}
+
     # -- 체결 알림 메일 중복방지 ----------------------------------------- #
     def _execution_is_new(self, ord_no: str, cntr_no: str, cntr_qty: int, cntr_pric: int) -> bool:
         """이 체결이 처음 보는 것인지 (같은 체결에 메일을 두 번 보내지 않기 위한 사전확인).
@@ -235,10 +248,13 @@ class OrderSyncService:
                     source="REST", only_if_absent=True,
                 )
                 if is_new_exec:
+                    reason_info = self._order_reason_info(ord_no)
                     mail_notify.send_trade_completed_mail(
                         self.mail_cfg, side=side, stk_cd=stk_cd,
                         stk_nm=(r.get("stk_nm") or "").strip()[:60] or None,
-                        qty=cntr_qty, price=cntr_pric, executed_at=executed_at)
+                        qty=cntr_qty, price=cntr_pric, executed_at=executed_at,
+                        algo_code=reason_info.get("algo_code"),
+                        reason=reason_info.get("reason"))
                 status = map_status(r.get("ord_stt"), oso_qty, filled, ord_qty)
                 before = self._order_before(ord_no)
                 order_id = self.db.upsert_order_by_ordno(
@@ -311,9 +327,12 @@ class OrderSyncService:
                     log.debug("position_state 차감 실패", exc_info=True)
             log.info("체결 수신: %s %s %s주 @%s", stk_cd, side, cntr_qty, cntr_pric)
             if is_new_exec:
+                reason_info = self._order_reason_info(ord_no)
                 mail_notify.send_trade_completed_mail(
                     self.mail_cfg, side=side, stk_cd=stk_cd, stk_nm=stk_nm,
-                    qty=cntr_qty, price=cntr_pric, executed_at=executed_at)
+                    qty=cntr_qty, price=cntr_pric, executed_at=executed_at,
+                    algo_code=reason_info.get("algo_code"),
+                    reason=reason_info.get("reason"))
 
     def on_balance(self, values: dict) -> None:
         """WS `04` 잔고 실시간 → holding 즉시 반영."""

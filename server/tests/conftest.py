@@ -46,6 +46,7 @@ class FakeDb:
         self.stock_master_updated_at: _dt.datetime | None = None
         self.executions: list[dict] = []
         self.order_algos: dict[str, str] = {}
+        self.order_reasons: dict[str, dict] = {}
         self.expired_unknown = 0
         self.order_events: list[dict] = []
         self.purged: list[tuple[str, int]] = []      # (대상, 보관일수)
@@ -245,6 +246,12 @@ class FakeDb:
     def order_algo_code(self, account_id: int, ord_no: str):
         self._maybe_fail("order_algo_code")
         return self.order_algos.get(str(ord_no))
+
+    def order_reason_info(self, account_id: int, ord_no: str) -> dict | None:
+        """체결 알림 메일용 algo_code/reason 대역 - `self.order_reasons` 에 미리 넣어두면
+        돌려주고, 없으면(=수동/외부 주문) None."""
+        self._maybe_fail("order_reason_info")
+        return self.order_reasons.get(str(ord_no))
 
     def stock_state(self, stk_cd: str):
         self._maybe_fail("stock_state")

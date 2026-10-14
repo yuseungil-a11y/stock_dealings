@@ -99,6 +99,74 @@ def test_rest_repeated_poll_does_not_send_mail_twice(monkeypatch):
     assert len(calls) == 1
 
 
+def test_ws_execution_mail_includes_algo_code_and_reason_from_order(monkeypatch):
+    """체결에 대응하는 orders 행에 algo_code/reason 이 있으면 메일 함수에 그대로 전달된다."""
+    calls = _mail_spy(monkeypatch)
+    db = FakeDb()
+    db.order_reasons["0007"] = {
+        "algo_code": "take_profit",
+        "reason": "ATR 트레일링 청산 (peak 7,010 - ATR 437.87x3 = 5,696 >= 현재 5,670)",
+    }
+    svc = OrderSyncService(db, FakeRest(), 1, mail_cfg=DUMMY_MAIL_CFG)
+    svc.on_order_exec({
+        "9203": "0007", "9001": "A005930", "302": "삼성전자", "907": "2",
+        "900": "10", "902": "4", "911": "6", "910": "+60000", "909": "C1",
+        "913": "체결", "908": "093015", "906": "0",
+    })
+    assert len(calls) == 1
+    _, kw = calls[0]
+    assert kw["algo_code"] == "take_profit"
+    assert kw["reason"] == "ATR 트레일링 청산 (peak 7,010 - ATR 437.87x3 = 5,696 >= 현재 5,670)"
+
+
+def test_ws_execution_mail_algo_code_and_reason_none_for_manual_order(monkeypatch):
+    """수동/외부 주문(orders 테이블에 매칭 없음)이면 algo_code/reason 모두 None 으로 전달된다."""
+    calls = _mail_spy(monkeypatch)
+    svc = OrderSyncService(FakeDb(), FakeRest(), 1, mail_cfg=DUMMY_MAIL_CFG)
+    svc.on_order_exec({
+        "9203": "0007", "9001": "A005930", "302": "삼성전자", "907": "2",
+        "900": "10", "902": "4", "911": "6", "910": "+60000", "909": "C1",
+        "913": "체결", "908": "093015", "906": "0",
+    })
+    assert len(calls) == 1
+    _, kw = calls[0]
+    assert kw["algo_code"] is None
+    assert kw["reason"] is None
+
+
+def test_ws_execution_mail_reason_lookup_failure_still_sends_mail(monkeypatch):
+    """사유 조회(order_reason_info) 자체가 예외를 던져도 메일 발송은 막히지 않는다(None 으로 처리)."""
+    calls = _mail_spy(monkeypatch)
+    db = FakeDb()
+    db.fail_on.add("order_reason_info")
+    svc = OrderSyncService(db, FakeRest(), 1, mail_cfg=DUMMY_MAIL_CFG)
+    svc.on_order_exec({
+        "9203": "0007", "9001": "A005930", "302": "삼성전자", "907": "2",
+        "900": "10", "902": "4", "911": "6", "910": "+60000", "909": "C1",
+        "913": "체결", "908": "093015", "906": "0",
+    })
+    assert len(calls) == 1
+    _, kw = calls[0]
+    assert kw["algo_code"] is None
+    assert kw["reason"] is None
+
+
+def test_rest_execution_mail_includes_algo_code_and_reason_from_order(monkeypatch):
+    """REST 동기화 경로에서도 ord_no 로 orders 의 algo_code/reason 을 조회해 전달한다."""
+    calls = _mail_spy(monkeypatch)
+    db = FakeDb()
+    db.order_reasons["0009"] = {
+        "algo_code": "volatility_breakout",
+        "reason": "등락률 8.84% + 거래량급증 310.05% 교집합 (현재가 5,110)",
+    }
+    svc = OrderSyncService(db, FakeRest({"ka10076": CNTR_REST}), 1, mail_cfg=DUMMY_MAIL_CFG)
+    svc.sync_executions()
+    assert len(calls) == 1
+    _, kw = calls[0]
+    assert kw["algo_code"] == "volatility_breakout"
+    assert kw["reason"] == "등락률 8.84% + 거래량급증 310.05% 교집합 (현재가 5,110)"
+
+
 def test_ws_then_rest_same_execution_does_not_send_mail_twice(monkeypatch):
     """WS 로 이미 기록된 체결을 REST 백업이 나중에 다시 관측해도 메일은 1번만.
 

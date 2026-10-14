@@ -192,8 +192,25 @@ def send_test_mail(cfg: dict) -> tuple[bool, str]:
     return True, "발송 성공"
 
 
+def _algo_label(algo_code: str | None) -> str | None:
+    """`algo_code` 를 '코드(한글이름)' 형태로 바꾼다. 조회 실패/미등록이면 코드만 돌려준다.
+
+    레지스트리 조회 자체가 실패해도 메일 본문 작성을 막으면 안 된다(예외를 삼킨다).
+    """
+    if not algo_code:
+        return None
+    try:
+        from ..algo import registry as _algo_registry
+        cls = _algo_registry.get(algo_code)
+        name = getattr(cls, "name", None) if cls else None
+    except Exception:  # noqa: BLE001 - 레지스트리 조회 실패가 메일 본문 작성을 막으면 안 됨
+        name = None
+    return f"{algo_code}({name})" if name else algo_code
+
+
 def _build_message(cfg: dict, *, side: str, stk_cd: str, stk_nm: str | None,
-                   qty: int, price: int, executed_at: _dt.datetime) -> EmailMessage:
+                   qty: int, price: int, executed_at: _dt.datetime,
+                   algo_code: str | None = None, reason: str | None = None) -> EmailMessage:
     smtp = cfg["smtp"]
     side_label = _SIDE_LABEL.get(side, side)
     name = stk_nm or stk_cd
@@ -211,6 +228,7 @@ def _build_message(cfg: dict, *, side: str, stk_cd: str, stk_nm: str | None,
     from_name = smtp.get("from_name") or "주식 자동매매 알림"
     msg["From"] = f"{from_name} <{smtp['from_addr']}>"
     msg["To"] = cfg["to_addr"]
+    reason_text = reason or "(사유 정보 없음 - 수동 주문이거나 조회 실패)"
     body = (
         f"체결이 발생했습니다.\n\n"
         f"종목: {name}({stk_cd})\n"
@@ -219,14 +237,21 @@ def _build_message(cfg: dict, *, side: str, stk_cd: str, stk_nm: str | None,
         f"수량: {qty:,}주\n"
         f"단가: {price:,}원\n"
         f"총액: {total:,}원\n\n"
-        f"※ 이 메일은 자동 발송된 참고용 알림입니다. 실제 체결 확인은 증권사 앱/HTS 를 기준으로 하세요.\n"
+        f"매매 사유: {reason_text}\n"
+    )
+    label = _algo_label(algo_code)
+    if label:
+        body += f"알고리즘: {label}\n"
+    body += (
+        f"\n※ 이 메일은 자동 발송된 참고용 알림입니다. 실제 체결 확인은 증권사 앱/HTS 를 기준으로 하세요.\n"
     )
     msg.set_content(body)
     return msg
 
 
 def _send_sync(cfg: dict, *, side: str, stk_cd: str, stk_nm: str | None,
-               qty: int, price: int, executed_at: _dt.datetime) -> None:
+               qty: int, price: int, executed_at: _dt.datetime,
+               algo_code: str | None = None, reason: str | None = None) -> None:
     """실제 SMTP 발송 (동기, 블로킹). 예외를 절대 밖으로 던지지 않는다.
 
     스레드로 감싸지 않은 순수 함수라 테스트/일회성 점검에서 직접 호출하기 쉽다.
@@ -234,7 +259,8 @@ def _send_sync(cfg: dict, *, side: str, stk_cd: str, stk_nm: str | None,
     smtp = cfg.get("smtp") or {}
     try:
         msg = _build_message(cfg, side=side, stk_cd=stk_cd, stk_nm=stk_nm, qty=qty,
-                             price=price, executed_at=executed_at)
+                             price=price, executed_at=executed_at,
+                             algo_code=algo_code, reason=reason)
         with smtplib.SMTP(smtp["host"], int(smtp["port"]), timeout=10) as client:
             client.starttls()
             client.login(smtp["user"], smtp["password"])
@@ -247,12 +273,17 @@ def _send_sync(cfg: dict, *, side: str, stk_cd: str, stk_nm: str | None,
 
 def send_trade_completed_mail(cfg: dict | None, *, side: str, stk_cd: str,
                               stk_nm: str | None, qty: int, price: int,
-                              executed_at: _dt.datetime) -> None:
+                              executed_at: _dt.datetime,
+                              algo_code: str | None = None,
+                              reason: str | None = None) -> None:
     """체결 완료 알림 메일을 백그라운드 스레드로 발송한다.
 
     WS 메시지 처리 경로에서 호출되므로 **절대 그 자리에서 블로킹하지 않는다** - 실제
     네트워크 송신은 데몬 스레드에서 수행하고, 그 스레드 안에서 예외를 모두 삼킨다.
     `cfg` 가 없거나 필수값이 빠지면 아무 것도 하지 않고 즉시 반환한다(무조건 호출해도 안전).
+    `algo_code`/`reason` 은 이 주문이 '왜' 나갔는지(어떤 알고리즘·어떤 판단)를 메일
+    본문에 담기 위한 참고정보다 - 수동 주문이거나 조회에 실패하면 둘 다 None 으로
+    넘겨도 안전하다(본문에 '사유 정보 없음'으로 표시).
     """
     if not _is_valid(cfg):
         log.debug("메일 설정 없음/불완전 - 체결 알림 메일 생략 (%s %s)", side, stk_cd)
@@ -260,6 +291,7 @@ def send_trade_completed_mail(cfg: dict | None, *, side: str, stk_cd: str,
     threading.Thread(
         target=_send_sync,
         kwargs={"cfg": cfg, "side": side, "stk_cd": stk_cd, "stk_nm": stk_nm,
-                "qty": qty, "price": price, "executed_at": executed_at},
+                "qty": qty, "price": price, "executed_at": executed_at,
+                "algo_code": algo_code, "reason": reason},
         daemon=True,
     ).start()
