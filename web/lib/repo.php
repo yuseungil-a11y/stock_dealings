@@ -342,16 +342,66 @@ function repo_daily_totals(int $accountId, ?string $from, ?string $to, string $q
     return $row ?? ['cnt' => 0, 'buy_amt' => 0, 'sell_amt' => 0, 'cmsn_tax' => 0, 'pl_amt' => 0];
 }
 
+/**
+ * daily_trade_summary 의 "매도분 매입원가" SQL 식(매도가 있는 행만, 없으면 0).
+ * ka10170(ottks_tp=2) 의 pl_amt = 매도금액 − 매도수량×매입평균가 − 수수료·제세금 이므로
+ * 매도금액 − 손익 − 수수료·제세금 = 그 매도분의 매입원가다(같은 날 왕복·이전 매수분 매도 모두 성립).
+ * 매수만 있는 행은 원가에 넣지 않는다 — 아직 보유 중이면 holding.pur_amt 로 따로 잡히므로
+ * buy_amt 를 그대로 더하면 이중계산이 된다.
+ */
+const DTS_SOLD_COST_SQL = 'CASE WHEN sell_qty > 0 THEN COALESCE(sell_amt,0) - COALESCE(pl_amt,0) - COALESCE(cmsn_tax,0) ELSE 0 END';
+
+/**
+ * 실현 + 평가 합산 수익률(공통). 대시보드 "총손익(실현+평가)" 와 기간별 수익률 화면이 같이 쓴다.
+ *   손익 = Σ 실현손익(기간 내 매도 행) + Σ holding.evltv_prft(현재 평가손익)
+ *   원가 = Σ 매도분 매입원가(기간 내 매도 행) + Σ holding.pur_amt(현재 보유 매입금액)
+ * $from/$to 가 둘 다 null 이면 전체 기간. 평가 부분(holding)은 항상 현재 시점 값이다.
+ * @return array{realized_pl:float,realized_cost:float,realized_rate:?float,sell_rows:int,
+ *               holding_pl:float,holding_cost:float,combined_pl:float,combined_cost:float,combined_rate:?float}
+ */
+function repo_combined_return(int $accountId, ?string $from, ?string $to): array
+{
+    [$w, $p] = repo_filter('base_dt', $from, $to, '', []);
+    $row = db_row(
+        'SELECT COALESCE(SUM(CASE WHEN sell_qty > 0 THEN COALESCE(pl_amt,0) ELSE 0 END),0) AS realized_pl,
+                COALESCE(SUM(' . DTS_SOLD_COST_SQL . '),0) AS realized_cost,
+                COALESCE(SUM(CASE WHEN sell_qty > 0 THEN 1 ELSE 0 END),0) AS sell_rows
+           FROM daily_trade_summary WHERE account_id = ?' . $w,
+        array_merge([$accountId], $p)
+    ) ?? ['realized_pl' => 0, 'realized_cost' => 0, 'sell_rows' => 0];
+    $hold = repo_holding_totals($accountId);
+    $realizedPl = (float)$row['realized_pl'];
+    $realizedCost = (float)$row['realized_cost'];
+    $holdingPl = (float)$hold['evltv_prft'];
+    $holdingCost = (float)$hold['pur_amt'];
+    $combinedPl = $realizedPl + $holdingPl;
+    $combinedCost = $realizedCost + $holdingCost;
+    // 분모(원가)가 0 이하면 비율 표기를 생략하도록 null 을 반환한다.
+    return [
+        'realized_pl' => $realizedPl,
+        'realized_cost' => $realizedCost,
+        'realized_rate' => $realizedCost > 0 ? ($realizedPl / $realizedCost) * 100 : null,
+        'sell_rows' => (int)$row['sell_rows'],
+        'holding_pl' => $holdingPl,
+        'holding_cost' => $holdingCost,
+        'combined_pl' => $combinedPl,
+        'combined_cost' => $combinedCost,
+        'combined_rate' => $combinedCost > 0 ? ($combinedPl / $combinedCost) * 100 : null,
+    ];
+}
+
 /** 기간별 수익률 조회(account.returns) 의 그룹 단위 화이트리스트. */
 const PERIOD_BREAKDOWN_GROUPS = ['day', 'week', 'month'];
 
 /**
- * daily_trade_summary 를 일/주/월 단위로 묶어 버킷별 손익 · 매수금액 · 수익률 · 거래건수를 돌려준다.
+ * daily_trade_summary 를 일/주/월 단위로 묶어 버킷별 손익 · 매도분 원가 · 매수금액 · 수익률 · 거래건수를 돌려준다.
+ * 버킷 수익률은 "그 기간에 실현된 것"만 본다: 실현손익 ÷ 매도분 매입원가(DTS_SOLD_COST_SQL).
+ * 보유분(평가손익)은 더하지 않는다. buy_amt(기간 매수금액)는 참고 표기용이며 분모로 쓰지 않는다.
  * 오래된 기간부터(ASC) 정렬한다(차트용).
  * $groupBy 는 호출부(view)에서 clean_enum() 으로 화이트리스트 검증된 값만 들어온다고 가정하지만,
  * 여기서도 다시 한 번 화이트리스트로 GROUP BY 식을 선택한다(사용자 입력을 SQL 문자열에 직접 넣지 않음).
  * 주(week) 는 ISO 주(월요일 시작)로 묶는다 — YEARWEEK(..., 1).
- * @return array<int,array{period_label:string,pl_amt:float,buy_amt:float,trade_count:int,rate:?float}>
+ * @return array<int,array{period_label:string,pl_amt:float,cost_amt:float,buy_amt:float,trade_count:int,rate:?float}>
  */
 function repo_period_breakdown(int $accountId, ?string $from, ?string $to, string $groupBy): array
 {
@@ -363,7 +413,9 @@ function repo_period_breakdown(int $accountId, ?string $from, ?string $to, strin
     [$w, $p] = repo_filter('base_dt', $from, $to, '', []);
     $rows = db_all(
         'SELECT ' . $groupExpr . ' AS period_key, MIN(base_dt) AS period_start, MAX(base_dt) AS period_end,
-                COUNT(*) AS trade_count, COALESCE(SUM(buy_amt),0) AS buy_amt, COALESCE(SUM(pl_amt),0) AS pl_amt
+                COUNT(*) AS trade_count, COALESCE(SUM(buy_amt),0) AS buy_amt,
+                COALESCE(SUM(CASE WHEN sell_qty > 0 THEN COALESCE(pl_amt,0) ELSE 0 END),0) AS pl_amt,
+                COALESCE(SUM(' . DTS_SOLD_COST_SQL . '),0) AS cost_amt
            FROM daily_trade_summary WHERE account_id = ?' . $w . '
           GROUP BY period_key ORDER BY period_key ASC',
         array_merge([$accountId], $p)
@@ -371,6 +423,7 @@ function repo_period_breakdown(int $accountId, ?string $from, ?string $to, strin
     $out = [];
     foreach ($rows as $r) {
         $buy = (float)$r['buy_amt'];
+        $cost = (float)$r['cost_amt'];
         $pl = (float)$r['pl_amt'];
         $label = match ($groupBy) {
             'month' => (string)$r['period_key'],
@@ -380,9 +433,10 @@ function repo_period_breakdown(int $accountId, ?string $from, ?string $to, strin
         $out[] = [
             'period_label' => $label,
             'pl_amt' => $pl,
+            'cost_amt' => $cost,
             'buy_amt' => $buy,
             'trade_count' => (int)$r['trade_count'],
-            'rate' => $buy > 0 ? ($pl / $buy * 100) : null,
+            'rate' => $cost > 0 ? ($pl / $cost * 100) : null,
         ];
     }
     return $out;
@@ -2096,17 +2150,8 @@ function repo_dashboard(?int $accountId): array
         ? (int)db_val('SELECT COUNT(*) FROM orders WHERE account_id = ? AND created_at >= ?', [$accountId, $today . ' 00:00:00'], 0)
         : 0;
     $todaySignals = (int)db_val('SELECT COUNT(*) FROM signal_log WHERE created_at >= ?', [$today . ' 00:00:00'], 0);
-    // 전체 기간 실현손익(이미 청산된 종목 포함) + 현재 보유종목 평가손익 합산.
-    $allTimeRealizedPl = $accountId !== null
-        ? (float)db_val('SELECT COALESCE(SUM(pl_amt),0) FROM daily_trade_summary WHERE account_id = ?', [$accountId], 0)
-        : 0.0;
-    $allTimeRealizedBuyAmt = $accountId !== null
-        ? (float)db_val('SELECT COALESCE(SUM(buy_amt),0) FROM daily_trade_summary WHERE account_id = ?', [$accountId], 0)
-        : 0.0;
-    $combinedPl = $allTimeRealizedPl + (float)$totals['evltv_prft'];
-    $combinedBuyAmt = $allTimeRealizedBuyAmt + (float)$totals['pur_amt'];
-    // 분모(전체 매수금액)가 0 이면 비율 표기를 생략하도록 null 을 반환한다.
-    $combinedRate = $combinedBuyAmt > 0 ? ($combinedPl / $combinedBuyAmt) * 100 : null;
+    // 전체 기간 실현손익(이미 청산된 종목 포함) + 현재 보유종목 평가손익 합산 (기간별 수익률 화면과 같은 공식).
+    $lifetime = $accountId !== null ? repo_combined_return($accountId, null, null) : null;
     return [
         'balance' => $balance,
         'holding_totals' => $totals,
@@ -2117,11 +2162,11 @@ function repo_dashboard(?int $accountId): array
         'trend' => repo_trend_today(),
         'fail_24h' => repo_recent_order_failures($accountId, 24),
         'lifetime' => [
-            'realized_pl' => $allTimeRealizedPl,
-            'realized_buy_amt' => $allTimeRealizedBuyAmt,
-            'combined_pl' => $combinedPl,
-            'combined_buy_amt' => $combinedBuyAmt,
-            'combined_rate' => $combinedRate,
+            'realized_pl' => $lifetime['realized_pl'] ?? 0.0,
+            'realized_cost' => $lifetime['realized_cost'] ?? 0.0,
+            'combined_pl' => $lifetime['combined_pl'] ?? 0.0,
+            'combined_cost' => $lifetime['combined_cost'] ?? 0.0,
+            'combined_rate' => $lifetime['combined_rate'] ?? null,
         ],
     ];
 }

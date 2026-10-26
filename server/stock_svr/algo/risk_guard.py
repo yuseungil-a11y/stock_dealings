@@ -12,6 +12,7 @@ import logging
 from dataclasses import dataclass
 from decimal import ROUND_CEILING, Decimal
 
+from ..db import CostBasisUnknownError
 from ..util import today_kst
 from .base import KIND_STOP_LOSS, SLIPPAGE_BUFFER, Algorithm, Signal, amount_with_buffer
 from .registry import register
@@ -310,15 +311,20 @@ class RiskGuard(Algorithm):
             realized = ctx.db.today_realized_pl(ctx.account_id, today_kst())
         except Exception as exc:  # noqa: BLE001
             return None, f"당일 실현손익 조회 실패({type(exc).__name__})"
-        # 장중에는 daily_trade_summary 가 비어 있을 수 있어 체결 기반 추정을 더한다(B6)
+        # 장중에는 daily_trade_summary 가 비어 있으므로(장마감 정리에서만 채움) 체결을
+        # 평균단가로 재생한 실현손익 추정치를 쓴다(B6, db.today_realized_pl_from_executions).
         intraday = 0
         getter = getattr(ctx.db, "today_realized_pl_from_executions", None)
         if callable(getter):
             try:
                 intraday = getter(ctx.account_id, today_kst())
+            except CostBasisUnknownError as exc:
+                return None, f"당일 실현손익 추정 불가({exc})"[:200]
             except Exception as exc:  # noqa: BLE001
                 return None, f"당일 체결 손익 추정 실패({type(exc).__name__})"
-        pl = realized if abs(realized) >= abs(intraday) else intraday
+        # 둘 중 **더 불리한(작은) 값**을 쓴다. 예전의 '절댓값이 큰 쪽'은 큰 이익 추정치가
+        # 실제 손실을 덮어 한도가 작동하지 않는 방향으로도 틀릴 수 있었다.
+        pl = min(int(realized), int(intraday))
         base = ctx.balance.get("prsm_dpst_aset_amt") or ctx.balance.get("tot_evlt_amt") or 0
         try:
             base = int(base or 0)

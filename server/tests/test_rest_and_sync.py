@@ -345,6 +345,77 @@ def test_daily_diary_parsing():
     assert r["sell_avg_pric"] == 61000 and r["pl_amt"] == 4800
 
 
+# ka10170 실응답(2026-10-26, ottks_tp=2) 에서 옮긴 행: 전일 이전 매수분 매도(buy_qty=0)와
+# 같은 날 왕복매매 행이 섞여 있다.
+DIARY_ALL_SELLS = {
+    "return_code": 0,
+    "tdy_trde_diary": [
+        {"stk_cd": "004560", "stk_nm": "현대비앤지스틸", "buy_qty": "9", "buy_avg_pric": "10750",
+         "buy_amt": "96750", "sell_qty": "9", "sel_avg_pric": "10510", "sell_amt": "94590",
+         "cmsn_alm_tax": "208", "pl_amt": "-2368", "prft_rt": "-2.45"},
+        {"stk_cd": "059100", "stk_nm": "아이컴포넌트", "buy_qty": "0", "buy_avg_pric": "0",
+         "buy_amt": "0", "sell_qty": "12", "sel_avg_pric": "7090", "sell_amt": "85080",
+         "cmsn_alm_tax": "180", "pl_amt": "-12756", "prft_rt": "-13.06"},
+        {"stk_cd": "006730", "stk_nm": "서부T&D", "buy_qty": "0", "buy_avg_pric": "0",
+         "buy_amt": "0", "sell_qty": "6", "sel_avg_pric": "11540", "sell_amt": "69240",
+         "cmsn_alm_tax": "148", "pl_amt": "392", "prft_rt": "+0.57"},
+    ],
+}
+
+
+def test_daily_diary_requests_all_sells_for_given_date():
+    """ottks_tp=2(당일매도 전체) 로, 넘긴 base_dt 그대로 요청한다(과거일 백필 지원)."""
+    rest = FakeRest({"ka10170": {"return_code": 0, "tdy_trde_diary": []}})
+
+    class D(FakeDb):
+        def upsert_daily_summary(self, account_id, base_dt, rows):
+            return len(rows)
+
+    HousekeepingService(D(), rest, 1).sync_daily_diary(_dt.date(2026, 10, 13))
+    calls = [body for api, body in rest.calls if api == "ka10170"]
+    assert calls, "ka10170 이 호출되지 않았다"
+    assert calls[0]["ottks_tp"] == "2"
+    assert calls[0]["base_dt"] == "20261013"
+    assert calls[0]["ch_crd_tp"] == "0"
+
+
+def test_daily_diary_parses_prior_day_buy_sells():
+    """전일 이전 매수분 매도 행(buy_qty=0)의 손익·부호가 그대로 들어오고, 매도분 원가
+    (sell_amt - pl_amt - cmsn_tax)가 같은 날 왕복매매 행과 같은 공식으로 맞아떨어진다."""
+    captured = {}
+
+    class D(FakeDb):
+        def upsert_daily_summary(self, account_id, base_dt, rows):
+            captured["base_dt"] = base_dt
+            captured["rows"] = rows
+            return len(rows)
+
+    HousekeepingService(D(), FakeRest({"ka10170": DIARY_ALL_SELLS}), 1).sync_daily_diary(
+        _dt.date(2026, 10, 26))
+    assert captured["base_dt"] == _dt.date(2026, 10, 26)
+    by = {r["stk_cd"]: r for r in captured["rows"]}
+    assert by["059100"]["pl_amt"] == -12756 and by["059100"]["buy_qty"] == 0
+    assert by["006730"]["pl_amt"] == 392            # "+392" 부호 처리
+    rt = by["004560"]                                # 같은 날 왕복: 원가 = 수량 × 매수평균가
+    assert rt["sell_amt"] - rt["pl_amt"] - rt["cmsn_tax"] == rt["sell_qty"] * rt["buy_avg_pric"]
+
+
+def test_daily_diary_empty_response_writes_nothing():
+    """휴장일 등 '조회 내역이 없습니다' 응답(빈 목록)은 에러 없이 0건."""
+    captured = {}
+
+    class D(FakeDb):
+        def upsert_daily_summary(self, account_id, base_dt, rows):
+            captured["rows"] = rows
+            return len(rows)
+
+    empty = {"return_code": 0, "return_msg": "조회 내역이 없습니다.", "tot_sell_amt": "",
+             "tdy_trde_diary": [{"stk_cd": "", "stk_nm": "", "pl_amt": ""}]}
+    n = HousekeepingService(D(), FakeRest({"ka10170": empty}), 1).sync_daily_diary(
+        _dt.date(2026, 10, 9))
+    assert n == 0 and captured["rows"] == []
+
+
 def test_housekeeping_without_rest_is_noop():
     house = HousekeepingService(FakeDb(), rest=None, account_id=None)
     assert house.sync_trade_ledger() == 0

@@ -816,6 +816,8 @@ class Engine:
         self._master_synced_date = today
 
     def _eod_if_needed(self) -> None:
+        # 주말·16시 이전은 여기서 거른다. 평일 공휴일(휴장) 판정과 '오늘 이미 완료(재시작 포함)'
+        # 판정은 HousekeepingService.run_end_of_day 가 한다(ka10081 개장일 확인 + system_setting).
         now = now_kst()
         if now.weekday() >= 5 or now.hour < 16:
             return

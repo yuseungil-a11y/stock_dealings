@@ -136,6 +136,84 @@ class GateChangeError(PermissionError):
     """주문 게이트 3키를 허용되지 않은 경로로 바꾸려 할 때."""
 
 
+# ---------------------------------------------------------------------- #
+# 장중 실현손익 추정 (risk_guard 일 손실 한도용)
+# ---------------------------------------------------------------------- #
+class CostBasisUnknownError(RuntimeError):
+    """당일 매도분의 매입단가를 알 수 없어 실현손익을 추정할 수 없음(→ risk_guard 가 매수 차단)."""
+
+
+def _pl_code(code) -> str:
+    """체결(executions)과 보유(holding/holding_snapshot)의 종목코드를 같은 키로 맞춘다.
+
+    `norm_stk_cd` 는 'A' 뒤가 숫자일 때만 접두를 떼서, 영숫자 코드(ETN 등)는 보유표에
+    'A0015N0', 체결표에 '0015N0' 으로 서로 다르게 남는다. 여기서만 7자리 'A' 접두를 뗀다.
+    """
+    s = str(code or "").strip().upper()
+    for suffix in ("_NX", "_AL"):
+        if s.endswith(suffix):
+            s = s[: -len(suffix)]
+    if len(s) == 7 and s.startswith("A"):
+        s = s[1:]
+    return s
+
+
+def avg_cost_realized_pl(start_positions: dict[str, tuple[int, float]],
+                         executions: Iterable[dict], base_dt: _dt.date,
+                         fallback_avg: dict[str, float] | None = None) -> tuple[int, list[str]]:
+    """평균단가(이동평균) 방식 당일 실현손익 = Σ 당일 매도 (체결가 − 그 시점 평균매입가) × 수량
+    − 당일 체결 수수료·세금. 반환: (손익(원), 매입단가를 모르는 종목코드 목록).
+
+    * `start_positions`: 기준 스냅샷 시점의 {종목: (수량, 평균매입가)} (holding_snapshot).
+    * `executions`: 스냅샷 다음날부터 `base_dt` 까지의 체결, **시간순**. base_dt 이전 체결은
+      보유수량·평단만 갱신하고, base_dt 체결만 손익·비용에 넣는다.
+    * 매수 체결은 평단을 (기존수량×평단 + 체결수량×체결가) / 합계수량 으로 갱신한다.
+      키움 holding.pur_pric·ka10170 의 '매도수량 × 매입평균가' 와 같은 관례다.
+    * 수수료·세금은 당일 매수·매도 체결분을 모두 뺀다(ka10170 은 이전 매수분의 매수수수료를
+      빼지 않으므로 보통 수십 원 더 **보수적**(손실 쪽)으로 나온다).
+    * 보유수량보다 많이 판 부분은 `fallback_avg`(현재 holding.pur_pric)로 보충하고,
+      그것도 없으면 그 종목을 '매입단가 미확인' 목록에 넣는다(호출자가 fail-closed 처리).
+    """
+    pos: dict[str, list] = {c: [int(q), float(a)] for c, (q, a) in start_positions.items()
+                            if int(q) > 0 and float(a) > 0}
+    fallback = fallback_avg or {}
+    gross = Decimal(0)
+    fees = 0
+    unknown: list[str] = []
+    for e in executions:
+        code = _pl_code(e.get("stk_cd"))
+        qty = int(e.get("cntr_qty") or 0)
+        price = int(e.get("cntr_pric") or 0)
+        if not code or qty <= 0 or price <= 0:
+            continue
+        when = e.get("executed_at")
+        day = when.date() if isinstance(when, _dt.datetime) else when
+        today = day == base_dt
+        held = pos.setdefault(code, [0, 0.0])
+        if today:
+            fees += int(e.get("cmsn") or 0) + int(e.get("tax") or 0)
+        if e.get("side") == "BUY":
+            new_qty = held[0] + qty
+            held[1] = (held[0] * held[1] + qty * price) / new_qty
+            held[0] = new_qty
+            continue
+        # SELL
+        known = min(qty, held[0])
+        if today and known > 0:
+            gross += Decimal(known) * (Decimal(price) - Decimal(str(held[1])))
+        excess = qty - known
+        if today and excess > 0:
+            avg = float(fallback.get(code) or 0)
+            if avg > 0:
+                gross += Decimal(excess) * (Decimal(price) - Decimal(str(avg)))
+            elif code not in unknown:
+                unknown.append(code)
+        held[0] -= known
+        if held[0] <= 0:
+            held[0], held[1] = 0, 0.0
+    return int(gross.to_integral_value()) - fees, unknown
+
+
 class Database:
     """스레드 안전 커넥션 풀(스레드 로컬) + 도메인 헬퍼."""
 
@@ -1544,25 +1622,57 @@ class Database:
             (account_id, base_dt), default=0) or 0)
 
     def today_realized_pl_from_executions(self, account_id: int, base_dt: _dt.date) -> int:
-        """장중 추정 손익 (B6): 당일 체결의 (매도금액 - 매수금액 - 수수료/세금).
+        """장중 실현손익 추정 (B6): **평균단가 기준** 당일 매도분 손익 − 당일 수수료·세금.
 
-        매매일지(ka10170)가 장마감 후에만 채워지므로 장중에는 이 추정치를 함께 본다.
+        매매일지(ka10170)는 장마감 정리(EOD)에서만 받으므로 장중에는 이 추정치를 쓴다.
+        예전에는 '매도체결액 − 매수체결액 − 수수료'(= 현금흐름)를 손익으로 써서, 많이 산 날은
+        손실로(9/29 -12.8%, 10/16 -13.8% 로 오판해 매수 차단), 많이 판 날은 이익으로(10/13 실제
+        -40,840원인데 +480,730원) 오판했다. 이제는 직전 영업일 장마감 보유 스냅샷
+        (holding_snapshot: 수량·평균매입가)에서 출발해 체결을 시간순으로 재생한다.
+        2026-09-22~10-21 실데이터로 ka10170 확정치와 일별 0~260원 차이(손익 방향 전부 일치).
+
+        매도분 매입단가를 끝내 알 수 없으면 `CostBasisUnknownError` 를 던진다 → risk_guard 가
+        '일 손실률 확인 불가'로 매수를 차단한다(fail-closed, S-06).
         """
-        row = self.query_one(
-            "SELECT "
-            " COALESCE(SUM(CASE WHEN side='SELL' THEN cntr_qty*cntr_pric ELSE 0 END),0) AS sell_amt,"
-            " COALESCE(SUM(CASE WHEN side='BUY'  THEN cntr_qty*cntr_pric ELSE 0 END),0) AS buy_amt,"
-            " COALESCE(SUM(COALESCE(cmsn,0)+COALESCE(tax,0)),0) AS fees "
-            "FROM executions WHERE account_id=%s AND DATE(executed_at)=%s",
-            (account_id, base_dt))
-        if not row:
-            return 0
-        sell = int(row.get("sell_amt") or 0)
-        buy = int(row.get("buy_amt") or 0)
-        fees = int(row.get("fees") or 0)
-        if sell <= 0:
+        today_rows = self.query(
+            "SELECT stk_cd, side, cntr_qty, cntr_pric, cmsn, tax, executed_at FROM executions "
+            "WHERE account_id=%s AND executed_at >= %s AND executed_at < %s "
+            "ORDER BY executed_at, id",
+            (account_id, base_dt, base_dt + _dt.timedelta(days=1)))
+        if not any(r.get("side") == "SELL" for r in today_rows):
             return 0          # 매도가 없으면 실현손익 없음(매수는 평가손익)
-        return sell - buy - fees
+
+        snap = self.scalar(
+            "SELECT MAX(snap_date) FROM holding_snapshot WHERE account_id=%s AND snap_date < %s",
+            (account_id, base_dt))
+        start: dict[str, tuple[int, float]] = {}
+        if snap:
+            for r in self.query(
+                    "SELECT stk_cd, rmnd_qty, pur_pric FROM holding_snapshot "
+                    "WHERE account_id=%s AND snap_date=%s", (account_id, snap)):
+                start[_pl_code(r.get("stk_cd"))] = (int(r.get("rmnd_qty") or 0),
+                                                    float(r.get("pur_pric") or 0))
+        # 스냅샷 다음날 ~ 어제 체결(장마감 정리가 빠진 날이 있어도 보유·평단을 이어 붙인다)
+        prior_from = (snap + _dt.timedelta(days=1)) if snap else _dt.date(2000, 1, 1)
+        prior_rows = self.query(
+            "SELECT stk_cd, side, cntr_qty, cntr_pric, cmsn, tax, executed_at FROM executions "
+            "WHERE account_id=%s AND executed_at >= %s AND executed_at < %s "
+            "ORDER BY executed_at, id",
+            (account_id, prior_from, base_dt)) if prior_from < base_dt else []
+        executions = list(prior_rows) + list(today_rows)
+
+        pl, unknown = avg_cost_realized_pl(start, executions, base_dt)
+        if unknown:
+            # 보충: 현재 보유표의 평균매입가(부분 매도 종목). 그래도 없으면 fail-closed.
+            fallback = {_pl_code(r.get("stk_cd")): float(r.get("pur_pric") or 0)
+                        for r in self.query(
+                            "SELECT stk_cd, pur_pric FROM holding WHERE account_id=%s",
+                            (account_id,))}
+            pl, unknown = avg_cost_realized_pl(start, executions, base_dt, fallback)
+            if unknown:
+                raise CostBasisUnknownError(
+                    "매도 종목 매입단가 확인 불가: " + ",".join(unknown[:5]))
+        return pl
 
     # ================================================================== #
     # 시스템 / 관제 / 로그

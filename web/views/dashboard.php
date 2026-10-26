@@ -48,9 +48,9 @@ $canOrder = ($orderEnabled === '1') && ($mode === 'mock' || $realConfirm === '1'
     <h2 class="card-t">총손익(실현+평가)</h2>
     <?php $lt = $d['lifetime']; ?>
     <p class="card-v <?= h(sign_class($lt['combined_pl'])) ?>" data-k="lifetime_combined_pl"><?= h(money_signed($lt['combined_pl'])) ?></p>
-    <p class="card-s">전체 매수금액 대비
+    <p class="card-s">투입 원가 대비
       <span class="<?= h(sign_class($lt['combined_rate'])) ?>" data-k="lifetime_combined_rate"><?= h(pct($lt['combined_rate'])) ?></span></p>
-    <p class="card-s muted">청산 완료 종목의 실현손익 전체 누적 + 현재 보유종목 평가손익 합산</p>
+    <p class="card-s muted">전체 기간 실현손익 + 현재 보유종목 평가손익 합산 ÷ (매도분 매입원가 + 현재 보유 매입금액)</p>
   </div>
   <div class="card">
     <h2 class="card-t">보유종목</h2>

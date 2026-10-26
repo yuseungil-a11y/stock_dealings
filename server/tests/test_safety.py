@@ -411,6 +411,106 @@ def test_eod_failure_backs_off_and_caps_attempts():
     assert calls["n"] <= EOD_MAX_ATTEMPTS
 
 
+# -- 휴장일 · 재시작 시 장마감 정리 재실행 방지 ------------------------------ #
+class _EodDb(FakeDb):
+    def __init__(self):
+        super().__init__()
+        self.diary_writes: list = []
+        self.snapshots: list = []
+
+    def upsert_trade_ledger(self, account_id, rows):
+        return len(rows)
+
+    def upsert_daily_summary(self, account_id, base_dt, rows):
+        self.diary_writes.append((base_dt, list(rows)))
+        return len(rows)
+
+    def snapshot_holdings(self, account_id, snap_date):
+        self.snapshots.append(snap_date)
+        return 1
+
+
+def _bars(*dates):
+    return {"return_code": 0, "stk_dt_pole_chart_qry": [
+        {"dt": d.strftime("%Y%m%d"), "cur_prc": "60000"} for d in dates]}
+
+
+def _eod_house(monkeypatch, today, bars, db=None):
+    from stock_svr.services import housekeeping as hk
+
+    monkeypatch.setattr(hk, "today_kst", lambda: today)
+    rest = FakeRest({"ka10081": bars, "kt00015": {"return_code": 0},
+                     "ka10170": {"return_code": 0, "tdy_trde_diary": [
+                         {"stk_cd": "457370", "sell_qty": "5", "sell_amt": "55450",
+                          "pl_amt": "-2270"}]}})
+    db = db or _EodDb()
+    return HousekeepingService(db, rest, 2), db, rest
+
+
+def test_eod_skips_weekday_holiday(monkeypatch):
+    """한글날(2026-10-09, 금) - 최신 일봉이 10-08 이면 휴장. 매매일지·스냅샷을 쓰지 않는다
+    (예전엔 10-08 데이터가 10-09 날짜로 한 벌 더 저장됐다)."""
+    holiday = _dt.date(2026, 10, 9)
+    house, db, rest = _eod_house(monkeypatch, holiday,
+                                 _bars(_dt.date(2026, 10, 7), _dt.date(2026, 10, 8)))
+    assert house.run_end_of_day() is False
+    assert db.diary_writes == [] and db.snapshots == []
+    assert [a for a, _ in rest.calls] == ["ka10081"]
+    assert "last_eod_date" not in db.settings
+    # 같은 날은 다시 확인하지 않는다(API 반복 호출 없음)
+    house._eod_next_try = None                   # noqa: SLF001
+    assert house.run_end_of_day() is False
+    assert [a for a, _ in rest.calls] == ["ka10081"]
+
+
+def test_eod_runs_on_trading_day_and_persists_completion(monkeypatch):
+    day = _dt.date(2026, 10, 26)
+    house, db, rest = _eod_house(monkeypatch, day, _bars(_dt.date(2026, 10, 23), day))
+    assert house.run_end_of_day() is True
+    assert [d for d, _ in db.diary_writes] == [day] and db.snapshots == [day]
+    assert db.settings["last_eod_date"] == "2026-10-26"
+    body = dict(rest.calls)["ka10081"]
+    assert body["stk_cd"] == "005930" and body["base_dt"] == "20261026"
+
+
+def test_eod_not_rerun_after_restart_same_day(monkeypatch):
+    """재시작(새 HousekeepingService)해도 오늘 이미 끝났으면 키움 호출·덮어쓰기를 하지 않는다."""
+    day = _dt.date(2026, 10, 26)
+    db = _EodDb()
+    db.settings["last_eod_date"] = "2026-10-26"
+    house, db, rest = _eod_house(monkeypatch, day, _bars(day), db=db)
+    assert house.run_end_of_day() is False
+    assert rest.calls == [] and db.diary_writes == [] and db.snapshots == []
+    # 전날 기록만 있으면 오늘은 정상 실행
+    db2 = _EodDb()
+    db2.settings["last_eod_date"] = "2026-10-23"
+    house2, db2, _ = _eod_house(monkeypatch, day, _bars(day), db=db2)
+    assert house2.run_end_of_day() is True
+    assert db2.settings["last_eod_date"] == "2026-10-26"
+
+
+def test_eod_postponed_when_trading_day_unknown(monkeypatch):
+    """개장일 확인 불가(일봉 없음/조회 실패)면 쓰지 않고 백오프 후 다시 확인한다."""
+    day = _dt.date(2026, 10, 26)
+    house, db, rest = _eod_house(monkeypatch, day, {"return_code": 0})
+    assert house.run_end_of_day() is False
+    assert db.diary_writes == [] and "last_eod_date" not in db.settings
+    assert house.run_end_of_day() is False       # 백오프 중
+    assert len(rest.calls) == 1
+    rest.responses["ka10081"] = _bars(day)
+    house._eod_next_try = None                   # noqa: SLF001
+    assert house.run_end_of_day() is True
+
+
+def test_eod_force_skips_checks(monkeypatch):
+    day = _dt.date(2026, 10, 9)
+    db = _EodDb()
+    db.settings["last_eod_date"] = "2026-10-09"
+    house, db, rest = _eod_house(monkeypatch, day, _bars(_dt.date(2026, 10, 8)), db=db)
+    assert house.run_end_of_day(force=True) is True
+    assert "ka10081" not in [a for a, _ in rest.calls]
+
+
 # ====================================================================== #
 # B2 : 체결 결정적 키
 # ====================================================================== #
