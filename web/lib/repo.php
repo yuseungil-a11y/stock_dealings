@@ -342,6 +342,52 @@ function repo_daily_totals(int $accountId, ?string $from, ?string $to, string $q
     return $row ?? ['cnt' => 0, 'buy_amt' => 0, 'sell_amt' => 0, 'cmsn_tax' => 0, 'pl_amt' => 0];
 }
 
+/** 기간별 수익률 조회(account.returns) 의 그룹 단위 화이트리스트. */
+const PERIOD_BREAKDOWN_GROUPS = ['day', 'week', 'month'];
+
+/**
+ * daily_trade_summary 를 일/주/월 단위로 묶어 버킷별 손익 · 매수금액 · 수익률 · 거래건수를 돌려준다.
+ * 오래된 기간부터(ASC) 정렬한다(차트용).
+ * $groupBy 는 호출부(view)에서 clean_enum() 으로 화이트리스트 검증된 값만 들어온다고 가정하지만,
+ * 여기서도 다시 한 번 화이트리스트로 GROUP BY 식을 선택한다(사용자 입력을 SQL 문자열에 직접 넣지 않음).
+ * 주(week) 는 ISO 주(월요일 시작)로 묶는다 — YEARWEEK(..., 1).
+ * @return array<int,array{period_label:string,pl_amt:float,buy_amt:float,trade_count:int,rate:?float}>
+ */
+function repo_period_breakdown(int $accountId, ?string $from, ?string $to, string $groupBy): array
+{
+    $groupExpr = match ($groupBy) {
+        'week' => 'YEARWEEK(base_dt, 1)',
+        'month' => "DATE_FORMAT(base_dt, '%Y-%m')",
+        default => 'base_dt',
+    };
+    [$w, $p] = repo_filter('base_dt', $from, $to, '', []);
+    $rows = db_all(
+        'SELECT ' . $groupExpr . ' AS period_key, MIN(base_dt) AS period_start, MAX(base_dt) AS period_end,
+                COUNT(*) AS trade_count, COALESCE(SUM(buy_amt),0) AS buy_amt, COALESCE(SUM(pl_amt),0) AS pl_amt
+           FROM daily_trade_summary WHERE account_id = ?' . $w . '
+          GROUP BY period_key ORDER BY period_key ASC',
+        array_merge([$accountId], $p)
+    );
+    $out = [];
+    foreach ($rows as $r) {
+        $buy = (float)$r['buy_amt'];
+        $pl = (float)$r['pl_amt'];
+        $label = match ($groupBy) {
+            'month' => (string)$r['period_key'],
+            'week' => kst($r['period_start'], 'Y-m-d') . ' ~ ' . kst($r['period_end'], 'Y-m-d'),
+            default => kst($r['period_start'], 'Y-m-d'),
+        };
+        $out[] = [
+            'period_label' => $label,
+            'pl_amt' => $pl,
+            'buy_amt' => $buy,
+            'trade_count' => (int)$r['trade_count'],
+            'rate' => $buy > 0 ? ($pl / $buy * 100) : null,
+        ];
+    }
+    return $out;
+}
+
 /* ------------------------------------------------------------- 전략 화면 */
 
 function repo_algorithms(): array

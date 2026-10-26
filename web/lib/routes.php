@@ -12,6 +12,7 @@ function app_routes(): array
         'dashboard' => ['view' => 'dashboard', 'title' => '종합현황', 'group' => 'dashboard', 'account' => true],
         'account.balance' => ['view' => 'account_balance', 'title' => '예수금 · 잔고', 'group' => 'account', 'account' => true],
         'account.holdings' => ['view' => 'account_holdings', 'title' => '보유종목', 'group' => 'account', 'account' => true],
+        'account.returns' => ['view' => 'account_returns', 'title' => '기간별 수익률', 'group' => 'account', 'account' => true],
         'trade.executions' => ['view' => 'trade_executions', 'title' => '체결내역', 'group' => 'trade', 'account' => true],
         'trade.orders' => ['view' => 'trade_orders', 'title' => '주문내역', 'group' => 'trade', 'account' => true],
         'trade.ledger' => ['view' => 'trade_ledger', 'title' => '거래내역', 'group' => 'trade', 'account' => true],
@@ -49,6 +50,7 @@ function app_menu(): array
         'account' => ['label' => '계좌', 'items' => [
             'account.balance' => '예수금 · 잔고',
             'account.holdings' => '보유종목',
+            'account.returns' => '기간별 수익률',
         ]],
         'trade' => ['label' => '거래', 'items' => [
             'trade.executions' => '체결내역',
