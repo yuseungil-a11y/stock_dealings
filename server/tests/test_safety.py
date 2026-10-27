@@ -512,6 +512,97 @@ def test_eod_force_skips_checks(monkeypatch):
 
 
 # ====================================================================== #
+# 공휴일 장중 오판: WS `0s` 미수신(공휴일엔 종일 안 옴) 시 개장일(ka10081)과 AND
+# (2026-09-25 공휴일에 시계만 보고 매수 29건 시도 → 전부 "장이 열리지않는 날" 거부)
+# ====================================================================== #
+class _TradingDayHouse:
+    def __init__(self, *answers):
+        self.answers = list(answers)
+        self.calls = []
+
+    def is_trading_day(self, day):
+        self.calls.append(day)
+        ans = self.answers.pop(0) if len(self.answers) > 1 else self.answers[0]
+        if isinstance(ans, Exception):
+            raise ans
+        return ans
+
+
+def _engine(monkeypatch, house, mono=None):
+    from stock_svr.config import AppConfig
+    from stock_svr.engine import runner as runner_mod
+
+    eng = runner_mod.Engine(AppConfig(), FakeDb())
+    eng.house = house
+    monkeypatch.setattr(runner_mod, "is_market_open", lambda: True)
+    monkeypatch.setattr(runner_mod, "now_kst", lambda: _dt.datetime(2026, 9, 25, 9, 5))
+    if mono is not None:
+        monkeypatch.setattr(runner_mod.time, "monotonic", lambda: mono[0])
+    return eng
+
+
+def test_market_open_false_on_holiday_without_ws_code(monkeypatch):
+    house = _TradingDayHouse(False)
+    mono = [1000.0]
+    eng = _engine(monkeypatch, house, mono)
+    assert eng.market_open() is False
+    # 평가 사이클마다 REST 를 다시 부르지 않는다(캐시)
+    for _ in range(5):
+        mono[0] += 30
+        assert eng.market_open() is False
+    assert house.calls == [_dt.date(2026, 9, 25)]
+    # False 는 재확인 간격이 지나면 한 번 다시 확인한다(개장 직후 오판 방지)
+    from stock_svr.engine.runner import TRADING_DAY_RECHECK_SEC
+    mono[0] += TRADING_DAY_RECHECK_SEC
+    assert eng.market_open() is False
+    assert len(house.calls) == 2
+
+
+def test_market_open_true_on_trading_day_cached_once(monkeypatch):
+    house = _TradingDayHouse(True)
+    mono = [1000.0]
+    eng = _engine(monkeypatch, house, mono)
+    for _ in range(3):
+        assert eng.market_open() is True
+        mono[0] += 100_000
+    assert len(house.calls) == 1
+
+
+def test_market_open_recovers_when_recheck_says_trading_day(monkeypatch):
+    house = _TradingDayHouse(False, True)
+    mono = [1000.0]
+    eng = _engine(monkeypatch, house, mono)
+    from stock_svr.engine.runner import TRADING_DAY_RECHECK_SEC
+    assert eng.market_open() is False
+    mono[0] += TRADING_DAY_RECHECK_SEC
+    assert eng.market_open() is True
+
+
+@pytest.mark.parametrize("answer", [None, RuntimeError("ka10081 실패")])
+def test_market_open_unknown_trading_day_keeps_clock(monkeypatch, answer):
+    """판단 불가(None)/조회 실패면 차단하지 않고(기존 동작) 다음 사이클에 다시 확인한다."""
+    house = _TradingDayHouse(answer)
+    eng = _engine(monkeypatch, house)
+    assert eng.market_open() is True
+    assert eng.market_open() is True
+    assert len(house.calls) == 2                 # 캐시하지 않음 → 재시도
+
+
+def test_market_open_ws_code_path_ignores_trading_day(monkeypatch):
+    """`0s` 를 받은 정상 경로는 개장일 조회를 하지 않는다."""
+    house = _TradingDayHouse(False)
+    eng = _engine(monkeypatch, house)
+    eng._on_real("0s", "", {"215": "3"})         # noqa: SLF001
+    assert eng.market_open() is True
+    assert house.calls == []
+
+
+def test_market_open_without_house_keeps_clock(monkeypatch):
+    eng = _engine(monkeypatch, None)
+    assert eng.market_open() is True
+
+
+# ====================================================================== #
 # B2 : 체결 결정적 키
 # ====================================================================== #
 def test_execution_key_is_deterministic():

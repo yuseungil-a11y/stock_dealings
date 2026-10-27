@@ -40,7 +40,7 @@ import datetime as _dt
 import logging
 import threading
 
-from ..algo.base import KIND_ENTRY, Signal, qty_for_amount
+from ..algo.base import KIND_ENTRY, Signal, order_price, qty_for_amount
 from ..llm.client import ClaudeError
 from ..llm.trend_prompt import (
     EXTRACT_SYSTEM_PROMPT,
@@ -657,7 +657,7 @@ class TrendScanService:
             stk_nm=pick["stk_nm"],
             side="BUY",
             qty=qty,
-            price=None if p.order_type == "3" else price,
+            price=order_price(p.order_type, price),
             trde_tp=p.order_type,
             amount=qty * price,
             kind=KIND_ENTRY,

@@ -34,6 +34,8 @@ $periodRate = $ret['realized_rate'] ?? null;
 $combinedPl = (float)($ret['combined_pl'] ?? 0);
 $combinedCost = (float)($ret['combined_cost'] ?? 0);
 $combinedRate = $ret['combined_rate'] ?? null;
+// 현재 평가 부분에서 제외된 상장폐지·거래불가 보유종목 수(repo_combined_return)
+$combinedDelisted = (int)($ret['delisted_cnt'] ?? 0);
 
 $points = [];
 foreach ($breakdown as $b) {
@@ -74,6 +76,9 @@ $toIsToday = $to === null || $to >= date('Y-m-d');
   <div class="card"><h2 class="card-t">총 수익률(실현+평가)</h2>
     <p class="card-v <?= h(sign_class($combinedRate)) ?>"><?= h(pct($combinedRate)) ?></p>
     <p class="card-s <?= h(sign_class($combinedPl)) ?>">손익 <?= h(money_signed($combinedPl)) ?> / 투입 원가 <?= h(money($combinedCost)) ?></p>
+    <?php if ($combinedDelisted > 0): ?>
+      <p class="card-s muted">(<?= h(nfmt($combinedDelisted)) ?>종목 상장폐지 제외 — 보유종목 목록에는 그대로 표시됩니다)</p>
+    <?php endif; ?>
     <p class="card-s">(기간 실현손익 + 현재 평가손익) ÷ (기간 내 매도분 매입원가 + 현재 보유 매입금액)입니다.
       평가손익은 항상 현재 시점 기준이므로 <strong>이 값은 선택한 종료일이 오늘(<?= $toIsToday ? '예' : '아니오 — 과거 종료일 선택 중' ?>)일 때 가장 의미가 있습니다.</strong></p></div>
 </section>

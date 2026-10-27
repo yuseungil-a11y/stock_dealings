@@ -353,11 +353,13 @@ const DTS_SOLD_COST_SQL = 'CASE WHEN sell_qty > 0 THEN COALESCE(sell_amt,0) - CO
 
 /**
  * 실현 + 평가 합산 수익률(공통). 대시보드 "총손익(실현+평가)" 와 기간별 수익률 화면이 같이 쓴다.
- *   손익 = Σ 실현손익(기간 내 매도 행) + Σ holding.evltv_prft(현재 평가손익)
- *   원가 = Σ 매도분 매입원가(기간 내 매도 행) + Σ holding.pur_amt(현재 보유 매입금액)
+ *   손익 = Σ 실현손익(기간 내 매도 행) + Σ holding.evltv_prft(현재 평가손익, 상장폐지 제외)
+ *   원가 = Σ 매도분 매입원가(기간 내 매도 행) + Σ holding.pur_amt(현재 보유 매입금액, 상장폐지 제외)
  * $from/$to 가 둘 다 null 이면 전체 기간. 평가 부분(holding)은 항상 현재 시점 값이다.
+ * delisted_cnt = 평가 부분에서 제외한 상장폐지·거래불가 보유종목 수(화면 보조 문구용).
  * @return array{realized_pl:float,realized_cost:float,realized_rate:?float,sell_rows:int,
- *               holding_pl:float,holding_cost:float,combined_pl:float,combined_cost:float,combined_rate:?float}
+ *               holding_pl:float,holding_cost:float,combined_pl:float,combined_cost:float,combined_rate:?float,
+ *               delisted_cnt:int}
  */
 function repo_combined_return(int $accountId, ?string $from, ?string $to): array
 {
@@ -372,8 +374,10 @@ function repo_combined_return(int $accountId, ?string $from, ?string $to): array
     $hold = repo_holding_totals($accountId);
     $realizedPl = (float)$row['realized_pl'];
     $realizedCost = (float)$row['realized_cost'];
-    $holdingPl = (float)$hold['evltv_prft'];
-    $holdingCost = (float)$hold['pur_amt'];
+    // 상장폐지·거래불가 종목(HOLDING_DELISTED_COND)은 분자·분모 모두에서 제외한다
+    // (목록·배지 표시는 그대로 — 수익률 계산에서만 뺀다).
+    $holdingPl = (float)$hold['evltv_prft_ex'];
+    $holdingCost = (float)$hold['pur_amt_ex'];
     $combinedPl = $realizedPl + $holdingPl;
     $combinedCost = $realizedCost + $holdingCost;
     // 분모(원가)가 0 이하면 비율 표기를 생략하도록 null 을 반환한다.
@@ -387,6 +391,7 @@ function repo_combined_return(int $accountId, ?string $from, ?string $to): array
         'combined_pl' => $combinedPl,
         'combined_cost' => $combinedCost,
         'combined_rate' => $combinedCost > 0 ? ($combinedPl / $combinedCost) * 100 : null,
+        'delisted_cnt' => (int)$hold['delisted_cnt'],
     ];
 }
 
@@ -2167,6 +2172,7 @@ function repo_dashboard(?int $accountId): array
             'combined_pl' => $lifetime['combined_pl'] ?? 0.0,
             'combined_cost' => $lifetime['combined_cost'] ?? 0.0,
             'combined_rate' => $lifetime['combined_rate'] ?? null,
+            'delisted_cnt' => (int)($lifetime['delisted_cnt'] ?? 0),
         ],
     ];
 }

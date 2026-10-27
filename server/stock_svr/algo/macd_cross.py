@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 
 from ..llm.prompt import _round, register_context_provider
-from .base import KIND_ENTRY, Algorithm, Signal, qty_for_amount
+from .base import KIND_ENTRY, Algorithm, Signal, order_price, qty_for_amount
 from .fundamentals_filter import age_days
 from .registry import register
 from .universe_filter import APPLY_ENTRY, SCOPE_PER_MARKET, UniverseOptions, load_universe
@@ -240,7 +240,7 @@ class MacdCross(Algorithm):
                 stk_nm=c["stk_nm"],
                 side="BUY",
                 qty=qty,
-                price=None if trde_tp == "3" else c["cur_prc"],
+                price=order_price(trde_tp, c["cur_prc"]),
                 trde_tp=trde_tp,
                 amount=qty * c["cur_prc"],
                 kind=KIND_ENTRY,

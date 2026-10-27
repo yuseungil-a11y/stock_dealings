@@ -5,7 +5,7 @@ import logging
 import re
 from decimal import Decimal
 
-from .base import KIND_ENTRY, Algorithm, Signal, qty_for_amount
+from .base import KIND_ENTRY, Algorithm, Signal, order_price, qty_for_amount
 from .registry import register
 
 log = logging.getLogger(__name__)
@@ -105,7 +105,7 @@ class MomentumScreen(Algorithm):
                 stk_nm=c["stk_nm"],
                 side="BUY",
                 qty=qty,
-                price=None if trde_tp == "3" else c["cur_prc"],
+                price=order_price(trde_tp, c["cur_prc"]),
                 trde_tp=trde_tp,
                 amount=qty * c["cur_prc"],
                 kind=KIND_ENTRY,

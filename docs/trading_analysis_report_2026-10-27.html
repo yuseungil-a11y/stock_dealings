@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>자동매매 운영 분석 리포트 (2026-10-27)</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --fg: #1a1a1a;
+    --muted: #666666;
+    --accent: #1f6feb;
+    --bad: #c0392b;
+    --good: #1a7f37;
+    --border: #e1e4e8;
+    --panel: #f6f8fa;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0d1117;
+      --fg: #e6edf3;
+      --muted: #9198a1;
+      --accent: #58a6ff;
+      --bad: #ff7b72;
+      --good: #3fb950;
+      --border: #30363d;
+      --panel: #161b22;
+    }
+  }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: "Segoe UI", "Malgun Gothic", "Apple SD Gothic Neo", sans-serif;
+    line-height: 1.7;
+    max-width: 880px;
+    margin: 0 auto;
+    padding: 40px 20px 80px;
+  }
+  h1 {
+    font-size: 1.6rem;
+    border-bottom: 3px solid var(--accent);
+    padding-bottom: 12px;
+    margin-bottom: 8px;
+  }
+  h2 {
+    font-size: 1.25rem;
+    margin-top: 2.2em;
+    padding-top: 0.4em;
+    border-top: 1px solid var(--border);
+  }
+  h3 {
+    font-size: 1.05rem;
+    color: var(--accent);
+  }
+  .meta {
+    color: var(--muted);
+    font-size: 0.92rem;
+    margin-bottom: 2em;
+  }
+  .meta ul { padding-left: 1.2em; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 1.2em 0;
+    font-size: 0.95rem;
+  }
+  th, td {
+    border: 1px solid var(--border);
+    padding: 8px 12px;
+    text-align: left;
+  }
+  th {
+    background: var(--panel);
+    font-weight: 600;
+  }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .highlight-box {
+    background: var(--panel);
+    border-left: 4px solid var(--accent);
+    padding: 14px 18px;
+    border-radius: 4px;
+    margin: 1.2em 0;
+  }
+  .neg { color: var(--bad); font-weight: 600; }
+  .pos { color: var(--good); font-weight: 600; }
+  blockquote {
+    border-left: 3px solid var(--border);
+    margin: 1em 0;
+    padding: 0.4em 1em;
+    color: var(--muted);
+    font-style: italic;
+    background: var(--panel);
+  }
+  code {
+    background: var(--panel);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 0.9em;
+  }
+  .priority-high { color: var(--bad); font-weight: 700; }
+  .priority-mid { color: #c87f0a; font-weight: 700; }
+  .priority-low { color: var(--muted); font-weight: 700; }
+  .conclusion {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px 24px;
+    margin-top: 1.5em;
+  }
+  .footnote { font-size: 0.85rem; color: var(--muted); }
+</style>
+</head>
+<body>
+
+<h1>자동매매 운영 분석 리포트</h1>
+<div class="meta">
+  <ul>
+    <li>분석 대상 계좌: 3508424711 (실전, env=real)</li>
+    <li>분석 기간: 2026-09-18 ~ 2026-10-27 (ka10170 당일매매일지 기준 실거래일 16일)</li>
+    <li>분석 방법: <code>daily_trade_summary</code>(실현손익), <code>orders</code>/<code>executions</code>(주문·체결), <code>holding</code>/<code>account_balance</code>(평가·자산), <code>algorithm</code>/<code>algorithm_selection</code>(전략 on/off) 테이블 직접 SQL 조회</li>
+    <li>작성 배경: "수익률이 좋지 않아 거래 패턴을 분석하고 앞으로 운영 방향을 알려달라"는 요청에 따른 1회성 분석 (작성일 2026-10-27)</li>
+  </ul>
+</div>
+
+<h2>1. 대시보드 "-30%대" 수익률의 실체</h2>
+<p>대시보드에 찍히는 평가손익 <span class="neg">-363,442원</span>(2026-10-27 기준)의 <strong>99%(-361,050원)는 040670 (폐)와이즈파워 한 종목</strong>에서 나온다.</p>
+<ul>
+  <li>이 종목은 <code>orders</code>/<code>executions</code>/<code>trade_ledger</code> 어디에도 기록이 없다 — 이 자동매매 시스템이 산 것이 아니라 <strong>봇 가동 이전부터 계좌에 있던 상장폐지 종목</strong>이다.</li>
+  <li>알고리즘도 이미 "거래불가 종목 제외" 처리해 손을 대지 않고 있다(매매 불가, 회복 불가).</li>
+  <li>포트폴리오 비중 29.8%(<code>poss_rt</code>)를 차지하는 죽은 자산이 전체 수익률 숫자를 심하게 왜곡하고 있다.</li>
+</ul>
+
+<p>이를 제외하고 <strong>실제 봇이 만든 성과</strong>만 분리하면:</p>
+<table>
+  <tr><th>구분</th><th class="num">금액</th></tr>
+  <tr><td>실현손익 합계 (9/18~10/27, 수수료·세금 반영 후 순액)</td><td class="num neg">-108,891원</td></tr>
+  <tr><td>현재 보유 중인 "살아있는" 종목들의 평가손익 합 (와이즈파워 제외)</td><td class="num neg">-19,398원</td></tr>
+  <tr><td><strong>순수 매매 성과 (실현+평가)</strong></td><td class="num neg"><strong>약 -128,289원</strong></td></tr>
+  <tr><td>총 매도거래금액</td><td class="num">2,404,980원</td></tr>
+  <tr><td>순수 매매 성과 / 총 매도거래금액</td><td class="num neg">약 -5.3%</td></tr>
+</table>
+
+<div class="highlight-box footnote">
+  참고: 9/19~10/27 사이 계좌 자산이 187,200원→922,693원으로 늘었는데, 중간 몇 차례 급등 구간(9/20, 9/25, 특히 10/7 555,081→1,036,767)은 거래 손익이 아니라 <strong>입금으로 추정</strong>된다. 입출금 추적 기능이 없어 추정치이며, 정확한 수치는 "계좌 입출금 기능 백로그" 구현 후 확인 가능.
+</div>
+
+<h2>2. 손실 원인 분석 — 구조적 저승률</h2>
+<p><strong>승률 31% (11승 24패, 35건 매도 기준)</strong>가 핵심 원인이다.</p>
+
+<p>손절/익절 구조:</p>
+<ul>
+  <li><code>risk_guard</code> 손절: <strong>-10%</strong> 고정선 도달 시 전량 매도 — 15건 전부 손절 (갭다운으로 실제 체결은 -10.0%~-13.3%까지)</li>
+  <li><code>take_profit</code>: <strong>+7%</strong> 도달 시 보유량의 50%만 매도 후 잔량은 ATR 트레일링 — 12건</li>
+</ul>
+
+<p>승률 31%에 "손절 -10% : 익절 +7%(절반)" 구조를 대입한 기대값 ≈ 0.31×7% − 0.69×10% ≈ <strong class="neg">-4.7%/거래</strong>. 실제 결과(약 -5.3%)와 거의 일치 — 즉 지표 문제가 아니라 <strong>전략 자체가 구조적으로 마이너스 기대값</strong>이다.</p>
+
+<h3>원인: 추세/품질 필터 없이 급등주 추격</h3>
+<p><code>momentum_screen</code>(전체 매수 체결의 대부분, 29건)의 매수 사유 로그:</p>
+<blockquote>
+  "당일상승 25.09% + 거래량비율 50.57% 돌파", "당일상승 12.13% + 거래량비율 102.68% 돌파", "당일상승 21.77% + 거래량비율 74.26% 돌파"
+</blockquote>
+
+<p><strong>이미 급등·급증한 종목을 추세/품질 필터 없이 그대로 쫓아 사는 구조</strong>다. <code>algorithm_selection</code> 조회 결과 다음 두 필터가 꺼져 있다:</p>
+<table>
+  <tr><th>필터</th><th>상태</th></tr>
+  <tr><td><code>universe_filter</code> (시가총액·주가 필터)</td><td class="neg">OFF</td></tr>
+  <tr><td><code>ma_cross_filter</code> (이동평균 크로스/추세 필터)</td><td class="neg">OFF</td></tr>
+  <tr><td><code>fundamentals_filter</code> (재무 건전성)</td><td class="pos">ON</td></tr>
+  <tr><td><code>claude_advisor</code> (Claude 거부권)</td><td class="pos">ON</td></tr>
+</table>
+
+<p>과열 종목을 추세 확인 없이 매수 → 며칠 뒤 갭하락으로 한꺼번에 손절당하는 패턴이 반복됨:</p>
+<ul>
+  <li>2026-10-13: 6종목 동시 손절</li>
+  <li>2026-10-26: 4종목 동시 손절 (09:06 시점에 몰림)</li>
+</ul>
+
+<h2>3. 별개로 발견한 운영 버그</h2>
+<p><code>volatility_breakout</code> 매수 시도의 <strong class="neg">83%(34/41건)가 주문 실패</strong>:</p>
+<table>
+  <tr><th>실패 원인</th><th class="num">건수</th></tr>
+  <tr><td>"장이 열리지않는 날입니다" (휴장일 주문 시도)</td><td class="num">29건</td></tr>
+  <tr><td>"단가를 입력하지 않는 호가입니다" (주문 파라미터 오류)</td><td class="num">5건</td></tr>
+</table>
+<p>금전 손실은 없었음(주문 자체가 거부됨)이나, 로그 오염·API 호출 낭비·신뢰성 저하 문제. 주문 전송 전 개장일 체크가 누락된 것으로 추정.</p>
+
+<h2>4. 앞으로 운영 방향 제안</h2>
+<table>
+  <tr><th>우선순위</th><th>항목</th><th>내용</th></tr>
+  <tr><td class="priority-high">높음</td><td>전략 필터 재검토</td><td><code>universe_filter</code>/<code>ma_cross_filter</code>를 켜서 "급등주 추격"에 추세·품질 검증 추가</td></tr>
+  <tr><td class="priority-high">높음</td><td>손익비 재조정</td><td>승률 31%가 구조적이라면 손절/익절 비율을 더 벌리는 쪽 검토(손절 타이트화 또는 익절 목표 확대)</td></tr>
+  <tr><td class="priority-mid">중간</td><td><code>volatility_breakout</code> 휴장일 버그 수정</td><td>주문 전송 전 개장일 체크 추가</td></tr>
+  <tr><td class="priority-mid">중간</td><td>평가손익 지표에서 상장폐지/거래불가 종목 제외</td><td>대시보드 "총수익률" 계산(<code>repo_combined_return</code>)에 와이즈파워가 분모/분자에 계속 포함되어 실제 성과를 왜곡 중</td></tr>
+  <tr><td class="priority-low">낮음(기존 백로그)</td><td>입출금 추적 기능</td><td>입금분과 매매수익 분리 필요</td></tr>
+  <tr><td class="priority-low">낮음(기존 미수정)</td><td>부분체결 중복저장 버그</td><td>risk_guard 손익추정 정확도에 영향, 미수정</td></tr>
+</table>
+
+<h2>결론</h2>
+<div class="conclusion">
+  <p>"수익률이 나쁘다"는 체감의 대부분은 <strong>죽은 레거시 종목(상장폐지 와이즈파워) 하나</strong> 때문이며, 실제 봇의 매매 성과는 작지만 꾸준한 손실(약 -13만원, 매도거래금액 대비 -5.3%)이다. 그 원인은 <strong>추세/품질 필터를 꺼둔 채 급등주를 추격하는 momentum_screen의 구조적 저승률(31%)</strong>이다. 필터 재활성화와 손익비 조정이 가장 효과가 큰 다음 단계로 판단된다.</p>
+</div>
+
+</body>
+</html>

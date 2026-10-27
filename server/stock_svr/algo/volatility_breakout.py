@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 from decimal import Decimal
 
-from .base import KIND_ENTRY, KIND_LIQUIDATE, Algorithm, Signal, qty_for_amount
+from .base import KIND_ENTRY, KIND_LIQUIDATE, Algorithm, Signal, order_price, qty_for_amount
 from .registry import register
 
 log = logging.getLogger(__name__)
@@ -115,7 +115,7 @@ class VolatilityBreakout(Algorithm):
                 continue
             signals.append(Signal(
                 algo_code=self.code, stk_cd=stk_cd, stk_nm=quote.get("stk_nm"),
-                side="BUY", qty=qty, price=None if trde_tp == "3" else cur,
+                side="BUY", qty=qty, price=order_price(trde_tp, cur),
                 trde_tp=trde_tp, amount=qty * cur, kind=KIND_ENTRY, score=float(range_pct),
                 reason=(f"변동성 돌파 (목표 {tgt:,} <= 현재 {cur:,}, K={k}, "
                         f"전일변동 {range_pct:.2f}%)"),

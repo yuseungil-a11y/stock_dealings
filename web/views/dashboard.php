@@ -49,7 +49,10 @@ $canOrder = ($orderEnabled === '1') && ($mode === 'mock' || $realConfirm === '1'
     <?php $lt = $d['lifetime']; ?>
     <p class="card-v <?= h(sign_class($lt['combined_pl'])) ?>" data-k="lifetime_combined_pl"><?= h(money_signed($lt['combined_pl'])) ?></p>
     <p class="card-s">투입 원가 대비
-      <span class="<?= h(sign_class($lt['combined_rate'])) ?>" data-k="lifetime_combined_rate"><?= h(pct($lt['combined_rate'])) ?></span></p>
+      <span class="<?= h(sign_class($lt['combined_rate'])) ?>" data-k="lifetime_combined_rate"><?= h(pct($lt['combined_rate'])) ?></span>
+      <?php if ((int)($lt['delisted_cnt'] ?? 0) > 0): ?>
+        <span class="muted">(<?= h(nfmt($lt['delisted_cnt'])) ?>종목 상장폐지 제외)</span>
+      <?php endif; ?></p>
     <p class="card-s muted">전체 기간 실현손익 + 현재 보유종목 평가손익 합산 ÷ (매도분 매입원가 + 현재 보유 매입금액)</p>
   </div>
   <div class="card">

@@ -10,7 +10,7 @@ import datetime as _dt
 import logging
 from decimal import Decimal
 
-from .base import KIND_AVG_DOWN, KIND_STOP_LOSS, Algorithm, Signal, qty_for_amount
+from .base import KIND_AVG_DOWN, KIND_STOP_LOSS, Algorithm, Signal, order_price, qty_for_amount
 from .registry import register
 from .risk_guard import stop_loss_pct as guard_stop_loss_pct
 
@@ -97,7 +97,7 @@ class AveragingDown(Algorithm):
                 continue
             signals.append(Signal(
                 algo_code=self.code, stk_cd=stk_cd, stk_nm=h.get("stk_nm"),
-                side="BUY", qty=qty, price=None if trde_tp == "3" else cur,
+                side="BUY", qty=qty, price=order_price(trde_tp, cur),
                 trde_tp=trde_tp, amount=qty * cur, kind=KIND_AVG_DOWN,
                 score=float(rt) if rt is not None else None,
                 reason=(f"물타기 {steps + 1}/{max_steps}회차 "

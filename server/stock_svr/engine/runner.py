@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import datetime as _dt
 import logging
 import threading
 import time
@@ -59,6 +60,8 @@ ORDER_SYNC_CLOSED_SEC = 900
 TICK_SEC = 1.0
 # 종목마스터(ka10099) 신선도 점검 주기(초). 장중에도 확인해 날짜가 바뀌면 그날 1회 갱신한다.
 MASTER_CHECK_SEC = 300
+# `0s` 미수신 시 개장일(ka10081) 판정이 False 였을 때 다시 확인하는 간격(초)
+TRADING_DAY_RECHECK_SEC = 600
 
 # WS `0s` 215(장운영구분) 중 코스피/코스닥 "본장" 상태를 나타내는 코드만.
 # 그 외(NXT/선물옵션/시간외 단일가 등: a,b,g,h,o,s,e,f,P~V)는 본장과 무관하므로
@@ -192,6 +195,9 @@ class Engine:
         self.start_refused_reason: str = ""
         # WS `0s` 장운영구분(215) 최신값 - None 이면 미수신
         self._market_code: str | None = None
+        # 개장일 판정(ka10081) 캐시: {날짜: (개장여부, 판정 시각 monotonic)}.
+        # `0s` 미수신(=공휴일이면 종일 미수신) 상태에서만 쓰이며 하루 1회 수준으로만 호출한다.
+        self._trading_day_cache: dict[_dt.date, tuple[bool, float]] = {}
 
     # ================================================================== #
     @property
@@ -655,7 +661,38 @@ class Engine:
             return ws_open and by_clock
         if self.ws is not None and not self.ws.connected.is_set():
             return False          # 실시간 미연결 → 공휴일 판단 불가, 보수적으로 장외
-        return by_clock
+        # 평일 공휴일에는 장이 안 열려 `0s` 자체가 오지 않는다(_market_code 가 종일 None).
+        # 시계만 보면 장중으로 오판해 주문이 전부 "장이 열리지않는 날" 로 거부되므로
+        # (2026-09-25 사례) 개장일 여부(ka10081)와 AND 한다.
+        return by_clock and self._is_trading_day_cached()
+
+    def _is_trading_day_cached(self) -> bool:
+        """오늘이 개장일인지(캐시). 판단 불가/조회 실패면 True(기존 동작 유지, 다음에 재시도).
+
+        * True 는 그날 확정 - 재호출하지 않는다.
+        * False 는 TRADING_DAY_RECHECK_SEC 뒤 다시 확인한다 - 개장 직후 당일 일봉이 아직
+          안 잡혀 False 가 나온 경우 하루 종일 매매가 막히는 것을 막기 위함.
+        """
+        if self.house is None:
+            return True
+        today = now_kst().date()
+        now_mono = time.monotonic()
+        cached = self._trading_day_cache.get(today)
+        if cached is not None:
+            ok, at = cached
+            if ok or now_mono - at < TRADING_DAY_RECHECK_SEC:
+                return ok
+        try:
+            result = self.house.is_trading_day(today)
+        except Exception:  # noqa: BLE001 - 조회 실패는 판단 불가로 본다
+            log.warning("개장일 확인(ka10081) 실패 - 시계 기준으로 판단", exc_info=True)
+            result = None
+        if result is None:
+            return True
+        self._trading_day_cache = {today: (bool(result), now_mono)}
+        if not result and cached is None:
+            log.warning("오늘(%s)은 휴장일로 판단 - 장중 시간대여도 장외로 처리", today)
+        return bool(result)
 
     def run_cycle(self, force_market: bool = False, all_algos: bool = False,
                   ignore_auto: bool = False, observe_only: bool = False) -> dict:

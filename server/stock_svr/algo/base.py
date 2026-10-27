@@ -17,6 +17,21 @@ if TYPE_CHECKING:  # pragma: no cover
 # 시장가/최유리 주문의 한도 검사·사이클 누적에 적용할 슬리피지 버퍼 (S-12 / R-12)
 SLIPPAGE_BUFFER = Decimal("1.1")
 
+# 거래소가 가격을 자동결정하는 호가유형 - kt10000 에 `ord_uv`(단가)를 넣으면
+# "단가를 입력하지 않는 호가입니다(502048)" 로 거부된다. kiwoom-rest-api-spec.json
+# kt10000 trde_tp 코드표 중 시장가/최유리/최우선 계열만 포함한다:
+#   3:시장가 6:최유리지정가 7:최우선지정가 13:시장가(IOC) 16:최유리(IOC)
+#   23:시장가(FOK) 26:최유리(FOK) 46:최유리(GTP) 47:최우선(GTP)
+# (중간가 29/30/31, 시간외 61/81 등은 스펙만으로 단가 필요 여부를 알 수 없어 제외 -
+#  필요해지면 키움 문서로 확인 후 추가)
+PRICELESS_TRDE_TYPES = frozenset({"3", "6", "7", "13", "16", "23", "26", "46", "47"})
+
+
+def order_price(trde_tp: str, cur: int) -> int | None:
+    """신호의 주문단가. 가격 자동결정 호가유형이면 None(= ord_uv 비움), 아니면 `cur`."""
+    return None if str(trde_tp) in PRICELESS_TRDE_TYPES else cur
+
+
 # 신호 종류
 KIND_ENTRY = "entry"
 KIND_AVG_DOWN = "avg_down"
@@ -34,7 +49,7 @@ class Signal:
     side: str                      # 'BUY' | 'SELL'
     qty: int = 0
     price: int | None = None       # 지정가일 때만. 시장가는 None
-    trde_tp: str = "3"             # 0=보통(지정가) 3=시장가 6=최유리
+    trde_tp: str = "3"             # 0=보통(지정가) 3=시장가 6=최유리 (PRICELESS_TRDE_TYPES 참고)
     amount: int | None = None      # 의도한 투입금액(원)
     reason: str = ""
     stk_nm: str | None = None

@@ -190,6 +190,41 @@ def test_breakout_requires_min_range():
         make_ctx(FakeDb(), market=market)) == []
 
 
+@pytest.mark.parametrize("trde_tp,expected", [
+    ("0", 10600),      # 보통(지정가) - 단가 필요
+    ("5", 10600),      # 조건부지정가 - 단가 필요
+    ("3", None),       # 시장가
+    ("6", None),       # 최유리지정가 (2026-10 "단가를 입력하지 않는 호가입니다" 거부 사례)
+    ("7", None),       # 최우선지정가
+    ("13", None), ("16", None), ("23", None), ("26", None), ("46", None), ("47", None),
+])
+def test_order_price_by_trde_tp(trde_tp, expected):
+    from stock_svr.algo.base import order_price
+    assert order_price(trde_tp, 10600) == expected
+
+
+VB_DEFS_ALL_TYPES = [dict(d) for d in VB_DEFS]
+for _d in VB_DEFS_ALL_TYPES:
+    if _d["param_key"] == "order_type":
+        _d["enum_options"] = "3:시장가,0:지정가(보통),6:최유리지정가"
+
+
+@pytest.mark.parametrize("trde_tp,expected", [("6", None), ("3", None), ("0", 10600)])
+def test_breakout_price_omitted_for_priceless_types(trde_tp, expected):
+    """최유리(6)일 때 현재가를 단가로 채워 보내면 키움이 502048 로 거부한다."""
+    market = FakeMarket(bars={"005930": bars()},
+                        quotes={"005930": {"stk_nm": "삼성전자", "open_pric": 10000,
+                                           "cur_prc": 10600}})
+    algo = VolatilityBreakout(meta={"code": "volatility_breakout"},
+                              params=ParamSet(VB_DEFS_ALL_TYPES, {
+                                  "watch_symbols": "005930", "liquidate_time": "",
+                                  "order_type": trde_tp}))
+    sigs = algo.evaluate(make_ctx(FakeDb(), market=market))
+    assert len(sigs) == 1 and sigs[0].trde_tp == trde_tp
+    assert sigs[0].price == expected
+    assert sigs[0].amount == sigs[0].qty * 10600     # 한도 검사 금액은 그대로 유지
+
+
 def test_liquidate_at_time():
     holdings = {"005930": {"stk_cd": "005930", "stk_nm": "삼성전자", "rmnd_qty": 5,
                            "trde_able_qty": 5}}
@@ -234,6 +269,19 @@ def test_avg_down_triggers_on_drop():
                             "total_invested": 100000}}
     sigs = avgdown().evaluate(make_ctx(FakeDb(), holdings=holding(), positions=positions))
     assert len(sigs) == 1 and sigs[0].kind == "avg_down" and sigs[0].side == "BUY"
+
+
+def test_avg_down_price_omitted_for_best_price_type():
+    ad_defs = [dict(d) for d in AD_DEFS]
+    for d in ad_defs:
+        if d["param_key"] == "order_type":
+            d["enum_options"] = "3:시장가,0:지정가(보통),6:최유리지정가"
+    positions = {"005930": {"last_buy_price": 10000, "avg_down_count": 0,
+                            "total_invested": 100000}}
+    algo = AveragingDown(meta={"code": "averaging_down"},
+                         params=ParamSet(ad_defs, {"order_type": "6"}))
+    sigs = algo.evaluate(make_ctx(FakeDb(), holdings=holding(), positions=positions))
+    assert len(sigs) == 1 and sigs[0].trde_tp == "6" and sigs[0].price is None
 
 
 def test_avg_down_not_triggered_small_drop():
