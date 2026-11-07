@@ -41,7 +41,11 @@ INSERT INTO algorithm (code, name, role, description, is_locked, sort_order) VAL
  ('macd_cross',           'MACD 골든크로스',          'entry',
   'universe_filter와 동일한 시총 상위 종목 로직(자체 파라미터)을 대상으로, MACD 라인이 Signal 라인을 아래에서 위로 교차(골든크로스)하는 순간만 매수 신호를 낸다. 제로선 필터 없음(단순 교차만). 이미 보유·거래불가 종목 제외, 일 신규진입 한도 적용.', 0, 12),
  ('take_profit',          '익절(ATR 트레일링+부분매도)', 'risk',
-  '평단 대비 지정 수익률 도달 시 1차 부분매도 후, Wilder ATR 기반 트레일링 스탑(관측 최고가 - ATR x 배수)이 현재가를 하회하면 잔량을 전량 매도한다. 손절선(risk_guard.stop_loss_pct)에 동시에 도달한 종목은 risk_guard 가 전담하도록 이 알고리즘은 신호를 내지 않는다(손절 우선). 신규 알고리즘이라 기본은 비활성(is_enabled=0) - 웹에서 검토 후 켜야 한다.', 0, 31)
+  '평단 대비 지정 수익률 도달 시 1차 부분매도 후, Wilder ATR 기반 트레일링 스탑(관측 최고가 - ATR x 배수)이 현재가를 하회하면 잔량을 전량 매도한다. 손절선(risk_guard.stop_loss_pct)에 동시에 도달한 종목은 risk_guard 가 전담하도록 이 알고리즘은 신호를 내지 않는다(손절 우선). 신규 알고리즘이라 기본은 비활성(is_enabled=0) - 웹에서 검토 후 켜야 한다.', 0, 31),
+ ('trend_position',       '중장기 추세추종',          'entry',
+  'universe_filter와 동일한 시총 상위 종목 로직(자체 파라미터)을 대상으로, 60일 이동평균이 120일 이동평균보다 크고(추세 레짐) 최근 3거래일 종가가 연속으로 120일 이동평균 위에 있으면 매수한다. 교차 순간이 아니라 "현재 상태"를 매 주기 확인하므로 서버 재시작으로 교차일을 놓쳐도 진입 기회를 잃지 않는다. 청산은 trend_position_exit 가 전담(take_profit 은 이 종목을 관리하지 않음), risk_guard 손절은 그대로 적용. 이미 보유·거래불가 종목 제외, 일 신규진입 한도 적용. 신규 알고리즘이라 기본은 비활성(is_enabled=0) - 웹에서 검토 후 켜야 한다.', 0, 13),
+ ('trend_position_exit',  '중장기 청산(추세이탈·트레일링)', 'risk',
+  'trend_position 으로 진입한 보유종목만 대상으로, 현재가가 120일 이동평균 아래로 내려가거나(추세이탈) 최근 10거래일 최저 저가 아래로 내려가면(트레일링, 매 주기 일봉에서 재계산) 전량 시장가 매도한다. 다른 알고리즘이 진입한 종목은 건드리지 않으며 risk_guard 손절은 별도로 그대로 적용된다. 신규 알고리즘이라 기본은 비활성(is_enabled=0) - 웹에서 검토 후 켜야 한다.', 0, 32)
 ON DUPLICATE KEY UPDATE name=VALUES(name), role=VALUES(role), description=VALUES(description),
                         is_locked=VALUES(is_locked), sort_order=VALUES(sort_order);
 
@@ -237,6 +241,41 @@ SELECT a.id, p.k, p.label, p.t, p.d, p.mn, p.mx, p.eo, p.u, p.ds, p.so FROM algo
  SELECT 'trail_floor_breakeven','트레일링 손익분기 하한','bool',  '1',    NULL,NULL,  NULL,NULL,'1이면 부분익절 이후 트레일링 스탑이 평단(pur_pric) 아래로 내려가지 않게 한다',8 UNION ALL
  SELECT 'scope',               '적용 대상',              'enum',   'engine',NULL,NULL, 'engine:시스템이 매수한 종목만,all:모든 보유종목',NULL,'engine이면 position_state.entry_algo가 있는(이 시스템이 진입한) 종목만 관리하고 수동매수 종목은 건너뛴다',9
 ) p ON a.code='take_profit'
+ON DUPLICATE KEY UPDATE label=VALUES(label), value_type=VALUES(value_type), default_value=VALUES(default_value),
+  min_value=VALUES(min_value), max_value=VALUES(max_value), enum_options=VALUES(enum_options), unit=VALUES(unit),
+  description=VALUES(description), sort_order=VALUES(sort_order);
+
+-- ---- 파라미터 정의: trend_position -------------------------------------
+INSERT INTO algorithm_param_def (algorithm_id, param_key, label, value_type, default_value, min_value, max_value, enum_options, unit, description, sort_order)
+SELECT a.id, p.k, p.label, p.t, p.d, p.mn, p.mx, p.eo, p.u, p.ds, p.so FROM algorithm a JOIN (
+ SELECT 'ma_short_period'   k,'단기 이동평균 기간'  label,'int' t,'60' d,'5' mn,'250' mx,NULL eo,'일' u,'추세 레짐 판단용 단기 단순이동평균 기간 (장기보다 작아야 함)' ds,1 so UNION ALL
+ SELECT 'ma_long_period',    '장기 이동평균 기간',  'int',    '120', '10','500',     NULL,'일','추세 레짐·안착 판단용 장기 단순이동평균 기간 (단기보다 커야 함)',2 UNION ALL
+ SELECT 'confirm_days',      '장기선 위 확인 일수', 'int',    '3',   '1','20',       NULL,'일','최근 이 일수만큼 종가가 연속으로 장기 이동평균 위에 있어야 진입',3 UNION ALL
+ SELECT 'top_n',             '시가총액 상위 N',     'int',    '200', '1','2000',     NULL,'개','시가총액 순위 상위 N개만 대상 (universe_filter와 별개 독립 설정)',4 UNION ALL
+ SELECT 'use_kospi',         '코스피 포함',         'bool',   '1',   NULL,NULL,      NULL,NULL,'1이면 코스피(거래소) 종목을 대상에 포함',5 UNION ALL
+ SELECT 'use_kosdaq',        '코스닥 포함',         'bool',   '1',   NULL,NULL,      NULL,NULL,'1이면 코스닥 종목을 대상에 포함',6 UNION ALL
+ SELECT 'use_etf',           'ETF 포함',            'bool',   '0',   NULL,NULL,      NULL,NULL,'1이면 ETF도 대상에 포함 (기본 제외)',7 UNION ALL
+ SELECT 'min_price',         '최소 주가(1주)',      'int',    '10000','0','10000000',NULL,'원','1주 가격이 이 값 미만인 종목 제외. 0 이면 사용 안 함',8 UNION ALL
+ SELECT 'max_price',         '최대 주가(1주)',      'int',    '0',   '0','100000000',NULL,'원','1주 가격이 이 값 초과인 종목 제외. 0 이면 사용 안 함',9 UNION ALL
+ SELECT 'min_market_cap_eok','최소 시가총액',       'int',    '0',   '0','100000000',NULL,'억원','이 시가총액 미만 종목 제외. 0 이면 사용 안 함',10 UNION ALL
+ SELECT 'exclude_preferred', '우선주 제외',         'bool',   '1',   NULL,NULL,      NULL,NULL,'1이면 우선주(삼성전자우 등) 제외',11 UNION ALL
+ SELECT 'exclude_spac',      '스팩 제외',           'bool',   '1',   NULL,NULL,      NULL,NULL,'1이면 종목명에 스팩이 들어간 기업인수목적회사 제외',12 UNION ALL
+ SELECT 'exclude_warning',   '관리·경고 종목 제외', 'bool',   '1',   NULL,NULL,      NULL,NULL,'1이면 관리종목·거래정지·정리매매·투자유의/경고/위험 종목 제외',13 UNION ALL
+ SELECT 'stale_days',        '종목마스터 허용 경과일','int',  '5',   '1','30',       NULL,'일','종목마스터 갱신이 이 일수보다 오래되면 신규 매수 차단',14 UNION ALL
+ SELECT 'buy_amount',        '1회 매수금액',        'int',    '150000','10000','100000000',NULL,'원','신규 진입 시 종목당 매수금액 (저빈도·고확신 전략이라 다른 전략보다 크게)',15 UNION ALL
+ SELECT 'max_new_per_day',   '일 신규 진입 종목수', 'int',    '2',   '0','50',       NULL,'종목','하루에 새로 진입할 최대 종목 수 (0이면 신규진입 안 함)',16 UNION ALL
+ SELECT 'order_type',        '주문 유형',           'enum',   '3',   NULL,NULL,      '3:시장가,0:지정가(보통),6:최유리지정가',NULL,'kt10000 trde_tp',17
+) p ON a.code='trend_position'
+ON DUPLICATE KEY UPDATE label=VALUES(label), value_type=VALUES(value_type), default_value=VALUES(default_value),
+  min_value=VALUES(min_value), max_value=VALUES(max_value), enum_options=VALUES(enum_options), unit=VALUES(unit),
+  description=VALUES(description), sort_order=VALUES(sort_order);
+
+-- ---- 파라미터 정의: trend_position_exit --------------------------------
+INSERT INTO algorithm_param_def (algorithm_id, param_key, label, value_type, default_value, min_value, max_value, enum_options, unit, description, sort_order)
+SELECT a.id, p.k, p.label, p.t, p.d, p.mn, p.mx, p.eo, p.u, p.ds, p.so FROM algorithm a JOIN (
+ SELECT 'exit_ma_period'     k,'추세이탈 이동평균 기간' label,'int' t,'120' d,'5' mn,'500' mx,NULL eo,'일' u,'현재가가 확정 일봉 기준 이 기간 단순이동평균 아래로 내려가면 전량 매도(추세이탈)' ds,1 so UNION ALL
+ SELECT 'trail_lookback_days','트레일링 기준 거래일수', 'int',   '10',  '2','60',       NULL,'일','현재가가 최근 이 거래일수(확정 일봉)의 최저 저가 아래로 내려가면 전량 매도. 매 주기 일봉에서 재계산',2
+) p ON a.code='trend_position_exit'
 ON DUPLICATE KEY UPDATE label=VALUES(label), value_type=VALUES(value_type), default_value=VALUES(default_value),
   min_value=VALUES(min_value), max_value=VALUES(max_value), enum_options=VALUES(enum_options), unit=VALUES(unit),
   description=VALUES(description), sort_order=VALUES(sort_order);

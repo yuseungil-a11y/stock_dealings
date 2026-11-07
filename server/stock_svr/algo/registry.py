@@ -120,6 +120,8 @@ def _ensure_loaded() -> None:
         momentum_screen,
         risk_guard,
         take_profit,
+        trend_position,
+        trend_position_exit,
         universe_filter,
         volatility_breakout,
     )

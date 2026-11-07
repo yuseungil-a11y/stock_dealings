@@ -147,6 +147,8 @@ class TakeProfit(Algorithm):
         # scope=engine: 이 시스템의 진입 알고리즘이 산 종목만 관리(수동매수 종목 제외)
         if scope == "engine" and not ctx.position(stk_cd).get("entry_algo"):
             return None, False
+        if ctx.position(stk_cd).get("entry_algo") == "trend_position":
+            return None, False  # 중장기 전략은 trend_position_exit 가 전담
 
         rt = ctx.holding_profit_rate(stk_cd)
         # 손절선에도 동시에 도달했으면 risk_guard 가 전담한다(동시조건시 손절 우선 - 손절만

@@ -295,6 +295,10 @@ class FakeDb:
         st["last_buy_price"] = price
         if avg_down:
             st["avg_down_count"] += 1
+            if not st.get("entry_algo"):
+                st["entry_algo"] = algo_code  # 실제 SQL: COALESCE(entry_algo, VALUES(entry_algo))
+        else:
+            st["entry_algo"] = algo_code  # 실제 SQL: 신규 진입은 항상 덮어쓴다(H1)
 
     def upsert_position_state(self, account_id, stk_cd, **fields):
         st = self.position_states.setdefault((account_id, stk_cd), {

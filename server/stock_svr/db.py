@@ -514,12 +514,19 @@ class Database:
             # 물타기가 아닌(=신규 진입) 매수 - 이전 익절(take_profit) 추적 상태가 새
             # 포지션에 이어지지 않도록 초기화한다(같은 날 전량 익절 후 재진입 시나리오).
             self.delete_position_exit_state(account_id, stk_cd)
+        # 신규 진입이면 entry_algo 를 항상 새 진입 알고리즘으로 덮어쓴다 - 이전 포지션(전량 매도된
+        # 다른 알고리즘 진입분)의 entry_algo 가 남아 엉뚱한 청산 알고리즘이 관리하는 오염 방지.
+        # 물타기 추가매수면 원래 진입 알고리즘을 그대로 유지한다(기존 값이 NULL 일 때만 채우는
+        # 종전 COALESCE 동작은 물타기 경로에 한해 유지 - 수동매수 종목 물타기 시 기존 동작 보존).
+        # (avg_down 은 bool 파라미터 - 하드코딩된 두 리터럴 중 하나를 고르는 것이라 인젝션 우려 없음)
+        entry_algo_update = ("COALESCE(entry_algo, VALUES(entry_algo))" if avg_down
+                             else "VALUES(entry_algo)")
         self.execute(
             "INSERT INTO position_state (account_id, stk_cd, entry_algo, first_buy_at, last_buy_price, "
             "avg_down_count, total_invested) VALUES (%s,%s,%s,%s,%s,%s,%s) "
             "ON DUPLICATE KEY UPDATE last_buy_price=VALUES(last_buy_price), "
             "total_invested=total_invested+VALUES(total_invested), "
-            "avg_down_count=avg_down_count+%s, entry_algo=COALESCE(entry_algo, VALUES(entry_algo))",
+            f"avg_down_count=avg_down_count+%s, entry_algo={entry_algo_update}",
             (account_id, stk_cd, algo_code, now_kst(), price, 1 if avg_down else 0, int(amount),
              1 if avg_down else 0),
         )
