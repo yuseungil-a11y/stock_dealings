@@ -60,7 +60,11 @@ def to_float(value, default: float | None = None) -> float | None:
 
 
 def norm_stk_cd(code) -> str:
-    """'A005930', '005930_NX', '005930_AL' -> '005930'."""
+    """'A005930', '005930_NX', '005930_AL' -> '005930'; 'A0015N0' -> '0015N0'.
+
+    'A' 접두는 (기존) 뒤가 숫자뿐일 때, 또는 뒤가 정확히 6글자 영숫자(숫자 1개 이상 포함,
+    예: 아로마티카 '0015N0')일 때 뗀다. 그 외 형태(다른 접두사, 길이 불일치 등)는 그대로 둔다.
+    """
     if code is None:
         return ""
     s = str(code).strip().upper()
@@ -69,8 +73,13 @@ def norm_stk_cd(code) -> str:
     for suffix in ("_NX", "_AL"):
         if s.endswith(suffix):
             s = s[: -len(suffix)]
-    if len(s) > 6 and s.startswith("A") and s[1:].isdigit():
-        s = s[1:]
+    if len(s) > 6 and s.startswith("A"):
+        rest = s[1:]
+        if rest.isdigit():
+            s = rest
+        elif (len(rest) == 6 and rest.isascii() and rest.isalnum()
+              and any(ch.isdigit() for ch in rest)):
+            s = rest
     return s
 
 
