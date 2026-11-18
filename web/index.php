@@ -50,6 +50,26 @@ if ($method !== 'POST') {
 if ($method === 'POST') {
     $action = is_string($_POST['action'] ?? null) ? $_POST['action'] : '';
     if (!csrf_valid()) {
+        /* 로그인 요청에 한해서만 막다른 403 페이지 대신 로그인 폼을 다시 보여준다.
+         * 사파리 계열 + 리버스 프록시 HTTPS 환경에서 방금 세팅된 세션 쿠키가 첫 POST 에
+         * 실리지 않아 첫 로그인이 항상 CSRF 실패하던 문제(v1.6.2 SameSite=Lax 완화 후에도 재발) 대응.
+         * - 미인증 상태일 때만 적용(로그인된 세션의 토큰은 건드리지 않음 → 기존 하드 403 유지).
+         * - 토큰을 새로 발급해 폼에 실어 주고, 아이디는 유지·비밀번호는 다시 입력받는다.
+         * - 인증(auth_login)은 수행하지 않으며 상태 변경도 없다. 응답 코드는 403 유지.
+         * login 이외의 모든 액션은 아래 기존 동작(하드 403)을 그대로 따른다. */
+        if ($action === 'login' && $user === null) {
+            unset($_SESSION['csrf']);
+            csrf_token();
+            http_response_code(403);
+            $loginNotice = '세션이 갱신되었습니다. 다시 로그인해 주세요.';
+            $loginUsername = clean_text($_POST['username'] ?? '', 50);
+            $nextParam = is_string($_POST['next'] ?? null) && isset($routes[$_POST['next']])
+                ? $_POST['next'] : 'dashboard';
+            $expiredParam = null;
+            $bye = false;
+            include __DIR__ . '/views/login.php';
+            exit;
+        }
         http_response_code(403);
         $tpl = ['title' => '요청 거부', 'message' => '보안 토큰이 유효하지 않습니다. 페이지를 새로 고친 뒤 다시 시도해 주세요.'];
         render_standalone($tpl);
@@ -187,6 +207,87 @@ if ($method === 'POST') {
         );
         header('Location: ' . url_page('control.algorithms'), true, 303);
         exit;
+    } elseif ($action === 'holding_sell_protect_save') {
+        /* 보유종목 매도보호(매도 알고리즘 제외) 지정/해제(관리자 전용).
+         * 보호 종목에는 -7% 손절(risk_guard)을 포함한 어떤 매도 알고리즘 신호도 나가지 않는다 —
+         * 서버 runner.run_cycle 이 매 사이클 position_state.sell_protected 를 읽어 걸러낸다.
+         * 이 동작은 position_state 의 매도보호 3컬럼만 쓰며 주문 · 설정 · 파라미터는 바꾸지 않는다. */
+        if ($user === null || !auth_is_admin()) {
+            http_response_code(403);
+            render_standalone(['title' => '접근 권한 없음',
+                'message' => '매도보호 지정/해제는 관리자만 할 수 있습니다.']);
+            exit;
+        }
+        $spAccounts = repo_accounts();
+        $spAccount = repo_resolve_account($spAccounts);
+        $spAccountId = $spAccount !== null ? (int)$spAccount['id'] : 0;
+        // 폼을 띄운 계좌와 현재 세션 계좌가 다르면(다른 탭에서 계좌 전환 등) 엉뚱한 계좌에 쓰지 않는다
+        $formAccountId = clean_int($_POST['account_id'] ?? 0, 0);
+        $retQuery = array_filter([
+            'sort' => clean_enum($_POST['sort'] ?? '', array_keys(HOLDING_SORTS), ''),
+            'q' => clean_text($_POST['q'] ?? '', 30),
+        ], static fn($v) => $v !== '');
+        if ($spAccountId <= 0 || $formAccountId !== $spAccountId) {
+            flash_set('계좌 정보가 맞지 않아 저장하지 않았습니다. 화면을 새로 고친 뒤 다시 시도해 주세요.', 'err');
+            header('Location: ' . url_page('account.holdings', $retQuery), true, 303);
+            exit;
+        }
+        $protect = [];
+        foreach ((array)($_POST['protect'] ?? []) as $cd) {
+            $cd = clean_text($cd, 12);
+            if ($cd !== '') {
+                $protect[] = $cd;
+            }
+        }
+        $shown = [];
+        foreach ((array)($_POST['shown'] ?? []) as $cd) {
+            $cd = clean_text($cd, 12);
+            if ($cd !== '') {
+                $shown[] = $cd;
+            }
+        }
+        $res = repo_update_sell_protect($spAccountId, $protect, $user['username'], $shown);
+        flash_set(
+            $res['ok']
+                ? ('매도보호 설정을 저장했습니다(' . $res['changed'] . '건 변경, 현재 보호 ' . $res['protected']
+                    . '종목). 서버가 다음 평가 주기부터 반영합니다 — 보호 종목은 손절을 포함한 모든 매도 '
+                    . '알고리즘이 작동하지 않습니다.')
+                : '일부 또는 전체 종목의 매도보호 설정을 저장하지 못했습니다. 잠시 후 다시 시도해 주세요.',
+            $res['ok'] ? ($res['protected'] > 0 ? 'warn' : 'ok') : 'err'
+        );
+        header('Location: ' . url_page('account.holdings', $retQuery), true, 303);
+        exit;
+    } elseif ($action === 'sell_protect_clear') {
+        /* 매도보호 단건 해제(관리자 전용). 보유종목 표(holding 기준)에 나오지 않는
+         * 전량매도 종목의 남은 매도보호를 수동으로 해제하기 위한 것이다(자동 해제는 하지 않는다).
+         * position_state 의 매도보호 3컬럼만 쓰며 주문 · 설정 · 파라미터는 바꾸지 않는다. */
+        if ($user === null || !auth_is_admin()) {
+            http_response_code(403);
+            render_standalone(['title' => '접근 권한 없음',
+                'message' => '매도보호 해제는 관리자만 할 수 있습니다.']);
+            exit;
+        }
+        $clrAccounts = repo_accounts();
+        $clrAccount = repo_resolve_account($clrAccounts);
+        $clrAccountId = $clrAccount !== null ? (int)$clrAccount['id'] : 0;
+        // holding_sell_protect_save 와 같이, 폼을 띄운 계좌와 현재 세션 계좌가 다르면 쓰지 않는다
+        $clrFormAccountId = clean_int($_POST['account_id'] ?? 0, 0);
+        if ($clrAccountId <= 0 || $clrFormAccountId !== $clrAccountId) {
+            flash_set('계좌 정보가 맞지 않아 해제하지 않았습니다. 화면을 새로 고친 뒤 다시 시도해 주세요.', 'err');
+            header('Location: ' . url_page('account.holdings'), true, 303);
+            exit;
+        }
+        $clrStkCd = clean_text($_POST['stk_cd'] ?? '', 12);
+        $ok = $clrStkCd !== ''
+            && repo_clear_sell_protect($clrAccountId, $clrStkCd, $user['username']);
+        flash_set(
+            $ok
+                ? ('매도보호를 해제했습니다(' . $clrStkCd . '). 서버가 다음 평가 주기부터 매도 알고리즘을 다시 적용합니다.')
+                : '매도보호를 해제하지 못했습니다(이미 해제됐거나 저장 오류). 화면을 새로 고친 뒤 다시 시도해 주세요.',
+            $ok ? 'ok' : 'err'
+        );
+        header('Location: ' . url_page('account.holdings'), true, 303);
+        exit;
     } elseif ($action === 'algo_params_save') {
         /* 알고리즘 파라미터 값 저장(관리자 전용). 타입 · 범위 · enum 검증은
          * repo_update_algorithm_params() 안에서 서버 Python validate() 와 같은 규칙으로 수행하며,
@@ -279,6 +380,17 @@ if ($page === 'login' || $user === null) {
         $next = isset($routes[$page]) ? $page : 'dashboard';
         header('Location: ' . u('index.php?p=login&next=' . rawurlencode($next))
             . ($expired !== null ? '&expired=' . rawurlencode($expired) : ''), true, 303);
+        exit;
+    }
+    if ($expired !== null) {
+        /* 이번 요청에서 auth_check_lifetime() 이 세션을 막 파기했다(쿠키 삭제 + session_destroy).
+         * 이 상태에서 바로 폼을 그리면 CSRF 토큰이 파기된 세션에 써져 영속되지 않아
+         * 첫 로그인 POST 가 항상 CSRF 실패한다. 다른 미인증 경로와 동일하게 깨끗한 로그인 URL 로
+         * 303 리다이렉트해 새 요청에서 새 세션·새 토큰을 발급받게 한다(만료 안내·next 보존). */
+        $next = isset($_GET['next']) && is_string($_GET['next']) && isset($routes[$_GET['next']])
+            ? $_GET['next'] : 'dashboard';
+        header('Location: ' . u('index.php?p=login&next=' . rawurlencode($next))
+            . '&expired=' . rawurlencode($expired), true, 303);
         exit;
     }
     $nextParam = isset($_GET['next']) && is_string($_GET['next']) && isset($routes[$_GET['next']])

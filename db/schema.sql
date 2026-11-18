@@ -119,6 +119,9 @@ CREATE TABLE IF NOT EXISTS position_state (
   avg_down_count    SMALLINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '물타기(추가매수) 횟수',
   total_invested    BIGINT NOT NULL DEFAULT 0 COMMENT '종목 누적 투입금',
   stopped           TINYINT(1) NOT NULL DEFAULT 0 COMMENT '손절 후 재진입 금지 표시',
+  sell_protected    TINYINT(1) NOT NULL DEFAULT 0 COMMENT '매도보호(1이면 -7% 손절 포함 모든 매도 알고리즘 신호 제외, 수동매도만)',
+  sell_protected_by VARCHAR(50) NULL COMMENT '매도보호 지정/해제자',
+  sell_protected_at DATETIME NULL COMMENT '매도보호 지정/해제 시각',
   updated_at        DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (account_id, stk_cd),
   CONSTRAINT fk_posstate_account FOREIGN KEY (account_id) REFERENCES account (id)

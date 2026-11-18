@@ -33,6 +33,11 @@
 
 
 
+
+## [1.19.0] - 2026-11-17
+### 변경
+- 매도보호(sell_protected) 지원 - position_state.sell_protected=1 인 종목은 run_cycle 에서 모든 알고리즘 신호 수집 직후(필터 이전) SELL 신호를 전부 제외(risk_guard -7% 손절·take_profit·trend_position_exit·물타기 중단 손절 등 포함, signal_log 에 BLOCK '매도보호 지정 - 매도 신호 제외' 기록). 매수 신호는 영향 없음. Database.set_sell_protected() 추가(updated_at 자동갱신 방지 - 물타기 쿨다운·손절 봉인 해제 기준 보존), EngineContext.is_sell_protected() 추가. DB ALTER 선적용 필요.
+
 ## [1.18.13] - 2026-10-14
 ### 변경
 - 체결 완료 알림 메일 본문에 "왜 이 거래를 했는지"(매매 사유) 추가 - orders 테이블의 algo_code/reason 을 조회해 메일 본문에 "매매 사유"(원문 그대로)와 "알고리즘"(코드 + 레지스트리의 한글 이름) 줄을 넣음. 수동/외부 주문이거나 조회에 실패하면 "(사유 정보 없음 - 수동 주문이거나 조회 실패)"로 표시(메일 발송 자체는 막지 않음)

@@ -280,6 +280,10 @@ class EngineContext:
     def position(self, stk_cd: str) -> dict:
         return self.position_states.get(stk_cd) or {}
 
+    def is_sell_protected(self, stk_cd: str) -> bool:
+        """사용자가 매도보호 지정한 종목이면 True (모든 매도 알고리즘 신호 제외 대상)."""
+        return bool(self.position(stk_cd).get("sell_protected"))
+
     def cash_available(self) -> int:
         for key in ("ord_alow_amt", "entr", "d2_entra"):
             val = self.balance.get(key)

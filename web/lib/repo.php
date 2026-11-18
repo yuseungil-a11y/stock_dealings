@@ -182,16 +182,24 @@ function repo_holding_order(string $sort): array
 function repo_holdings(int $accountId, string $sort = 'evlt_amt_desc', string $q = ''): array
 {
     [$order, $orderParams] = repo_holding_order($sort);
-    $sql = 'SELECT * FROM holding WHERE account_id = ?';
+    // position_state(매도보호 여부)를 LEFT JOIN 한다. 두 표 모두 account_id·stk_cd·updated_at 이
+    // 있으므로 WHERE/ORDER BY 의 이 컬럼들은 반드시 h. 접두로 지정한다(ambiguous 방지).
+    // 정렬 조각(repo_holding_order / HOLDING_DELISTED_COND)의 cur_prc·stk_nm·pur_amt·evltv_prft·
+    // prft_rt·evlt_amt 는 holding 에만 있는 컬럼이라 접두 없이도 모호하지 않다.
+    $sql = 'SELECT h.*, COALESCE(ps.sell_protected, 0) AS sell_protected,'
+        . ' ps.sell_protected_by, ps.sell_protected_at'
+        . ' FROM holding h'
+        . ' LEFT JOIN position_state ps ON ps.account_id = h.account_id AND ps.stk_cd = h.stk_cd'
+        . ' WHERE h.account_id = ?';
     $params = [$accountId];
     if ($q !== '') {
-        $sql .= ' AND (stk_cd LIKE ? OR stk_nm LIKE ?)';
+        $sql .= ' AND (h.stk_cd LIKE ? OR h.stk_nm LIKE ?)';
         $like = '%' . $q . '%';
         $params[] = $like;
         $params[] = $like;
     }
     // ORDER BY 는 WHERE 뒤에 오므로 바인딩 순서도 WHERE 값 다음이다.
-    $sql .= ' ORDER BY ' . $order . ', stk_cd ASC';
+    $sql .= ' ORDER BY ' . $order . ', h.stk_cd ASC';
     return array_map('repo_decorate_holding', db_all($sql, array_merge($params, $orderParams)));
 }
 
@@ -684,6 +692,163 @@ function repo_update_algorithm_selection(array $rows, string $by): array
         }
     }
     return ['ok' => $ok, 'changed' => $changed];
+}
+
+/**
+ * 보유종목 매도보호 지정/해제 저장(관리자 전용).
+ *
+ * 매도보호 종목에는 서버가 -7% 손절(risk_guard)을 포함한 어떤 매도 알고리즘 신호도 내보내지 않는다
+ * (server runner.run_cycle 의 단일 필터 지점) — 수동 매도만 가능해진다.
+ *
+ * 전체 동기화 방식(algo_selection_save 와 동일): 대상 종목 중 $stkCodes 에 있으면 1, 없으면 0.
+ * 대상 종목 = 그 계좌의 holding 전체 ∩ $shownCodes(화면에 실제로 표시돼 폼에 포함된 종목).
+ * $shownCodes 로 범위를 좁히는 이유: 검색 필터(q)로 일부만 보일 때 화면에 없던 종목이
+ * "체크 안 됨"으로 간주돼 보호가 풀리는 사고를 막기 위함이다. null 이면 holding 전체가 대상.
+ *
+ * 값이 실제로 바뀌는 종목만 쓴다(sell_protected_by/at 감사값이 의미 있게 남도록).
+ * updated_at=updated_at 으로 position_state 의 ON UPDATE 자동갱신을 막는다 — updated_at 은
+ * 서버의 물타기 쿨다운 · 손절 봉인 익일 해제 기준 시각이라 이 화면이 건드리면 안 된다.
+ *
+ * 필요 DB 권한(stock_web): position_state 에 INSERT(account_id, stk_cd, sell_protected,
+ * sell_protected_by, sell_protected_at), UPDATE(sell_protected, sell_protected_by,
+ * sell_protected_at, updated_at).
+ *
+ * @param string[] $stkCodes 체크된 종목코드
+ * @param string[]|null $shownCodes 폼에 표시됐던 종목코드(null = 전체)
+ * @return array{ok:bool, changed:int, protected:int}
+ */
+function repo_update_sell_protect(int $accountId, array $stkCodes, string $by, ?array $shownCodes = null): array
+{
+    $by = mb_substr($by, 0, 50, 'UTF-8');
+    $want = [];
+    foreach ($stkCodes as $c) {
+        if (is_string($c) && $c !== '') {
+            $want[$c] = true;
+        }
+    }
+    $scope = null;
+    if ($shownCodes !== null) {
+        $scope = [];
+        foreach ($shownCodes as $c) {
+            if (is_string($c) && $c !== '') {
+                $scope[$c] = true;
+            }
+        }
+    }
+    $changed = 0;
+    $protected = 0;
+    $ok = true;
+    try {
+        // 정본 보유종목은 항상 DB 에서 다시 읽는다 — 폼의 종목코드는 holding 에 있는 것만 인정
+        $rows = db_all(
+            'SELECT h.stk_cd, COALESCE(ps.sell_protected, 0) AS sell_protected
+               FROM holding h
+               LEFT JOIN position_state ps ON ps.account_id = h.account_id AND ps.stk_cd = h.stk_cd
+              WHERE h.account_id = ?',
+            [$accountId]
+        );
+    } catch (Throwable $e) {
+        @error_log('[stock-web] sell_protect_load_failed :: ' . $e->getMessage());
+        return ['ok' => false, 'changed' => 0, 'protected' => 0];
+    }
+    foreach ($rows as $r) {
+        $cd = (string)$r['stk_cd'];
+        $cur = (int)$r['sell_protected'] === 1 ? 1 : 0;
+        if ($scope !== null && !isset($scope[$cd])) {
+            $protected += $cur; // 화면 밖 종목은 손대지 않는다(현재 상태 유지)
+            continue;
+        }
+        $new = isset($want[$cd]) ? 1 : 0;
+        $protected += $new;
+        if ($new === $cur) {
+            continue;
+        }
+        try {
+            db_exec(
+                'INSERT INTO position_state (account_id, stk_cd, sell_protected, sell_protected_by, sell_protected_at)
+                 VALUES (?, ?, ?, ?, NOW())
+                 ON DUPLICATE KEY UPDATE sell_protected = VALUES(sell_protected),
+                   sell_protected_by = VALUES(sell_protected_by), sell_protected_at = VALUES(sell_protected_at),
+                   updated_at = updated_at',
+                [$accountId, $cd, $new, $by]
+            );
+            $changed++;
+        } catch (Throwable $e) {
+            @error_log('[stock-web] sell_protect_save_failed :: ' . $cd . ' :: ' . $e->getMessage());
+            $ok = false;
+        }
+    }
+    return ['ok' => $ok, 'changed' => $changed, 'protected' => $protected];
+}
+
+/**
+ * 매도보호 지정 종목 전체(보유 여부 무관).
+ *
+ * position_state 는 원장이라 전량매도 후에도 행과 sell_protected 플래그가 남는다. 보유종목 표는
+ * holding 기준이라 그런 종목이 보이지 않으므로, 이 목록으로 별도 표시해 수동 해제할 수 있게 한다
+ * (전량매도 시 자동 해제는 하지 않는다 — 수동 해제만 유지하기로 결정됨).
+ * 종목명은 stock_master 우선, 없으면 holding 의 이름, 둘 다 없으면 null.
+ *
+ * @return array<int, array{stk_cd:string, stk_nm:?string, sell_protected_by:?string,
+ *                          sell_protected_at:?string, currently_held:bool}>
+ */
+function repo_sell_protected_list(int $accountId): array
+{
+    try {
+        $rows = db_all(
+            'SELECT ps.stk_cd, COALESCE(sm.stk_nm, h.stk_nm) AS stk_nm,
+                    ps.sell_protected_by, ps.sell_protected_at,
+                    (h.stk_cd IS NOT NULL) AS currently_held
+               FROM position_state ps
+               LEFT JOIN stock_master sm ON sm.stk_cd = ps.stk_cd
+               LEFT JOIN holding h ON h.account_id = ps.account_id AND h.stk_cd = ps.stk_cd
+              WHERE ps.account_id = ? AND ps.sell_protected = 1
+              ORDER BY currently_held ASC, ps.sell_protected_at DESC, ps.stk_cd ASC',
+            [$accountId]
+        );
+    } catch (Throwable $e) {
+        @error_log('[stock-web] sell_protect_list_failed :: ' . $e->getMessage());
+        return [];
+    }
+    $out = [];
+    foreach ($rows as $r) {
+        $out[] = [
+            'stk_cd' => (string)$r['stk_cd'],
+            'stk_nm' => $r['stk_nm'] !== null ? (string)$r['stk_nm'] : null,
+            'sell_protected_by' => $r['sell_protected_by'] !== null ? (string)$r['sell_protected_by'] : null,
+            'sell_protected_at' => $r['sell_protected_at'] !== null ? (string)$r['sell_protected_at'] : null,
+            'currently_held' => (int)$r['currently_held'] === 1,
+        ];
+    }
+    return $out;
+}
+
+/**
+ * 매도보호 단건 해제(관리자 전용) — 보유하지 않는(전량매도된) 종목도 해제할 수 있다.
+ * 이미 해제된 행은 `AND sell_protected = 1` 조건으로 건드리지 않는다(감사값 보존).
+ * updated_at=updated_at 으로 ON UPDATE 자동갱신을 막는다(repo_update_sell_protect 와 같은 이유 —
+ * 물타기 쿨다운 · 손절 봉인 익일 해제 기준 시각을 웹이 바꾸지 않게 함).
+ * 필요 DB 권한은 repo_update_sell_protect 의 UPDATE 권한 범위 안이다(추가 GRANT 불필요).
+ */
+function repo_clear_sell_protect(int $accountId, string $stkCd, string $by): bool
+{
+    if ($accountId <= 0 || $stkCd === '') {
+        return false;
+    }
+    $by = mb_substr($by, 0, 50, 'UTF-8');
+    try {
+        $n = db_exec(
+            'UPDATE position_state
+                SET sell_protected = 0, sell_protected_by = ?, sell_protected_at = NOW(),
+                    updated_at = updated_at
+              WHERE account_id = ? AND stk_cd = ? AND sell_protected = 1',
+            [$by, $accountId, $stkCd]
+        );
+    } catch (Throwable $e) {
+        @error_log('[stock-web] sell_protect_clear_failed :: ' . $stkCd . ' :: ' . $e->getMessage());
+        return false;
+    }
+    return $n > 0;
 }
 
 /**

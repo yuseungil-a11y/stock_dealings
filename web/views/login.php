@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 if (!defined('STOCK_APP')) { http_response_code(404); exit('Not Found'); }
-/** @var ?string $loginError @var string $nextParam @var ?string $expiredParam @var bool $bye */
+/** @var ?string $loginError @var ?string $loginNotice @var ?string $loginUsername @var string $nextParam @var ?string $expiredParam @var bool $bye */
 ?>
 <!doctype html>
 <html lang="ko">
@@ -20,6 +20,8 @@ if (!defined('STOCK_APP')) { http_response_code(404); exit('Not Found'); }
 
   <?php if (!empty($loginError)): ?>
     <p class="alert alert-err" role="alert"><?= h($loginError) ?></p>
+  <?php elseif (!empty($loginNotice)): ?>
+    <p class="alert alert-warn" role="status"><?= h($loginNotice) ?></p>
   <?php elseif (($expiredParam ?? null) === 'idle'): ?>
     <p class="alert alert-warn">일정 시간 활동이 없어 자동 로그아웃되었습니다. 다시 로그인해 주세요.</p>
   <?php elseif (($expiredParam ?? null) === 'absolute'): ?>
@@ -35,11 +37,12 @@ if (!defined('STOCK_APP')) { http_response_code(404); exit('Not Found'); }
     <div class="field">
       <label for="username">아이디</label>
       <input type="text" id="username" name="username" maxlength="50" required autocapitalize="off"
-             autocorrect="off" spellcheck="false" autocomplete="username">
+             autocorrect="off" spellcheck="false" autocomplete="username"
+             value="<?= h($loginUsername ?? '') ?>">
     </div>
     <div class="field">
       <label for="password">비밀번호</label>
-      <input type="password" id="password" name="password" maxlength="200" required autocomplete="current-password">
+      <input type="password" id="password" name="password" maxlength="200" required autocomplete="current-password"<?= !empty($loginUsername) ? ' autofocus' : '' ?>>
     </div>
     <button class="btn btn-primary btn-block" type="submit">로그인</button>
   </form>

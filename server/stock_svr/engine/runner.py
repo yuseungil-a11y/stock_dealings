@@ -741,6 +741,27 @@ class Engine:
                 log.info("%s: 신호 %d건", algo.code, len(got))
             signals.extend(got)
 
+        # ★ 매도보호: 사용자가 보유종목 화면에서 지정한 종목은 어떤 매도 알고리즘의 SELL 신호도
+        #    내보내지 않는다(risk_guard 손절 포함 - 사용자가 위험을 알고 선택한 정책, 수동매도만).
+        #    risk_guard.evaluate() 손절 신호도 위 루프에서 합류하므로 이 단일 지점에서 모두 걸러진다.
+        #    매수 신호(물타기 등)는 영향받지 않는다.
+        protected_codes = {stk for stk, st in ctx.position_states.items()
+                           if st.get("sell_protected")}
+        if protected_codes:
+            kept: list[Signal] = []
+            dropped: list[Signal] = []
+            for s in signals:
+                (dropped if (not s.is_buy and s.stk_cd in protected_codes) else kept).append(s)
+            if dropped:
+                for s in dropped:
+                    log.info("매도보호 종목 - 신호 제외: %s %s", s.algo_code, s.stk_cd)
+                    try:
+                        self.db.insert_signal(ctx.run_id, s.algo_code, s.stk_cd, s.stk_nm,
+                                              "BLOCK", s.score, "매도보호 지정 - 매도 신호 제외")
+                    except Exception:  # noqa: BLE001
+                        pass
+                signals = kept
+
         for filt in filters:
             try:
                 signals = filt.filter_signals(ctx, signals) or []

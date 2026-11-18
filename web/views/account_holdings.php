@@ -25,6 +25,18 @@ foreach ($rows as $r) {
 }
 $sumRt = $sumPur > 0 ? $sumPl / $sumPur * 100 : null;
 $sumRtEx = $sumPurEx > 0 ? $sumPlEx / $sumPurEx * 100 : null;
+
+/* 매도보호(매도 알고리즘 제외) — 쓰기는 관리자만. 비관리자는 상태만 읽기전용으로 본다. */
+$isAdmin = auth_is_admin();
+$protectedInList = 0;
+foreach ($rows as $r) {
+    if (!empty($r['sell_protected'])) {
+        $protectedInList++;
+    }
+}
+/* 매도보호 지정 종목 전체(보유 여부 무관) — 전량매도 종목의 남은 보호를 수동 해제하기 위한 별도 패널용 */
+$protList = $accountId !== null ? repo_sell_protected_list($accountId) : [];
+$protectTip = '매도보호 종목:-7% 손절을 포함한 모든 매도 알고리즘이 작동하지 않습니다(수동 매도만 가능).';
 ?>
 <?php if ($accountId === null): ?>
   <?= empty_note('등록된 계좌가 없습니다.', '서버 모듈이 계좌를 등록하면 이 화면에 표시됩니다.') ?>
@@ -59,9 +71,27 @@ $sumRtEx = $sumPurEx > 0 ? $sumPlEx / $sumPurEx * 100 : null;
     <?= empty_note($q !== '' ? '검색 조건에 맞는 보유종목이 없습니다.' : '보유 중인 종목이 없습니다.',
         '서버 모듈이 계좌 잔고를 동기화하면 표시됩니다.') ?>
   <?php else: ?>
+  <p class="alert alert-err"><strong>⚠ 매도제외 체크 주의:</strong> 체크한 종목에는
+    <strong>-7% 손절을 포함한 모든 매도 알고리즘이 전혀 작동하지 않습니다.</strong>
+    주가가 계속 하락해도 자동 매도되지 않으며, <strong>수동 매도(키움 앱 등)만 가능</strong>합니다.
+    매수(물타기 등) 알고리즘은 그대로 동작합니다.
+    <?php if ($protectedInList > 0): ?>
+      현재 목록에서 <strong><?= h(nfmt($protectedInList)) ?>종목</strong>이 매도보호 중입니다.
+    <?php endif; ?></p>
+  <?php if ($isAdmin): ?>
+  <form method="post" action="<?= h(u('index.php')) ?>">
+    <?= csrf_field() ?>
+    <input type="hidden" name="action" value="holding_sell_protect_save">
+    <input type="hidden" name="account_id" value="<?= (int)$accountId ?>">
+    <input type="hidden" name="sort" value="<?= h($sort) ?>">
+    <input type="hidden" name="q" value="<?= h($q) ?>">
+  <?php endif; ?>
   <div class="tablewrap">
     <table class="tbl tbl-sortable">
       <thead><tr>
+        <?php /* data-sort 필수: app.js 정렬은 th[data-sort] 중 순번을 셀 인덱스로 쓰므로,
+                 앞쪽 열에 data-sort 가 없으면 뒤 열 정렬이 한 칸씩 어긋난다. */ ?>
+        <th class="shrink" data-sort="num" title="<?= h($protectTip) ?>">매도제외</th>
         <th data-sort="str">종목명</th><th data-sort="str">코드</th>
         <th class="num" data-sort="num">보유수량</th><th class="num" data-sort="num">매매가능</th>
         <th class="num" data-sort="num">매입가</th><th class="num" data-sort="num">현재가</th>
@@ -75,9 +105,22 @@ $sumRtEx = $sumPurEx > 0 ? $sumPlEx / $sumPurEx * 100 : null;
         $isDel = !empty($r['delisted']);
         $dispRt = holding_display_rate($r);
         $delNote = $isDel ? holding_delisted_note($r) : '';
+        $isProt = !empty($r['sell_protected']);
+        $protBadge = $isProt ? ' ' . badge('매도보호', 'warn', $protectTip
+            . ($r['sell_protected_by'] !== null && $r['sell_protected_by'] !== ''
+                ? ' · 지정: ' . $r['sell_protected_by'] . ' ' . kst($r['sell_protected_at'], 'Y-m-d H:i') : '')) : '';
         ?>
         <tr<?= $isDel ? ' class="row-delisted"' : '' ?>>
-          <td class="stk-nm"><?= h($r['stk_nm']) ?><?= $isDel ? ' ' . delisted_badge() : '' ?></td>
+          <td class="shrink" data-v="<?= $isProt ? 1 : 0 ?>">
+            <?php if ($isAdmin): ?>
+              <input type="hidden" name="shown[]" value="<?= h($r['stk_cd']) ?>">
+              <input type="checkbox" name="protect[]" value="<?= h($r['stk_cd']) ?>"
+                aria-label="<?= h($r['stk_nm'] . ' 매도제외') ?>"<?= $isProt ? ' checked' : '' ?>>
+            <?php else: ?>
+              <input type="checkbox" disabled aria-label="<?= h($r['stk_nm'] . ' 매도제외') ?>"<?= $isProt ? ' checked' : '' ?>>
+            <?php endif; ?>
+          </td>
+          <td class="stk-nm"><?= h($r['stk_nm']) ?><?= $isDel ? ' ' . delisted_badge() : '' ?><?= $protBadge ?></td>
           <td class="stk-cd"><?= h($r['stk_cd']) ?></td>
           <td class="num" data-v="<?= h($r['rmnd_qty']) ?>"><?= h(nfmt($r['rmnd_qty'])) ?></td>
           <td class="num" data-v="<?= h($r['trde_able_qty']) ?>"><?= h(nfmt($r['trde_able_qty'])) ?></td>
@@ -100,7 +143,7 @@ $sumRtEx = $sumPurEx > 0 ? $sumPlEx / $sumPurEx * 100 : null;
       <?php endforeach; ?>
       </tbody>
       <tfoot><tr>
-        <th colspan="6">합계 (<?= h(nfmt(count($rows))) ?>종목)</th>
+        <th colspan="7">합계 (<?= h(nfmt(count($rows))) ?>종목)</th>
         <th class="num"><?= h(money($sumPur)) ?></th>
         <th class="num"><?= h(money($sumEvlt)) ?></th>
         <th class="num <?= h(sign_class($sumPl)) ?>"><?= h(money_signed($sumPl)) ?></th>
@@ -109,7 +152,7 @@ $sumRtEx = $sumPurEx > 0 ? $sumPlEx / $sumPurEx * 100 : null;
       </tr>
       <?php if ($delistedInList > 0 && $sumRtEx !== null): ?>
       <tr>
-        <th colspan="9">상장폐지 종목 제외 시 총수익률 (<?= h(nfmt($delistedInList)) ?>종목 제외)</th>
+        <th colspan="10">상장폐지 종목 제외 시 총수익률 (<?= h(nfmt($delistedInList)) ?>종목 제외)</th>
         <th class="num <?= h(sign_class($sumRtEx)) ?>"><?= h(pct($sumRtEx)) ?></th>
         <th colspan="2"></th>
       </tr>
@@ -117,6 +160,12 @@ $sumRtEx = $sumPurEx > 0 ? $sumPlEx / $sumPurEx * 100 : null;
       </tfoot>
     </table>
   </div>
+  <?php if ($isAdmin): ?>
+    <button class="btn btn-primary" type="submit">매도제외 설정 저장</button>
+  </form>
+  <?php else: ?>
+    <p class="note">매도제외(매도보호) 지정/해제는 관리자만 할 수 있습니다.</p>
+  <?php endif; ?>
   <?php if ($delistedInList > 0): ?>
     <p class="note"><strong>*</strong> 표시 종목은 현재가가 0 이거나 종목명이 <code>(폐)</code> 로 시작하는
       <strong>상장폐지·거래불가</strong> 종목입니다. 키움이 내려주는 수익률(0.00%)이 실제와 다르므로
@@ -124,4 +173,48 @@ $sumRtEx = $sumPurEx > 0 ? $sumPlEx / $sumPurEx * 100 : null;
   <?php endif; ?>
   <?php endif; ?>
 </section>
+
+<?php if ($protList !== []): ?>
+<section class="panel">
+  <div class="panel-h"><h2>매도보호 지정 종목</h2></div>
+  <p class="note">보유하지 않는(전량매도된) 종목도 포함됩니다 — 매도보호는 전량매도해도 자동으로 풀리지 않으므로,
+    필요 없어진 종목은 아래에서 해제할 수 있습니다.</p>
+  <div class="tablewrap">
+    <table class="tbl">
+      <thead><tr>
+        <th>종목명</th><th>코드</th><th>보유</th><th>지정자</th><th>지정시각</th>
+        <?php if ($isAdmin): ?><th class="shrink">해제</th><?php endif; ?>
+      </tr></thead>
+      <tbody>
+      <?php foreach ($protList as $p): ?>
+        <tr>
+          <td class="stk-nm"><?= h($p['stk_nm'] ?? '-') ?></td>
+          <td class="stk-cd"><?= h($p['stk_cd']) ?></td>
+          <td><?= $p['currently_held']
+              ? badge('보유중', 'info')
+              : badge('미보유', 'warn', '현재 보유하지 않는 종목입니다. 다시 매수하면 매도보호가 그대로 적용됩니다.') ?></td>
+          <td><?= h($p['sell_protected_by'] ?? '-') ?></td>
+          <td><?= h(kst($p['sell_protected_at'], 'Y-m-d H:i')) ?></td>
+          <?php if ($isAdmin): ?>
+          <td class="shrink">
+            <form method="post" action="<?= h(u('index.php')) ?>">
+              <?= csrf_field() ?>
+              <input type="hidden" name="action" value="sell_protect_clear">
+              <input type="hidden" name="account_id" value="<?= (int)$accountId ?>">
+              <input type="hidden" name="stk_cd" value="<?= h($p['stk_cd']) ?>">
+              <button class="btn btn-sm" type="submit"
+                aria-label="<?= h(($p['stk_nm'] ?? $p['stk_cd']) . ' 매도보호 해제') ?>">해제</button>
+            </form>
+          </td>
+          <?php endif; ?>
+        </tr>
+      <?php endforeach; ?>
+      </tbody>
+    </table>
+  </div>
+  <?php if (!$isAdmin): ?>
+    <p class="note">매도보호 해제는 관리자만 할 수 있습니다.</p>
+  <?php endif; ?>
+</section>
+<?php endif; ?>
 <?php endif; ?>

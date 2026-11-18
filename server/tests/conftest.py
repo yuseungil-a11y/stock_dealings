@@ -306,6 +306,15 @@ class FakeDb:
             "last_buy_price": None, "stopped": 0})
         st.update(fields)
 
+    def set_sell_protected(self, account_id, stk_cd, protected, updated_by):
+        """실제 Database 와 같이: 행이 없으면 만들고 매도보호 3컬럼만 갱신한다."""
+        st = self.position_states.setdefault((account_id, stk_cd), {
+            "entry_algo": None, "avg_down_count": 0, "total_invested": 0,
+            "last_buy_price": None, "stopped": 0})
+        st["sell_protected"] = 1 if protected else 0
+        st["sell_protected_by"] = updated_by
+        st["sell_protected_at"] = _dt.datetime.now()
+
     # -- position_exit_state (take_profit) ------------------------------ #
     def get_position_exit_state(self, account_id, stk_cd):
         self._maybe_fail("get_position_exit_state")

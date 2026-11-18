@@ -149,6 +149,13 @@ def main() -> int:
         cur.execute(f"GRANT UPDATE (value, updated_by, updated_at) "
                     f"ON `{DBNAME}`.`algorithm_param_value` TO 'stock_web'@'{host}'")
         cur.execute(f"GRANT INSERT ON `{DBNAME}`.`algorithm_param_history` TO 'stock_web'@'{host}'")
+        # 웹의 "보유종목 매도제외(매도보호)" — position_state 의 매도보호 3컬럼만 쓸 수 있게 제한한다
+        # (수동매수 종목은 행이 없을 수 있어 INSERT 도 필요. updated_at 은 값을 보존하는
+        #  `updated_at=updated_at` 대입용 - 물타기 쿨다운 기준 시각을 웹이 바꾸지 않게 함)
+        cur.execute(f"GRANT INSERT (account_id, stk_cd, sell_protected, sell_protected_by, sell_protected_at) "
+                    f"ON `{DBNAME}`.`position_state` TO 'stock_web'@'{host}'")
+        cur.execute(f"GRANT UPDATE (sell_protected, sell_protected_by, sell_protected_at, updated_at) "
+                    f"ON `{DBNAME}`.`position_state` TO 'stock_web'@'{host}'")
     cur.execute("FLUSH PRIVILEGES")
     print("DB 계정 stock_svr / stock_web 생성·권한 부여 완료")
 

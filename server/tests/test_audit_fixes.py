@@ -14,7 +14,8 @@ import pytest
 
 from conftest import SERVER_DIR, FakeDb, FakeMarket, make_ctx
 from stock_svr import single_instance as si
-from stock_svr.algo.base import KIND_LIQUIDATE, KIND_STOP_LOSS, Signal, amount_with_buffer
+from stock_svr.algo.base import (KIND_AVG_DOWN, KIND_LIQUIDATE, KIND_STOP_LOSS, KIND_TAKE_PROFIT,
+                                 Signal, amount_with_buffer)
 from stock_svr.algo.params import ParamSet
 from stock_svr.algo.registry import build as build_algo
 from stock_svr.algo.risk_guard import RiskGuard
@@ -939,3 +940,125 @@ def test_same_process_reacquire_is_idempotent(tmp_path):
     with si.single_instance(lock):
         assert si.acquire(lock) == lock
     assert lock.exists() is False
+
+
+# ====================================================================== #
+# 매도보호 : 사용자가 지정한 종목은 어떤 매도 알고리즘 신호도 주문되지 않는다
+#            (risk_guard 손절 포함 - 사용자가 위험을 알고 선택한 정책). 매수는 영향 없음.
+# ====================================================================== #
+class _StubAlgo:
+    """고정 신호를 내는 대역 알고리즘(take_profit/물타기 흉내)."""
+
+    def __init__(self, code: str, signals: list[Signal], role: str = "entry"):
+        self.code = code
+        self.role = role
+        self._signals = signals
+
+    def evaluate(self, ctx):
+        return [Signal(**{k: getattr(s, k) for k in (
+            "algo_code", "stk_cd", "side", "qty", "price", "trde_tp", "amount", "reason",
+            "stk_nm", "score", "kind")}) for s in self._signals]
+
+
+def _protect_engine(db: FakeDb, rest: FakeRest, monkeypatch, stubs=()) -> Engine:
+    """risk_guard(실물) + 대역 알고리즘으로 run_cycle 을 돌리는 엔진. 보유 2종목 모두 -50%."""
+    from stock_svr.algo import registry
+
+    eng = engine_with(db, rest, [risk_guard_meta(trade_start_time="", trade_end_time="")])
+    db.holding_rows = [
+        holding("005930", "삼성전자", qty=10, cur=10_000, prft_rt=-50),
+        holding("000660", "SK하이닉스", qty=10, cur=10_000, prft_rt=-50),
+    ]
+    if stubs:
+        real_build_all = registry.build_all
+        monkeypatch.setattr(registry, "build_all",
+                            lambda *a, **k: list(real_build_all(*a, **k)) + list(stubs))
+    eng.start_auto_trading(by="테스트")
+    return eng
+
+
+def _sent_codes(rest: FakeRest, api: str = "kt10001") -> list[str]:
+    return [body.get("stk_cd") for name, body in rest.order_calls if name == api]
+
+
+def test_sell_protected_blocks_risk_guard_stop_loss(monkeypatch):
+    """가장 중요: 매도보호 종목은 -7% 등 손절선 아래여도 손절 매도 주문이 나가지 않는다."""
+    db, rest = FakeDb(), FakeRest()
+    db.set_sell_protected(1, "005930", True, "admin")
+    eng = _protect_engine(db, rest, monkeypatch)
+    result = eng.run_cycle(force_market=True)
+
+    assert all(s.stk_cd != "005930" for s in result["signals"])
+    assert "005930" not in _sent_codes(rest)
+    assert not any(o.get("stk_cd") == "005930" for o in db.orders)
+    assert any(s["algo_code"] == "risk_guard" and s["stk_cd"] == "005930"
+               and s["signal_type"] == "BLOCK" and "매도보호" in (s["detail"] or "")
+               for s in db.signals)
+    # 보호 안 된 종목은 그대로 손절된다(회귀 없음)
+    assert "000660" in _sent_codes(rest)
+
+
+def test_sell_protected_blocks_take_profit(monkeypatch):
+    db, rest = FakeDb(), FakeRest()
+    db.set_sell_protected(1, "005930", True, "admin")
+    tp = Signal(algo_code="take_profit", stk_cd="005930", stk_nm="삼성전자", side="SELL",
+                qty=5, price=None, trde_tp="3", kind=KIND_TAKE_PROFIT, reason="익절")
+    eng = _protect_engine(db, rest, monkeypatch, stubs=[_StubAlgo("take_profit", [tp])])
+    result = eng.run_cycle(force_market=True)
+
+    assert all(s.stk_cd != "005930" for s in result["signals"])
+    assert "005930" not in _sent_codes(rest)
+    assert any(s["algo_code"] == "take_profit" and s["stk_cd"] == "005930"
+               and s["signal_type"] == "BLOCK" for s in db.signals)
+
+
+def test_unprotected_stock_sells_normally(monkeypatch):
+    """매도보호 해제(0) 또는 미지정 종목은 평소대로 손절·익절 신호가 처리된다."""
+    db, rest = FakeDb(), FakeRest()
+    db.set_sell_protected(1, "005930", True, "admin")
+    db.set_sell_protected(1, "005930", False, "admin")      # 해제
+    eng = _protect_engine(db, rest, monkeypatch)
+    result = eng.run_cycle(force_market=True)
+
+    codes = {s.stk_cd for s in result["signals"] if not s.is_buy}
+    assert codes == {"005930", "000660"}
+    assert set(_sent_codes(rest)) == {"005930", "000660"}
+    assert not any("매도보호" in (s["detail"] or "") for s in db.signals)
+
+
+def test_sell_protected_does_not_block_buy(monkeypatch):
+    """이번 요구사항은 매도만 막는다 - 매도보호 종목의 매수(물타기 등) 신호는 그대로 통과."""
+    db, rest = FakeDb(), FakeRest()
+    db.set_sell_protected(1, "005930", True, "admin")
+    buy = Signal(algo_code="averaging_down", stk_cd="005930", stk_nm="삼성전자", side="BUY",
+                 qty=1, price=10_000, trde_tp="0", amount=10_000, kind=KIND_AVG_DOWN,
+                 reason="물타기")
+    eng = _protect_engine(db, rest, monkeypatch, stubs=[_StubAlgo("averaging_down", [buy])])
+    result = eng.run_cycle(force_market=True)
+
+    kept = [s for s in result["signals"] if s.stk_cd == "005930"]
+    assert len(kept) == 1 and kept[0].is_buy
+    assert not any(s["algo_code"] == "averaging_down" and s["signal_type"] == "BLOCK"
+                   and "매도보호" in (s["detail"] or "") for s in db.signals)
+    assert "005930" in _sent_codes(rest, "kt10000")
+
+
+def test_is_sell_protected_helper():
+    db = FakeDb()
+    db.set_sell_protected(1, "005930", True, "admin")
+    ctx = make_ctx(db, positions={"005930": db.get_position_states(1)["005930"]})
+    assert ctx.is_sell_protected("005930") is True
+    assert ctx.is_sell_protected("000660") is False
+
+
+def test_set_sell_protected_sql_upserts_audit_columns():
+    db = SqlSpyDb()
+    db.set_sell_protected(1, "005930", True, "admin")
+    sql, args = db.sql[-1]
+    assert "INSERT INTO position_state" in sql and "ON DUPLICATE KEY UPDATE" in sql
+    assert "sell_protected_by=VALUES(sell_protected_by)" in sql
+    # updated_at(물타기 쿨다운·손절 봉인 해제 기준)을 자동갱신하지 않는다
+    assert "updated_at=updated_at" in sql
+    assert args == (1, "005930", 1, "admin")
+    db.set_sell_protected(1, "005930", False, "admin")
+    assert db.sql[-1][1] == (1, "005930", 0, "admin")

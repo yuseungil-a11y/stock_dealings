@@ -472,6 +472,23 @@ class Database:
             vals,
         )
 
+    def set_sell_protected(self, account_id: int, stk_cd: str, protected: bool,
+                           updated_by: str) -> None:
+        """보유종목을 매도보호 지정/해제한다. position_state 행이 아직 없어도(수동매수 등) 생성한다.
+
+        매도보호 종목은 runner.run_cycle 에서 모든 SELL 신호(risk_guard 손절 포함)가 제외된다.
+        `updated_at=updated_at` 으로 ON UPDATE 자동갱신을 막는다 - updated_at 은 물타기 쿨다운
+        (averaging_down)과 손절 봉인(stopped) 익일 해제의 기준 시각이라 보호 지정/해제가 건드리면 안 된다.
+        """
+        self.execute(
+            "INSERT INTO position_state (account_id, stk_cd, sell_protected, sell_protected_by, "
+            "sell_protected_at) VALUES (%s,%s,%s,%s,NOW()) "
+            "ON DUPLICATE KEY UPDATE sell_protected=VALUES(sell_protected), "
+            "sell_protected_by=VALUES(sell_protected_by), sell_protected_at=VALUES(sell_protected_at), "
+            "updated_at=updated_at",
+            (account_id, stk_cd, 1 if protected else 0, updated_by),
+        )
+
     def reset_stale_positions(self, account_id: int, held_codes: list[str], today: _dt.date) -> int:
         """보유목록에 없는 종목의 투입금/물타기 회차를 초기화한다 (B4/S-13).
 
